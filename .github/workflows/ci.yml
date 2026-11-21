@@ -42,13 +42,14 @@ jobs:
       - name: Build application and maintained test targets
         run: |
           cmake --build --preset linux --target \
-            circsim_editor test_physics test_ui_canvas \
+            circsim_editor http_server test_net test_physics test_ui_canvas \
             test_circsim_editor_document test_circsim_editor_canvas \
             test_circsim_editor_canvas_cost test_circsim_editor_panel \
             test_circsim_editor_side_panels test_circsim_editor_waveform_prof
 
       - name: Run maintained regression tests
         run: |
+          build/linux/bin/test_net
           build/linux/bin/test_physics
           build/linux/bin/test_ui_canvas
           build/linux/bin/test_circsim_editor_document
@@ -61,6 +62,22 @@ jobs:
           build/linux/bin/test_circsim_editor_side_panels \
             --test-case="stale problem locations cannot be navigated after an edit"
           build/linux/bin/test_circsim_editor_waveform_prof
+
+      - name: Smoke-test the generic HTTP server
+        shell: bash
+        run: |
+          build/linux/bin/http_server 127.0.0.1 18080 >/tmp/http_server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..50}; do
+            if curl -fsS http://127.0.0.1:18080/ -o /tmp/http_server_page.html; then
+              break
+            fi
+            sleep 0.1
+          done
+          grep -q "ws::net HTTP web transport test" /tmp/http_server_page.html
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/)" = "405"
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/missing)" = "404"
 
       - name: Exercise waveform profiler join modes
         shell: bash
