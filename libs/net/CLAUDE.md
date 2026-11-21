@@ -1,7 +1,7 @@
 # libs/net - CLAUDE.md
 
-Networking in the workspace: a single-threaded event loop, TCP client/server
-with length-prefixed message framing, UDP, and LAN discovery - all behind a
+Networking in the workspace: a single-threaded event loop, framed TCP
+messages, raw TCP byte streams, UDP, and LAN discovery - all behind a
 Result-only API. Consumers see ws::net names only; libuv never appears
 under include/ (it lives behind pimpls, included only by src/backend/uv).
 
@@ -15,7 +15,7 @@ under include/ (it lives behind pimpls, included only by src/backend/uv).
 - `event_loop.hpp`: `EventLoop` - run/stop, `post()` (the ONE thread-safe
   call), `TimerHandle` timers.
 - `tcp.hpp`: `TcpListener`/`TcpConnection` - message API over framed TCP.
-- `raw_tcp.hpp`: `RawTcpListener`/`RawTcpConnection` - unframed byte-stream TCP for protocols such as HTTP.
+- `raw_tcp.hpp`: `RawTcpListener`/`RawTcpConnection` - unframed byte-stream TCP (listen/connect/send/close) for protocols such as HTTP.
 - `udp.hpp`: `UdpSocket` - bind/send_to/on_packet.
 - `discovery.hpp`: `DiscoveryAnnouncer`/`DiscoveryBrowser` - LAN discovery
   over UDP broadcast.
@@ -55,11 +55,11 @@ under include/ (it lives behind pimpls, included only by src/backend/uv).
   the announcer's Ptr does NOT stop it (the socket's keepalive owns the
   Impl; tests/test_discovery.cpp pins the beat-after-drop case). `stop()`
   is the off switch.
-- Message spans: `on_message` delivers a `std::span<const std::byte>` into
-  the connection's read buffer, valid ONLY during the callback. Debug
-  builds poison the delivered bytes (0xCD) right after the callback
-  returns, so a stashed span reads garbage on its next access - see the
-  deliberate "do not do this" case in `tests/test_frame.cpp`.
+- Message/byte spans: framed `on_message` and raw `on_bytes` deliver a
+  `std::span<const std::byte>` into the connection's read buffer, valid
+  ONLY during the callback. Copy bytes that need to outlive the callback.
+  Raw `send()` copies the supplied bytes into the transport write queue;
+  it never adds or removes framing.
 - Public headers include only the standard library and `ws/` headers.
 
 ## Known tradeoffs
@@ -81,12 +81,10 @@ under include/ (it lives behind pimpls, included only by src/backend/uv).
 
 ## Tests
 ctest --preset debug -R net
-57 cases: api/errors/address, framing (with the deliberate span-lifetime
-"do not do this" case), loop, socket-free connection core over the fake
-transport, TCP over loopback, UDP over loopback, and discovery over a
-private loopback channel (real broadcast is not CI-testable; the wire
-format is spelled out in the foreign-packet test so a format change
-fails there). Loopback tests need nothing beyond the machine itself
+Coverage includes API/errors/address, framing, loop, socket-free connection
+core over the fake transport, framed TCP and raw TCP over loopback, UDP over
+loopback, and discovery over a private loopback channel (real broadcast is
+not CI-testable; the wire format is pinned by the foreign-packet test). Loopback tests need nothing beyond the machine itself
 (127.0.0.1, ephemeral ports); the socket-free core tests run everywhere.
 `fuzz_net` is the frame-parser fuzz driver - desktop-only, deliberately
 not in ctest; smoke it by hand with a small iteration count.
