@@ -19,6 +19,7 @@ struct RawTcpConnection::Impl final
   std::function<void(std::span<const std::byte>)> bytes_callback;
   std::function<void(NetError)> closed_callback;
   bool dead = false;
+  bool closing = false;
 
   Impl(std::unique_ptr<detail::IStreamPeer> stream, Address address)
       : peer_stream(std::move(stream)), peer_address(std::move(address)) {
@@ -50,13 +51,14 @@ void RawTcpConnection::set_on_closed(
   impl_->closed_callback = std::move(callback);
 }
 ws::core::Status RawTcpConnection::send(std::span<const std::byte> bytes) {
-  if (impl_->dead) return fail(NetError::already_closed, "raw TCP connection is closed");
+  if (impl_->dead || impl_->closing) return fail(NetError::already_closed, "raw TCP connection is closed");
   if (bytes.empty()) return {};
   impl_->peer_stream->write(std::vector<std::byte>(bytes.begin(), bytes.end()));
   return {};
 }
 ws::core::Status RawTcpConnection::close() {
-  if (impl_->dead) return fail(NetError::already_closed, "raw TCP connection is closed");
+  if (impl_->dead || impl_->closing) return fail(NetError::already_closed, "raw TCP connection is closed");
+  impl_->closing = true;
   impl_->peer_stream->finish_and_close();
   return {};
 }
