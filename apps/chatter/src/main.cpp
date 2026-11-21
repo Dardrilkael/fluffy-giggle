@@ -117,6 +117,8 @@ bool jni_threw(JNIEnv* env, const char* what) {
 // px. The method IDs resolve once (they are JVM-stable); every jobject
 // is a local reference and gets deleted before returning - a per-frame
 // poll that leaked them would exhaust the local-ref table in seconds.
+// Falls back to the deprecated getWindowInsets() if getRootWindowInsets()
+// is missing (some API 30 devices lack it on DecorView).
 void poll_nav_inset() {
   if (g_activity == nullptr || g_activity->clazz == nullptr) {
     return;
@@ -129,7 +131,10 @@ void poll_nav_inset() {
   static jmethodID get_window = nullptr;   // Activity.getWindow
   static jmethodID get_decor = nullptr;    // Window.getDecorView
   static jmethodID get_insets = nullptr;   // View.getRootWindowInsets
+  static jmethodID get_insets_fallback = nullptr; // View.getWindowInsets (deprecated)
   static jmethodID get_bottom = nullptr;   // WindowInsets.getSystemWindowInsetBottom
+  static bool tried_insets = false;
+  static bool tried_fallback = false;
   if (get_window == nullptr) {
     const jclass cls = e->GetObjectClass(g_activity->clazz);
     get_window = e->GetMethodID(cls, "getWindow", "()Landroid/view/Window;");
@@ -156,19 +161,36 @@ void poll_nav_inset() {
   if (decor == nullptr || jni_threw(e, "getDecorView failed")) {
     return;
   }
-  if (get_insets == nullptr) {
+  // Try getRootWindowInsets first (API 30+), fall back to getWindowInsets
+  if (!tried_insets && get_insets == nullptr) {
     const jclass cls = e->GetObjectClass(decor);
-    get_insets =
-        e->GetMethodID(cls, "getRootWindowInsets", "()Landroid/WindowInsets;");
+    get_insets = e->GetMethodID(cls, "getRootWindowInsets", "()Landroid/WindowInsets;");
     e->DeleteLocalRef(cls);
-    if (get_insets == nullptr || jni_threw(e, "getRootWindowInsets missing")) {
-      e->DeleteLocalRef(decor);
-      return;
+    if (get_insets == nullptr) {
+      e->ExceptionClear(); // NoSuchMethodError is a linkage error, clear it
     }
+    tried_insets = true;
   }
-  const jobject insets = e->CallObjectMethod(decor, get_insets);
+  if (get_insets == nullptr && !tried_fallback && get_insets_fallback == nullptr) {
+    const jclass cls = e->GetObjectClass(decor);
+    get_insets_fallback = e->GetMethodID(cls, "getWindowInsets", "()Landroid/view/WindowInsets;");
+    e->DeleteLocalRef(cls);
+    if (get_insets_fallback == nullptr) {
+      e->ExceptionClear();
+    }
+    tried_fallback = true;
+  }
+  jmethodID use_insets = get_insets ? get_insets : get_insets_fallback;
+  if (use_insets == nullptr) {
+    e->DeleteLocalRef(decor);
+    if (jni_threw(e, "both inset getters missing")) {
+      // already logged
+    }
+    return;
+  }
+  const jobject insets = e->CallObjectMethod(decor, use_insets);
   e->DeleteLocalRef(decor);
-  if (insets == nullptr || jni_threw(e, "getRootWindowInsets failed")) {
+  if (insets == nullptr || jni_threw(e, "inset getter failed")) {
     return;
   }
   if (get_bottom == nullptr) {
