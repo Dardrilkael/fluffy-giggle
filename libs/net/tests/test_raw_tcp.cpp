@@ -1,10 +1,11 @@
 // Real-socket tests for the unframed public TCP byte-stream API.
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include <ws/net/address.hpp>
@@ -45,12 +46,8 @@ TEST_CASE("raw TCP transfers exact unframed bytes and closes gracefully") {
   const Address bound = listener->local();
   REQUIRE(bound.port != 0);
 
-  const std::vector<std::byte> payload{
-      std::byte{'G'}, std::byte{'E'}, std::byte{'T'}, std::byte{' '},
-      std::byte{'/'}, std::byte{' '}, std::byte{'H'}, std::byte{'T'},
-      std::byte{'T'}, std::byte{'P'}, std::byte{'/'}, std::byte{'1'},
-      std::byte{'.'}, std::byte{'1'}, std::byte{'\r'}, std::byte{'\n'},
-      std::byte{'\r'}, std::byte{'\n'}};
+  constexpr std::string_view request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+  const auto payload = std::as_bytes(std::span{request.data(), request.size()});
 
   RawTcpConnection::Ptr server;
   RawTcpConnection::Ptr client;
@@ -76,17 +73,30 @@ TEST_CASE("raw TCP transfers exact unframed bytes and closes gracefully") {
     });
   });
 
-  auto client_result = RawTcpConnection::Ptr{};
-  auto connected = ws::net::RawTcpListener::listen; // keep API names type-checked
-  (void)connected;
-  // A raw client is intentionally not exposed yet; the test uses the
-  // listener API's real accepted socket and a native loopback client below.
-  // This test is completed by the companion socket-level test in CI.
-  (void)client_result;
-  (void)client;
-  (void)payload;
-  (void)received_exact_payload;
-  (void)watchdog;
-  (void)loop;
-  FAIL("raw TCP client connect API is not part of the current public surface");
+  auto client_result = RawTcpConnection::connect(loop, bound);
+  REQUIRE(client_result.has_value());
+  client = *client_result;
+  client->set_on_connected([&] {
+    const auto sent = client->send(payload);
+    CHECK(sent.has_value());
+  });
+  client->set_on_bytes([&](std::span<const std::byte> bytes) {
+    received_exact_payload =
+        bytes.size() == payload.size() &&
+        std::equal(bytes.begin(), bytes.end(), payload.begin(), payload.end());
+    (void)client->close();
+  });
+  client->set_on_closed([&](NetError why) {
+    CHECK(why == NetError::connection_closed);
+    ++client_closed;
+    if (server_closed != 0) loop.stop();
+  });
+
+  const auto run_result = loop.run();
+  REQUIRE(run_result.has_value());
+  CHECK_FALSE(watchdog.bitten);
+  CHECK(callback_replaced_itself);
+  CHECK(received_exact_payload);
+  CHECK(server_closed == 1);
+  CHECK(client_closed == 1);
 }
