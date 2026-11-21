@@ -1118,23 +1118,30 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     pf.yr1 = ws::circsim::expand_range(y1_lo, y1_hi);
     handle_plot_input(ed, gui, pf);  // the hands; pf carries the effective view
 
-    const auto sx = [&](double v) {
-        return static_cast<float>(
-            fx + (v - pf.vxr.lo) / (pf.vxr.hi - pf.vxr.lo) * iw);
+    // The mappings, in double: the series loop subtracts the frame origin
+    // from these (frame-local points for the cached geometry) before the
+    // float cast, so the screen-space forms below are the same numbers
+    // they always were.
+    const auto sx_d = [&](double v) {
+        return fx + (v - pf.vxr.lo) / (pf.vxr.hi - pf.vxr.lo) * iw;
     };
-    const auto sy = [&](double v) {
-        return static_cast<float>(
-            fy + (pf.vyr.hi - v) / (pf.vyr.hi - pf.vyr.lo) * ih);
+    const auto sy_d = [&](double v) {
+        return fy + (pf.vyr.hi - v) / (pf.vyr.hi - pf.vyr.lo) * ih;
     };
-    const auto sy1 = [&](double v) {
-        return static_cast<float>(
-            fy + (pf.vyr1.hi - v) / (pf.vyr1.hi - pf.vyr1.lo) * ih);
+    const auto sy1_d = [&](double v) {
+        return fy + (pf.vyr1.hi - v) / (pf.vyr1.hi - pf.vyr1.lo) * ih;
     };
+    const auto sx = [&](double v) { return static_cast<float>(sx_d(v)); };
+    const auto sy = [&](double v) { return static_cast<float>(sy_d(v)); };
+    const auto sy1 = [&](double v) { return static_cast<float>(sy1_d(v)); };
     // A series maps through its OWN spine (stage 6): the flag is the
     // classifier's cached answer, the visibility gate the caller
     // already ran.
+    const auto sy_of_d = [&](std::size_t i, double v) {
+        return i < stats.size() && stats[i].right ? sy1_d(v) : sy_d(v);
+    };
     const auto sy_of = [&](std::size_t i, double v) {
-        return i < stats.size() && stats[i].right ? sy1(v) : sy(v);
+        return static_cast<float>(sy_of_d(i, v));
     };
 
     canvas::Canvas2D& rc = ed.results_draw_canvas();
@@ -1338,9 +1345,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             geometry_key.decim_budget = cache.decim_budget;
             geometry_key.x_lo = pf.vxr.lo; geometry_key.x_hi = pf.vxr.hi;
             geometry_key.y_lo = yrange.lo; geometry_key.y_hi = yrange.hi;
-            geometry_key.plot_x = plot.x; geometry_key.plot_y = plot.y;
             geometry_key.plot_w = plot.width; geometry_key.plot_h = plot.height;
-            geometry_key.frame_x = fx; geometry_key.frame_y = fy;
             geometry_key.frame_w = iw; geometry_key.frame_h = ih;
             geometry_key.width = kSeriesWidth;
             geometry_key.join = wave_env().join;
@@ -1349,7 +1354,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             if (cached_geometry->built && cached_geometry->key == geometry_key) {
                 const auto replay_t0 = wave_now();
                 if (wave_env().prof != 0) ++prof.cache_hits;
-                renderer->replay_quads(cached_geometry->buffer);
+                renderer->replay_quads(cached_geometry->buffer, fx, fy);
                 if (wave_env().prof != 0) {
                     const double stroke_ms = wave_ms_since(replay_t0);
                     prof.stroke_ms += stroke_ms;
@@ -1366,14 +1371,20 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                             : (k < xs.size() ? xs[k] : 0.0);
         };
         pts.clear();
+        // The cached geometry is built FRAME-LOCAL (origin = the frame's
+        // top-left) and replayed at (fx, fy), so a layout shift or a
+        // scroll that only moves the frame never re-tessellates. The
+        // uncached backends stroke in screen space as always (origin 0).
+        const double ox = cached_geometry != nullptr ? double{fx} : 0.0;
+        const double oy = cached_geometry != nullptr ? double{fy} : 0.0;
         const auto push = [&](std::size_t k) {
             if (k >= ys.size()) {
                 return;
             }
             const double yv = ys[k];
-            pts.push_back(Point{sx(x_at(k)),
+            pts.push_back(Point{static_cast<float>(sx_d(x_at(k)) - ox),
                                 std::isfinite(yv)
-                                    ? sy_of(i, yv)
+                                    ? static_cast<float>(sy_of_d(i, yv) - oy)
                                     : std::numeric_limits<float>::
                                           quiet_NaN()});
         };
@@ -1525,7 +1536,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                               cached_geometry->buffer);
             cached_geometry->key = geometry_key;
             cached_geometry->built = true;
-            renderer->replay_quads(cached_geometry->buffer);
+            renderer->replay_quads(cached_geometry->buffer, fx, fy);
         } else {
             // CommandListCanvas and other recording/test backends retain
             // their original command stream through the default no-op seam.

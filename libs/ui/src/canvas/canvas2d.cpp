@@ -758,16 +758,19 @@ Point Renderer2DCanvas::to_screen(Point p) const {
     return xform_stack_.back().apply(p);
 }
 
-void Renderer2DCanvas::replay_quads(const TessBuffer& buffer) {
-    // TessBuffer vertices are already in screen space: applying the
-    // current canvas transform here would transform cached geometry twice.
+void Renderer2DCanvas::replay_quads(const TessBuffer& buffer, float dx,
+                                    float dy) {
+    // TessBuffer vertices are already tessellated points, not path input:
+    // applying the current canvas transform here would transform cached
+    // geometry twice. (dx, dy) is the one placement the replay applies -
+    // the buffer's origin in the canvas's local space.
     const std::size_t count = buffer.quads.size();
     for (std::size_t base = 0; base + 3u < count; base += 4u) {
         ws::math::Vec2 pos[4];
         ws::math::Vec4 rgba[4];
         for (std::size_t i = 0; i < 4u; ++i) {
             const TessVertex& v = buffer.quads[base + i];
-            pos[i] = {v.x, v.y};
+            pos[i] = {v.x + dx, v.y + dy};
             rgba[i] = {v.r, v.g, v.b, v.a};
         }
         sink_.quad(pos, rgba);

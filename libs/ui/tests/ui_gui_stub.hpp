@@ -7,6 +7,7 @@
 // stubbed call counts itself here and a few keep the values the tests
 // reason about.
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -73,6 +74,15 @@ struct StubDraws {
     // The FIRST rounded-quad radius since the last reset - the toggle
     // draw's track (its knob paints after it), the scrollbar's thumb.
     float first_rounded_radius = -1.0f;
+
+    // The vertex-quad form (Renderer2DCanvas strokes and its cached
+    // series replay): with `record_vertex_quads` set, every
+    // draw_vertex_quad appends its four corners (x0 y0 x1 y1 x2 y2 x3 y3)
+    // in draw order, so a test can pin WHERE the geometry landed. Off by
+    // default (a large plot is tens of thousands of quads), and reset()
+    // clears it with everything else - set it after the reset.
+    bool record_vertex_quads = false;
+    std::vector<std::array<float, 8>> vertex_quads;
 
     void reset() {
         *this = StubDraws{};

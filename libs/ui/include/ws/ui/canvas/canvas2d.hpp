@@ -165,9 +165,15 @@ public:
     virtual void fill_rects(const Point* corners, int count, float w,
                             float h, std::uint32_t color) = 0;
 
-    // Replays already-tessellated, screen-space geometry. Backends that
-    // cannot consume cached quads may leave the default no-op in place.
-    virtual void replay_quads(const TessBuffer&) {}
+    // Replays already-tessellated geometry. The buffer's vertices are in
+    // the space of ITS OWN origin; (dx, dy) is where that origin lands in
+    // the canvas's local space, so a buffer tessellated relative to a
+    // frame's top-left replays anywhere the frame moves without a
+    // re-tessellation (0, 0 is the original screen-space reading).
+    // Backends that cannot consume cached quads may leave the default
+    // no-op in place.
+    virtual void replay_quads(const TessBuffer&, float /*dx*/ = 0.0f,
+                              float /*dy*/ = 0.0f) {}
 
     // --- text ----------------------------------------------------------------
     // Draws one line of UTF-8 text at (x, y) [the line box's top-left
@@ -348,7 +354,8 @@ public:
                            float r, std::uint32_t color) override;
     void fill_rects(const Point* corners, int count, float w,
                     float h, std::uint32_t color) override;
-    void replay_quads(const TessBuffer& buffer) override;
+    void replay_quads(const TessBuffer& buffer, float dx = 0.0f,
+                      float dy = 0.0f) override;
 
     float draw_text(float x, float y, const char* utf8,
                     const r2d::Font& font,

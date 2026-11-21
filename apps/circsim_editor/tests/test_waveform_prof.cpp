@@ -12,6 +12,7 @@
 #include "../src/results_panel.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -78,6 +79,11 @@ struct ProfBench {
     gui::GuiContext gui;
     canvas::Renderer2DCanvas r2d_canvas;
     gui::ChromeTheme theme = gui::kDefaultChrome;
+    // Where the panel sits: tests move it to shift the plot frame the way
+    // a scroll or a layout change above it would.
+    gui::Rect panel{0.0f, 0.0f, 640.0f, 520.0f};
+    // Record every vertex quad the draw submits (stub.vertex_quads).
+    bool record_quads = false;
 
     ProfBench() {
         ed.doc = &doc;
@@ -119,6 +125,7 @@ struct ProfBench {
 
     std::size_t draw(const Mouse& m) {
         ws::ui::gui_test::stub.reset();  // clear r2d stub counters
+        ws::ui::gui_test::stub.record_vertex_quads = record_quads;
         ws::input::InputFrame in{};
         in.mouse_x = m.x;
         in.mouse_y = m.y;
@@ -132,8 +139,7 @@ struct ProfBench {
         in.dt_seconds = m.dt;
         gui.begin_frame(in);
         gui::LayoutCursor layout;
-        (void)layout.begin_panel(gui::Rect{0.0f, 0.0f, 640.0f, 520.0f},
-                                 12.0f, 8.0f);
+        (void)layout.begin_panel(panel, 12.0f, 8.0f);
         editor::draw_results_panel(ed, gui, layout, theme);
         layout.end_panel();
         gui.end_frame();
@@ -357,6 +363,136 @@ TEST_CASE("waveform render profiling - miter joins PROF=2") {
 
 // The renderer backend retains one tessellated quad buffer per signal.
 // An idle frame reuses the same key/buffer; a fresh delivery must re-key it.
+// ---- the cached geometry is position independent ---------------------
+//
+// The retained buffer is FRAME-LOCAL (origin = the plot frame's
+// top-left) and replay_quads adds the frame's origin back, so a scroll
+// or a layout shift that only MOVES the frame is a cache hit - the key
+// carries sizes, not positions.
+
+TEST_CASE("replay_quads places a frame-local buffer at its offset") {
+    canvas::Renderer2DCanvas rc;
+    std::vector<canvas::Point> local;
+    std::vector<canvas::Point> moved;
+    constexpr float kDx = 211.5f;
+    constexpr float kDy = 97.25f;
+    for (int i = 0; i < 60; ++i) {
+        const float x = 5.0f + 7.0f * static_cast<float>(i);
+        const float y = 40.0f + 25.0f * std::sin(0.4f * static_cast<float>(i));
+        local.push_back({x, y});
+        moved.push_back({x + kDx, y + kDy});
+    }
+    canvas::Paint paint;
+    paint.width = 2.0f;
+    paint.color = 0xFF8800FFu;
+    paint.join = canvas::StrokeJoin::bevel;
+
+    // The cache's way: tessellate relative to the frame, replay at its
+    // origin. The reference: stroke the same polyline already moved.
+    canvas::TessBuffer buf;
+    canvas::stroke_polyline(local.data(), static_cast<int>(local.size()),
+                            paint, buf, false);
+    REQUIRE(buf.quad_count() > 0u);
+
+    ws::ui::gui_test::stub.reset();
+    ws::ui::gui_test::stub.record_vertex_quads = true;
+    rc.replay_quads(buf, kDx, kDy);
+    const auto replayed = ws::ui::gui_test::stub.vertex_quads;
+
+    ws::ui::gui_test::stub.reset();
+    ws::ui::gui_test::stub.record_vertex_quads = true;
+    rc.stroke_polyline(moved.data(), static_cast<int>(moved.size()), paint,
+                       false);
+    const auto direct = ws::ui::gui_test::stub.vertex_quads;
+
+    REQUIRE(replayed.size() == buf.quad_count());
+    REQUIRE(replayed.size() == direct.size());
+    std::size_t off = 0;
+    for (std::size_t q = 0; q < replayed.size(); ++q) {
+        for (std::size_t c = 0; c < 8u; ++c) {
+            if (std::fabs(replayed[q][c] - direct[q][c]) > 1.0e-3f) ++off;
+        }
+    }
+    CHECK(off == 0u);
+
+    // The default is the original reading: no offset, screen-space.
+    ws::ui::gui_test::stub.reset();
+    ws::ui::gui_test::stub.record_vertex_quads = true;
+    rc.replay_quads(buf);
+    const auto plain = ws::ui::gui_test::stub.vertex_quads;
+    REQUIRE(plain.size() == buf.quads.size() / 4u);
+    CHECK(plain[0][0] == doctest::Approx(buf.quads[0].x));
+    CHECK(plain[0][1] == doctest::Approx(buf.quads[0].y));
+}
+
+TEST_CASE("a layout shift that only moves the frame is a cache hit") {
+    ProfBench b;
+    b.load(build_large_table(4, 2000));
+    b.draw();  // every series a miss; the buffers are built
+
+    // A sentinel in each retained buffer tells a hit from a miss: a hit
+    // replays the buffer untouched (the poison survives), a miss
+    // rebuilds it (the poison is gone).
+    std::vector<float> poisoned;
+    for (ResultsCache::SeriesGeometry& g : b.ed.results.geometry) {
+        REQUIRE(g.built);
+        REQUIRE_FALSE(g.buffer.quads.empty());
+        g.buffer.quads[0].x += 1.0e6f;
+        poisoned.push_back(g.buffer.quads[0].x);
+    }
+
+    // The scroll / layout shift: the frame moves, nothing else does.
+    b.panel.x += 37.0f;
+    b.panel.y += 53.0f;
+    b.draw();
+    REQUIRE(b.ed.results.geometry.size() == poisoned.size());
+    for (std::size_t i = 0; i < poisoned.size(); ++i) {
+        CHECK(b.ed.results.geometry[i].built);
+        CHECK(b.ed.results.geometry[i].buffer.quads[0].x == poisoned[i]);
+    }
+
+    // A SIZE change is still a miss: the key keeps the frame's size.
+    b.panel.width -= 40.0f;
+    b.draw();
+    for (const ResultsCache::SeriesGeometry& g : b.ed.results.geometry) {
+        CHECK(g.built);
+        CHECK(g.buffer.quads[0].x < 1.0e5f);  // rebuilt - poison gone
+    }
+}
+
+TEST_CASE("a shifted frame draws the same geometry at the shifted spot") {
+    // End to end: draw (a miss), move the panel, draw again (a hit,
+    // replayed at the new origin). Every vertex quad the second frame
+    // submits is the first frame's quad, moved by the shift - the plot,
+    // the grid, the frame, the legend sparklines alike.
+    ProfBench b;
+    b.record_quads = true;
+    b.load(build_large_table(3, 1500));
+    b.draw();
+    const auto before = ws::ui::gui_test::stub.vertex_quads;
+    REQUIRE_FALSE(before.empty());
+
+    constexpr float kDx = 37.0f;
+    constexpr float kDy = 53.0f;
+    b.panel.x += kDx;
+    b.panel.y += kDy;
+    b.draw();
+    const auto after = ws::ui::gui_test::stub.vertex_quads;
+    REQUIRE(after.size() == before.size());
+
+    std::size_t off = 0;
+    for (std::size_t q = 0; q < before.size(); ++q) {
+        for (std::size_t c = 0; c < 8u; c += 2u) {
+            if (std::fabs(after[q][c] - before[q][c] - kDx) > 1.0e-3f ||
+                std::fabs(after[q][c + 1u] - before[q][c + 1u] - kDy) >
+                    1.0e-3f) {
+                ++off;
+            }
+        }
+    }
+    CHECK(off == 0u);
+}
+
 TEST_CASE("waveform tessellation cache is per series and delivery keyed") {
     ProfBench b;
     b.load(build_large_table(20, 10000));

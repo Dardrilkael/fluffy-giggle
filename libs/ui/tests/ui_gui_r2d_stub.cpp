@@ -140,9 +140,14 @@ void pop_tint() {
 using VertexQuadPositions = const float[4][2];
 using VertexQuadTexCoords = const float[4][2];
 using VertexQuadColors = const float[4][4];
-void draw_vertex_quad(VertexQuadPositions&, VertexQuadTexCoords&,
+void draw_vertex_quad(VertexQuadPositions& pos, VertexQuadTexCoords&,
                       VertexQuadColors&, Texture) {
     gui_test::stub.quads++;
+    if (gui_test::stub.record_vertex_quads) {
+        gui_test::stub.vertex_quads.push_back(
+            {pos[0][0], pos[0][1], pos[1][0], pos[1][1], pos[2][0],
+             pos[2][1], pos[3][0], pos[3][1]});
+    }
 }
 
 float draw_text(float, float, const char* utf8_text, const Font& font,

@@ -572,9 +572,11 @@ struct ResultsCache {
         std::size_t decim_budget = 0;
         double x_lo = 0.0, x_hi = 0.0;
         double y_lo = 0.0, y_hi = 0.0;
-        float plot_x = 0.0f, plot_y = 0.0f;
+        // SIZES only: the buffer holds the series relative to the frame's
+        // top-left, so where the frame sits on screen (a panel scroll,
+        // a layout shift above the plot, a docked window moving) is no
+        // part of the key - the replay places it.
         float plot_w = 0.0f, plot_h = 0.0f;
-        float frame_x = 0.0f, frame_y = 0.0f;
         float frame_w = 0.0f, frame_h = 0.0f;
         float width = 0.0f;
         canvas::StrokeJoin join = canvas::StrokeJoin::round;
@@ -587,9 +589,11 @@ struct ResultsCache {
         bool built = false;
         canvas::TessBuffer buffer;
     };
-    // One retained tessellation per signal. A hit can replay its quads
-    // directly without remapping or CPU tessellation; TessBuffer::clear
-    // retains capacity when a key changes.
+    // One retained tessellation per signal, in FRAME-LOCAL space (the
+    // origin is the plot frame's top-left; the replay adds it back). A
+    // hit can replay its quads directly without remapping or CPU
+    // tessellation; TessBuffer::clear retains capacity when a key
+    // changes.
     std::vector<SeriesGeometry> geometry;
 
     // The series/sparkline point scratch: one buffer reused across
