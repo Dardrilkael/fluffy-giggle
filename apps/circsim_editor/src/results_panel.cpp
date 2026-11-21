@@ -270,8 +270,8 @@ void ensure_series_stats(Editor& ed, const ws::spice::Table& t) {
 //                               store, which can make "tess" exceed "stroke".
 //                               stroke - tess is then the canvas wrapper +
 //                               r2d recording.
-//   CIRCSIM_PLOT_JOIN=bevel     stroke the plot's SERIES with bevel joins
-//                               (round | bevel | miter; unset = round, i.e. the
+//   CIRCSIM_PLOT_JOIN=round     stroke the plot's SERIES with round joins
+//                               (round | bevel | miter; unset = bevel, i.e. the
 //                               shipped look). Legend sparklines and everything
 //                               else keep their own paint.
 //
