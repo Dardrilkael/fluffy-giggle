@@ -16,8 +16,8 @@ struct RawTcpConnection::Impl final
     : detail::IStreamSink, std::enable_shared_from_this<Impl> {
   std::unique_ptr<detail::IStreamPeer> peer_stream;
   Address peer_address;
-  std::function<void(std::span<const std::byte>)> on_bytes;
-  std::function<void(NetError)> on_closed;
+  std::function<void(std::span<const std::byte>)> bytes_callback;
+  std::function<void(NetError)> closed_callback;
   bool dead = false;
 
   Impl(std::unique_ptr<detail::IStreamPeer> stream, Address address)
@@ -28,12 +28,12 @@ struct RawTcpConnection::Impl final
   void start() { peer_stream->start(); }
   void on_connected() override {}
   void on_bytes(std::span<const std::byte> bytes) override {
-    if (!dead && on_bytes) on_bytes(bytes);
+    if (!dead && bytes_callback) bytes_callback(bytes);
   }
   void on_stream_dead(NetError why) override {
     if (dead) return;
     dead = true;
-    if (on_closed) on_closed(why);
+    if (closed_callback) closed_callback(why);
   }
 };
 
@@ -43,11 +43,11 @@ RawTcpConnection::~RawTcpConnection() = default;
 
 void RawTcpConnection::set_on_bytes(
     std::function<void(std::span<const std::byte>)> callback) {
-  impl_->on_bytes = std::move(callback);
+  impl_->bytes_callback = std::move(callback);
 }
 void RawTcpConnection::set_on_closed(
     std::function<void(NetError)> callback) {
-  impl_->on_closed = std::move(callback);
+  impl_->closed_callback = std::move(callback);
 }
 ws::core::Status RawTcpConnection::send(std::span<const std::byte> bytes) {
   if (impl_->dead) return fail(NetError::already_closed, "raw TCP connection is closed");
