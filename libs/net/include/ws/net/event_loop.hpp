@@ -83,6 +83,7 @@ class WS_NET_API EventLoop {
   [[nodiscard]] detail::ILoopBackend* backend() const;
 
   friend class TcpConnection;
+  friend class RawTcpConnection;
   friend class TcpListener;
   friend class RawTcpListener;
   friend class UdpSocket;
