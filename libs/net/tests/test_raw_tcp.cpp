@@ -81,7 +81,7 @@ TEST_CASE("raw TCP transfers exact unframed bytes and closes gracefully") {
   client = *client_result;
   client->set_on_connected([&] {
     const auto sent = client->send(payload);
-    CHECK(sent.has_value());
+    send_succeeded = sent.has_value();
   });
   client->set_on_bytes([&](std::span<const std::byte> bytes) {
     received_exact_payload =
