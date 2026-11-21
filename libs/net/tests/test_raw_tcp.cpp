@@ -82,6 +82,8 @@ TEST_CASE("raw TCP transfers exact unframed bytes and closes gracefully") {
   auto client_result = RawTcpConnection::connect(loop, bound);
   REQUIRE(client_result.has_value());
   client = *client_result;
+  const auto early_send = client->send(payload);
+  const bool early_send_rejected = !early_send.has_value();
   client->set_on_connected([&] {
     const auto sent = client->send(payload);
     send_succeeded = sent.has_value();
@@ -112,4 +114,5 @@ TEST_CASE("raw TCP transfers exact unframed bytes and closes gracefully") {
   CHECK(server_close_reason_ok);
   CHECK(client_close_reason_ok);
   CHECK(send_succeeded);
+  CHECK(early_send_rejected);
 }
