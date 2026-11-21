@@ -235,6 +235,11 @@ void PlaygroundApp::on_setup() {
     chrome_.font_strong =
         font_strong_.empty() ? nullptr : &font_strong_;
     install_clipboard(gui_);
+    // The ime-rect seam (same call the editor makes): the focused
+    // "name" field's bounds ride it, and the Android host answers by
+    // showing the soft keyboard - the desktop hosts keep the headless
+    // no-op, their OS owns the keyboard.
+    install_ime_rect(gui_);
     audio_.setup();
 }
 

@@ -432,6 +432,41 @@ public:
             });
     }
 
+    // THE SOFT KEYBOARD (the ime-rect seam's platform stage - the
+    // plumbing window.h documents as the channel's Android half). The
+    // gui calls the positioner with the FOCUSED field's bounds when
+    // they change: a non-zero rect is a field gaining focus, SHOW the
+    // IME; the zero rect is focus lost, HIDE it. That show/hide pair
+    // is the whole "tap a field, the keyboard opens" story on Android -
+    // desktop never needs it (the OS owns the keyboard), which is why
+    // the seam's default was the headless no-op and a touch device
+    // with no wiring never opened anything (the bug this closes).
+    // ANativeActivity_showSoftInput is native_activity.h's spelling of
+    // InputMethodManager.showSoftInput (it JNI-hops internally - the
+    // clipboard's own reflection dance stays where it was), and the
+    // documented thread rule says it marshals to the main thread
+    // however it is called. The IMPLICIT flag is the tap's own request
+    // (not FORCED - the user stays free to dismiss); NOT_ALWAYS lets
+    // the system keep the window if it has stronger reasons. The rect
+    // is kept, not consumed: Android's stock keyboard
+    // positions itself over adjustResize - the field's bounds ride
+    // the host for a future composition window that wants them.
+    void install_ime_rect(gui::GuiContext& gui) override {
+        gui.set_ime_rect(
+            [this](const ws::ui::gui::Rect& rect) {
+                ime_rect_ = rect;
+                if (rect.width > 0.0f && rect.height > 0.0f) {
+                    ANativeActivity_showSoftInput(
+                        app_->activity,
+                        ANATIVEACTIVITY_SHOW_SOFT_INPUT_IMPLICIT);
+                } else {
+                    ANativeActivity_hideSoftInput(
+                        app_->activity,
+                        ANATIVEACTIVITY_HIDE_SOFT_INPUT_NOT_ALWAYS);
+                }
+            });
+    }
+
 private:
     // One round of the glue looper. `timeout` is ALooper_pollOnce's argument:
     // 0 drains what is pending (the running frame loop), -1 blocks until
@@ -596,8 +631,10 @@ private:
                 input->key_repeated[key] = true;
             }
         }
-        // Text tap: hardware-keyboard glyphs only (native_app_glue has no
-        // IME, so there is no soft-keyboard path). The key contract is GLFW
+        // Text glyphs: ASCII 32..126 as TextInputEvent - the same pair
+        // GLFW's on_char delivers, so a VISIBLE keyboard's keycodes type
+        // straight into the gui (the ime-rect seam's install_ime_rect is
+        // what opens it on focus). The key contract is GLFW
         // numbering - letters report uppercase, corrected to lowercase when
         // shift is not held. One ws::input::TextInputEvent per glyph (the event
         // counterpart of the gui frame's text_input; desktop's on_char
@@ -878,6 +915,9 @@ private:
     int32_t mouse_buttons_ = 0;  // last seen AMOTION_EVENT_BUTTON_* mask
     bool touch_cap_warned_ = false;  // the touch-table cap warn fired once
     std::string clipboard_read_;  // the seam's read buffer (see install_clipboard)
+    // The last ime-rect the seam forwarded (see install_ime_rect):
+    // the focused field's bounds, or zero when none holds focus.
+    ws::ui::gui::Rect ime_rect_{};
 };
 
 }  // namespace

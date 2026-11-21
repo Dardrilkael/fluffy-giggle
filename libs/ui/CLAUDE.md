@@ -260,7 +260,9 @@ Widget functions hold no state; persistence lives in `GuiContext` side tables.
   - Desktop is mouse-only by decision (no WM_POINTER).
   - Android decodes every contact (pointer index from the action bits), CANCEL lifts all, and the 9th and later fingers drop with a once-per-frame warning.
   - ImGui is fed by the bridge directly through `io.AddMousePosEvent` / `AddMouseButtonEvent`.
-  - The Android soft-keyboard IME is out of scope for v1.
+  - The Android soft-keyboard IME rides the ime-rect seam: a focused
+    field's non-zero rect shows it, the zero rect (focus lost) hides it
+    (window_android.cpp's install_ime_rect; the manifests run adjustResize).
 
 ## Implementing new features
 
@@ -290,7 +292,7 @@ ctest --preset debug -R ui
 - The popup padding rim passes input through.
 - No OIT, and no 3D text or rounded quads.
 - Fonts have no kerning and are never rescaled at runtime — a size change is a new font (its lazy glyphs re-request on first use). The face stack grows a font past ASCII without a re-bake, but the primary path stays `load_font`. Font paths are supplied by the caller, which is Windows-only in practice today.
-- The Android soft-keyboard IME is unsupported.
+- The Android soft-keyboard IME rides the ime-rect seam (show on a focused field's rect, hide on zero); IME composition/preedit delivery (CJK) is still the gap - glyph-level text arrives as TextInputEvent only.
 - No directional or gamepad focus nav yet. The focusable list is the seam for it.
 - Handle generation wraps after 4096 reuses of one slot. The bindless table is capped at 1024 slots.
 

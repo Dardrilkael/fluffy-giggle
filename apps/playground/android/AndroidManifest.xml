@@ -29,7 +29,8 @@
             android:name="android.app.NativeActivity"
             android:exported="true"
             android:label="ws playground"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density">
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
+            android:windowSoftInputMode="adjustResize">
             <!-- The module base name: libplayground.so, no prefix, no suffix. -->
             <meta-data android:name="android.app.lib_name"
                 android:value="playground" />

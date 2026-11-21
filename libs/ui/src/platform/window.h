@@ -148,12 +148,14 @@ public:
     // the context calls it with the focused field's bounds whenever they
     // change, so the OS composition window tracks what the user is
     // composing into (App::install_ime_rect is the app-side spelling).
-    // The base default installs nothing: no host wires an IME today
-    // (GLFW exposes no preedit; the Windows IMM32 / Android JNI plumbing
-    // is the channel's platform stage), and an unset seam is the honest
-    // nothing-positions answer - the headless answer, like the unset
-    // clipboard. A platform opts in by overriding, like every other
-    // capability here.
+    // The base default installs nothing - GLFW exposes no preedit and
+    // the OS owns the desktop keyboard, so a desktop host keeps the
+    // headless nothing-positions answer (the same honest unset seam the
+    // unset clipboard models). Android overrides: the positioner's
+    // non-zero rect (a field gaining focus) shows the soft keyboard and
+    // the zero rect (focus lost) hides it - window_android.cpp, the
+    // channel's platform stage. A platform opts in by overriding, like
+    // every other capability here.
     virtual void install_ime_rect(gui::GuiContext& gui) { (void)gui; }
 
     // The stage-12 halves the window itself owns. set_title hands the

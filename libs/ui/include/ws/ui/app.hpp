@@ -94,10 +94,12 @@ public:
     // positioner the context calls with the focused field's bounds
     // whenever they change (G1.2's channel; the OS composition window
     // tracks the caret's field through it). Call beside
-    // install_clipboard. No host implements the positioner yet (the
-    // Windows IMM32 / Android JNI wiring is the channel's platform
-    // stage), so every host today installs nothing and the seam reads
-    // unset - honest: nothing positions, nothing crashes.
+    // install_clipboard. The Android host answers the seam by showing
+    // and hiding the soft keyboard (a non-zero rect is a field gaining
+    // focus: SHOW; the zero rect is focus lost: HIDE) - the whole
+    // "tap a field, the keyboard opens" story there. The desktop hosts
+    // keep the headless no-op (their OS owns the keyboard), and an
+    // unset seam stays the honest nothing-positions answer.
     void install_ime_rect(gui::GuiContext& gui);
 
     // Installs the job system whose marshal queue the shell drains once

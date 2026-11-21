@@ -33,7 +33,8 @@
             android:name=".CircsimActivity"
             android:exported="true"
             android:label="circsim editor"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density">
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
+            android:windowSoftInputMode="adjustResize">
             <!-- The module base name: libcircsim_editor.so, no prefix, no suffix. -->
             <meta-data android:name="android.app.lib_name"
                 android:value="circsim_editor" />

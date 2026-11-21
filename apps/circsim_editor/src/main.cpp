@@ -243,6 +243,12 @@ class CircsimApp final : public ws::ui::App {
     void on_setup() override {
         ws::core::warn("circsim: on_setup() starting");
         install_clipboard(gui_);
+        // The ime-rect seam: the focused Properties field's bounds ride
+        // it, and the Android host answers by showing the soft keyboard
+        // (the desktop hosts keep the headless no-op - their OS owns the
+        // keyboard). Without this call a tap on a text field focuses it
+        // and then nothing opens.
+        install_ime_rect(gui_);
         ws::core::warn("circsim: install_clipboard done");
         install_job_system(jobs_);
         ws::core::warn("circsim: install_job_system done");
