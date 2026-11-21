@@ -54,7 +54,19 @@ libuv or creating a second socket backend.
 
 ## Current status
 
-This commit records the transport compatibility finding and implementation
-boundary. It deliberately does not pretend the framed API is HTTP or add a
-libuv dependency to an app. The next code change should add the raw stream
-public API to `libs/net`, then build the HTTP server on that API.
+The first vertical slice now exists on `html-test`:
+
+- `ws::net::RawTcpListener` and `RawTcpConnection` expose unframed byte
+  streams over the existing transport seam; no libuv types escape the library.
+- Both accepted and outbound raw TCP connections are supported.
+- The generic `apps/http_server` target depends only on `ws::net` and serves
+  an embedded HTML page over ordinary HTTP/1.x.
+- The net test target includes a loopback raw-stream test that checks exact
+  bytes, graceful close, and callback replacement safety.
+
+This is still an experimental server, not a production HTTP implementation.
+It currently handles one request per connection and only serves the embedded
+root page. Static asset routing, a standalone parser/response module, broader
+malformed-header and request-body handling, and more HTTP integration cases
+remain follow-up work. Compilation and runtime tests still need to be run in
+a real workspace build; repository edits alone do not establish that they pass.
