@@ -425,7 +425,8 @@ void wave_prof_end_frame() {
     p.w_cache_hits = p.w_cache_misses = 0u;
 }
 
-// One series polyline, mapped and clipped to the frame; non-finite
+// One series polyline, mapped to the frame (the series loop's clip rect
+// does the cutting); non-finite
 // samples break the line into segments rather than poisoning the
 // tessellator with NaN vertices. `join` defaults to round, the shipped look;
 // the plot's series loop passes wave_env().join (CIRCSIM_PLOT_JOIN). When
@@ -1297,6 +1298,17 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     std::vector<double> rev_x;
     std::vector<double> rev_y;
     wave_prof_begin_frame();
+    // The series live INSIDE the frame. The slice keeps one sample of
+    // slack past each window edge (the stroke needs the neighbor to
+    // cross the boundary), so in a zoomed view the boundary segments
+    // run on past the frame - over the tick labels and the margins -
+    // unless the canvas cuts them. The clip is a draw-time state both
+    // backends honor (Renderer2D stamps the active clip into every
+    // command, replayed quads included), so the cached screen-space
+    // geometry is unaffected: it stays valid with or without it. One
+    // balanced pair around the whole loop - every `continue` below
+    // stays inside it.
+    rc.push_clip(fx, fy, iw, ih);
     for (std::size_t i = 0; i < t.signals.size(); ++i) {
         if (i >= ed.results.visible.size() || ed.results.visible[i] == 0u) {
             if (renderer != nullptr && i < cache.geometry.size()) {
@@ -1546,6 +1558,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             }
         }
     }
+    rc.pop_clip();
     wave_prof_end_frame();
 
     // --- the crosshair + per-series markers at the hover sample

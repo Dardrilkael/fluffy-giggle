@@ -394,6 +394,29 @@ TEST_CASE("waveform tessellation cache is per series and delivery keyed") {
     }
 }
 
+// The series loop's clip rect rides a push/pop pair around the whole
+// loop; on the Renderer2D backend it is the r2d clip stack (stamped
+// into every command, the replayed cached quads included). The stack
+// must close on a miss frame (tessellate + replay) and on a hit frame
+// (replay only) alike, and cost the same pair either way.
+TEST_CASE("the series clip is balanced on cache-miss and cache-hit frames") {
+    ProfBench b;
+    b.load(build_large_table(4, 2000));
+
+    b.draw();  // every series a geometry miss
+    for (const ResultsCache::SeriesGeometry& g : b.ed.results.geometry) {
+        CHECK(g.built);
+    }
+    const std::uint32_t miss_pushes =
+        ws::ui::gui_test::stub.clip_pushes;
+    CHECK(miss_pushes >= 1u);
+    CHECK(ws::ui::gui_test::stub.clip_pops == miss_pushes);
+
+    b.draw();  // identical view: every series a hit
+    CHECK(ws::ui::gui_test::stub.clip_pushes == miss_pushes);
+    CHECK(ws::ui::gui_test::stub.clip_pops == miss_pushes);
+}
+
 // A quick structural test that verifies the series loop produces strokes
 // for a large table without crashing (runs without CIRCSIM_PLOT_PROF).
 TEST_CASE("large table draws series strokes without crash") {

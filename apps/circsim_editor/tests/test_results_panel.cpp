@@ -1643,6 +1643,88 @@ TEST_CASE("a many-signal table draws bounded series and sparklines") {
     }
 }
 
+// ---- the series are clipped to the plot frame ------------------------
+//
+// The decimation window keeps one sample of slack past each edge, so in
+// a zoomed view the boundary segments run past the frame. The series
+// loop sits inside one clip rect of the frame; these pin its shape on
+// the recorded command stream (the canvas does the cutting).
+
+namespace {
+
+struct ClipPair {
+    std::size_t pushes = 0;
+    std::size_t pops = 0;
+    std::size_t push_at = 0;  // the (last) push's index in the stream
+    std::size_t pop_at = 0;
+};
+
+[[nodiscard]] ClipPair clip_pair(const Bench& b) {
+    ClipPair c;
+    for (std::size_t i = 0; i < b.clc.cmds.size(); ++i) {
+        const canvas::CanvasCmdKind k = b.clc.cmds[i].kind;
+        if (k == canvas::CanvasCmdKind::push_clip) {
+            ++c.pushes;
+            c.push_at = i;
+        } else if (k == canvas::CanvasCmdKind::pop_clip) {
+            ++c.pops;
+            c.pop_at = i;
+        }
+    }
+    return c;
+}
+
+}  // namespace
+
+TEST_CASE("the series are drawn inside a clip of the plot frame") {
+    Bench b;
+    b.load(ramp_table(41u));
+    b.draw();
+
+    // One balanced pair; the rect is the plot's: non-degenerate and
+    // inside the frame's box.
+    const ClipPair c = clip_pair(b);
+    REQUIRE(c.pushes == 1u);
+    REQUIRE(c.pops == 1u);
+    REQUIRE(c.push_at < c.pop_at);
+    const canvas::CanvasCmd& clip = b.clc.cmds[c.push_at];
+    const Bench::FrameBox f = b.frame_box(b.frame_cmd());
+    CHECK(clip.w > 100.0f);
+    CHECK(clip.h > 50.0f);
+    CHECK(clip.x >= f.fx - 0.5f);
+    CHECK(clip.y >= f.fy - 0.5f);
+    CHECK(clip.x + clip.w <= f.fx2 + 0.5f);
+    CHECK(clip.y + clip.h <= f.fy2 + 0.5f);
+
+    // Every series stroke is recorded between the push and the pop.
+    std::size_t seen = 0;
+    for (std::size_t i = 0; i < b.clc.cmds.size(); ++i) {
+        const canvas::CanvasCmd& cmd = b.clc.cmds[i];
+        if (cmd.kind == canvas::CanvasCmdKind::stroke_polyline &&
+            cmd.points.size() > 4u && cmd.width >= 1.5f) {
+            ++seen;
+            CHECK(i > c.push_at);
+            CHECK(i < c.pop_at);
+        }
+    }
+    CHECK(seen == 2u);
+}
+
+TEST_CASE("the series clip is balanced when nothing is drawn") {
+    // Every signal hidden: the loop `continue`s through all of them -
+    // the pair around the loop must still close.
+    Bench b;
+    b.load(ramp_table(41u));
+    b.draw();  // keys visible_for, sizes visible
+    REQUIRE(b.ed.results.visible.size() == 2u);
+    b.ed.results.visible.assign(2u, 0u);
+    b.draw();
+    CHECK(b.series_cmds().empty());
+    const ClipPair c = clip_pair(b);
+    CHECK(c.pushes == 1u);
+    CHECK(c.pops == 1u);
+}
+
 TEST_CASE("the sparkline atlas declines headless, the polyline rides") {
     // The stage-10 atlas bakes through r2d's texture seam, which
     // answers the white sentinel outside a running app (the
