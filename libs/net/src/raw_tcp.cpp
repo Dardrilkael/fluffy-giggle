@@ -62,8 +62,15 @@ ws::core::Result<RawTcpConnection::Ptr> RawTcpConnection::connect(
   }
   auto impl = std::make_shared<Impl>(std::move(stream), peer);
   impl->arm();
-  Ptr conn{new RawTcpConnection(std::move(impl))};
-  conn->impl_->start();
+  Ptr conn{new RawTcpConnection(impl)};
+  // Defer start to the next loop turn, matching accepted connections.
+  // Callers can install callbacks before even a synchronous setup failure
+  // is reported through on_closed.
+  const auto started = loop.post([impl] { impl->start(); });
+  if (!started) {
+    conn->abort();
+    return fail(NetError::loop_stopped, "connect: unable to schedule start");
+  }
   return conn;
 }
 
