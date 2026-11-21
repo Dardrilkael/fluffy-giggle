@@ -123,6 +123,7 @@ int main(int argc, char** argv) {
       }
       pending->append(reinterpret_cast<const char*>(bytes.data()), bytes.size());
       if (pending->find("\r\n\r\n") != std::string::npos) {
+        *responded = true;
         serve(*raw, *pending);
       }
     });
