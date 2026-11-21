@@ -55,6 +55,9 @@ TEST_CASE("raw TCP transfers exact unframed bytes and closes gracefully") {
   bool callback_replaced_itself = false;
   int server_closed = 0;
   int client_closed = 0;
+  bool server_close_reason_ok = false;
+  bool client_close_reason_ok = false;
+  bool send_succeeded = false;
 
   listener->set_on_connection([&](RawTcpConnection::Ptr accepted) {
     server = std::move(accepted);
@@ -66,7 +69,7 @@ TEST_CASE("raw TCP transfers exact unframed bytes and closes gracefully") {
       (void)server->send(bytes);
     });
     server->set_on_closed([&](NetError why) {
-      CHECK(why == NetError::connection_closed);
+      server_close_reason_ok = why == NetError::connection_closed;
       ++server_closed;
       listener->close();
       if (client_closed != 0) loop.stop();
@@ -87,7 +90,7 @@ TEST_CASE("raw TCP transfers exact unframed bytes and closes gracefully") {
     (void)client->close();
   });
   client->set_on_closed([&](NetError why) {
-    CHECK(why == NetError::connection_closed);
+    client_close_reason_ok = why == NetError::connection_closed;
     ++client_closed;
     if (server_closed != 0) loop.stop();
   });
@@ -99,4 +102,7 @@ TEST_CASE("raw TCP transfers exact unframed bytes and closes gracefully") {
   CHECK(received_exact_payload);
   CHECK(server_closed == 1);
   CHECK(client_closed == 1);
+  CHECK(server_close_reason_ok);
+  CHECK(client_close_reason_ok);
+  CHECK(send_succeeded);
 }
