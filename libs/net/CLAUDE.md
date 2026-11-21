@@ -15,6 +15,7 @@ under include/ (it lives behind pimpls, included only by src/backend/uv).
 - `event_loop.hpp`: `EventLoop` - run/stop, `post()` (the ONE thread-safe
   call), `TimerHandle` timers.
 - `tcp.hpp`: `TcpListener`/`TcpConnection` - message API over framed TCP.
+- `raw_tcp.hpp`: `RawTcpListener`/`RawTcpConnection` - unframed byte-stream TCP for protocols such as HTTP.
 - `udp.hpp`: `UdpSocket` - bind/send_to/on_packet.
 - `discovery.hpp`: `DiscoveryAnnouncer`/`DiscoveryBrowser` - LAN discovery
   over UDP broadcast.
