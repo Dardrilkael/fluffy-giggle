@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -95,7 +96,7 @@ int main(int argc, char** argv) {
       if (parsed == 0 || parsed > 65535) throw std::out_of_range("port");
       port = static_cast<std::uint16_t>(parsed);
     } catch (...) {
-      std::cerr << "Usage: http_server_web [host] [port]\n";
+      std::cerr << "Usage: http_server [host] [port]\n";
       return 2;
     }
   }
@@ -127,7 +128,14 @@ int main(int argc, char** argv) {
         serve(*raw, *pending);
       }
     });
-    client->set_on_closed([](ws::net::NetError) {});
+    client->set_on_closed([&clients, raw](ws::net::NetError) {
+      // Release the public wrapper after the transport's final callback.
+      // The peer's keepalive owns the implementation until its close
+      // callback returns, so erasing this Ptr here is safe.
+      std::erase_if(clients, [raw](const auto& item) {
+        return item.get() == raw;
+      });
+    });
     clients.push_back(std::move(client));
   });
 
