@@ -29,12 +29,16 @@ struct RawTcpConnection::Impl final
   void start() { peer_stream->start(); }
   void on_connected() override {}
   void on_bytes(std::span<const std::byte> bytes) override {
-    if (!dead && bytes_callback) bytes_callback(bytes);
+    // Copy before invocation: callbacks may replace themselves (or clear
+    // the callback slot) while they are running.
+    auto callback = bytes_callback;
+    if (!dead && callback) callback(bytes);
   }
   void on_stream_dead(NetError why) override {
     if (dead) return;
     dead = true;
-    if (closed_callback) closed_callback(why);
+    auto callback = closed_callback;
+    if (callback) callback(why);
   }
 };
 
