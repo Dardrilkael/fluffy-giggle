@@ -40,12 +40,17 @@ constexpr std::string_view kPage = R"HTML(<!doctype html>
 )HTML";
 
 std::string response(int status, std::string_view reason,
-                     std::string_view body, bool head_only = false) {
+                     std::string_view body, bool head_only = false,
+                     std::string_view extra_header = {}) {
   std::string out = "HTTP/1.1 " + std::to_string(status) + " " +
                     std::string(reason) + "\r\n";
   out += "Content-Type: text/html; charset=utf-8\r\n";
   out += "Content-Length: " + std::to_string(body.size()) + "\r\n";
   out += "Connection: close\r\n";
+  if (!extra_header.empty()) {
+    out.append(extra_header);
+    out += "\r\n";
+  }
   out += "X-Content-Type-Options: nosniff\r\n";
   out += "\r\n";
   if (!head_only) out.append(body);
@@ -64,7 +69,11 @@ void serve(ws::net::RawTcpConnection& conn, std::string_view request) {
   const auto first = line.find(' ');
   const auto second = first == std::string_view::npos
                           ? first : line.find(' ', first + 1);
-  if (first == std::string_view::npos || second == std::string_view::npos) {
+  const auto third = second == std::string_view::npos
+                         ? second : line.find(' ', second + 1);
+  if (first == std::string_view::npos || second == std::string_view::npos ||
+      third != std::string_view::npos || first == 0 ||
+      second == first + 1 || second + 1 >= line.size()) {
     const auto r = response(400, "Bad Request", "Malformed request line\n");
     (void)conn.send(std::as_bytes(std::span{r.data(), r.size()}));
     (void)conn.close();
@@ -72,12 +81,20 @@ void serve(ws::net::RawTcpConnection& conn, std::string_view request) {
   }
   const auto method = line.substr(0, first);
   const auto target = line.substr(first + 1, second - first - 1);
+  const auto version = line.substr(second + 1);
+  if (version != "HTTP/1.0" && version != "HTTP/1.1") {
+    const auto r = response(400, "Bad Request", "Unsupported HTTP version\n");
+    (void)conn.send(std::as_bytes(std::span{r.data(), r.size()}));
+    (void)conn.close();
+    return;
+  }
   const bool head = method == "HEAD";
   std::string r;
   if ((method == "GET" || head) && (target == "/" || target == "/index.html")) {
     r = response(200, "OK", kPage, head);
   } else if (method != "GET" && !head) {
-    r = response(405, "Method Not Allowed", "Method not allowed\n");
+    r = response(405, "Method Not Allowed", "Method not allowed\n",
+                 false, "Allow: GET, HEAD");
   } else {
     r = response(404, "Not Found", "Not found\n", head);
   }
@@ -140,7 +157,7 @@ int main(int argc, char** argv) {
   });
 
   const auto bound = listener->local();
-  std::cout << "ws::net HTTP HTTP test server: http://" << bound.host << ':'
+  std::cout << "ws::net HTTP test server: http://" << bound.host << ':'
             << bound.port << "/\nPress Ctrl+C to stop.\n";
   const auto ran = loop.run();
   listener->close();
