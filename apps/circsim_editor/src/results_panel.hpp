@@ -24,8 +24,9 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
 
 // E3's plot image: the SHOWN table's visible series rendered headless
 // through RasterCanvas - the frame, the engineering-notation grid and
-// tick labels, one polyline per visible signal (full resolution, no
-// decimation - a PNG is written once, not drawn at 60 fps), the
+// tick labels, one polyline per visible signal per monotone pass of the
+// axis (full resolution, no decimation - a PNG is written once, not
+// drawn at 60 fps; a .step family's passes overlay, never chord), the
 // markers, and a legend row per series. Pure over its inputs so the
 // headless suite can gate the bytes' shape (the RasterCanvas pixel
 // seam is the test's). `visible` parallels t.signals (nullptr = all

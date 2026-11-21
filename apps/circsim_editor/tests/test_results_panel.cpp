@@ -24,7 +24,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <vector>
+
+#include <stb_image.h>  // declarations: stb_impl.cpp is a source of this target
 
 #include <ws/settings/filesystem.hpp>
 #include <ws/spice/results.hpp>
@@ -1889,4 +1892,172 @@ TEST_CASE("the frame budget stays flat on idle frames") {
     // together stay in the same order as ONE signal's old budget.
     CHECK(fam_keeps <= 10u * (fam_budget + 24u * 8u));
     CHECK(fam_idle <= fam_build);
+}
+
+// ---- the plot PNG draws one polyline per pass of the axis -----------
+//
+// render_plot_png used to stroke each signal's whole column as one
+// polyline, so a .step family's pass resets (and any axis reset) were
+// chords across the plot. The tests decode the PNG and look at pixels:
+// the passes are there, the chord's midpoint is bare.
+
+namespace {
+
+struct PngImage {
+    int w = 0;
+    int h = 0;
+    std::vector<unsigned char> rgb;  // w * h * 3
+
+    // True when a pixel within `r` of (cx, cy) is within `tol` per
+    // channel of `ink` (0xRRGGBB). The antialiased edge blends toward
+    // the background, so the window finds the line's solid core.
+    [[nodiscard]] bool near_ink(double cx, double cy, int r,
+                                std::uint32_t ink, int tol = 40) const {
+        const int ix = static_cast<int>(std::lround(cx));
+        const int iy = static_cast<int>(std::lround(cy));
+        for (int y = std::max(0, iy - r); y <= std::min(h - 1, iy + r); ++y) {
+            for (int x = std::max(0, ix - r); x <= std::min(w - 1, ix + r);
+                 ++x) {
+                const unsigned char* p =
+                    &rgb[(static_cast<std::size_t>(y) * w + x) * 3u];
+                if (std::abs(int{p[0]} - static_cast<int>((ink >> 16) & 0xFFu)) <= tol &&
+                    std::abs(int{p[1]} - static_cast<int>((ink >> 8) & 0xFFu)) <= tol &&
+                    std::abs(int{p[2]} - static_cast<int>(ink & 0xFFu)) <= tol) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+};
+
+[[nodiscard]] PngImage decode_png(const std::string& png) {
+    PngImage im;
+    int comp = 0;
+    unsigned char* px = stbi_load_from_memory(
+        reinterpret_cast<const stbi_uc*>(png.data()),
+        static_cast<int>(png.size()), &im.w, &im.h, &comp, 3);
+    REQUIRE(px != nullptr);
+    im.rgb.assign(px, px + static_cast<std::size_t>(im.w) * im.h * 3u);
+    stbi_image_free(px);
+    return im;
+}
+
+// render_plot_png's own frame (results_panel.cpp): the pixel of a data
+// point, through the same padded ranges.
+struct PngMap {
+    ws::circsim::PlotRange px;
+    ws::circsim::PlotRange py;
+    PngMap(double x_lo, double x_hi, double y_lo, double y_hi)
+        : px(ws::circsim::expand_range(x_lo, x_hi)),
+          py(ws::circsim::expand_range(y_lo, y_hi)) {}
+    [[nodiscard]] double sx(double v) const {
+        return 72.0 + (v - px.lo) / (px.hi - px.lo) * (1280.0 - 72.0 - 24.0);
+    }
+    [[nodiscard]] double sy(double v) const {
+        return 40.0 + (py.hi - v) / (py.hi - py.lo) * (720.0 - 40.0 - 48.0);
+    }
+};
+
+// One v(out) signal over a time axis.
+[[nodiscard]] ws::spice::Table one_signal_table(std::vector<double> xs,
+                                                std::vector<double> ys) {
+    ws::spice::Table t;
+    t.analysis = ws::spice::AnalysisKind::Tran;
+    t.sweep = ws::spice::SweepKind::Time;
+    t.sweep_names = {"time"};
+    t.sweep_axes.push_back(std::move(xs));
+    ws::spice::Signal s;
+    s.name = "v(out)";
+    s.data = std::move(ys);
+    t.signals.push_back(std::move(s));
+    return t;
+}
+
+constexpr std::uint32_t kPngInk = 0xE05A4Eu;  // series_color(0) >> 8
+
+}  // namespace
+
+TEST_CASE("the plot PNG breaks a step family at each pass reset") {
+    // 3 passes x 200 rows over the same 0..19.9 ms axis, pass p a flat
+    // line at level p. As one polyline the reset between passes was a
+    // diagonal chord from (x_end, level p) to (x_start, level p + 1).
+    constexpr std::size_t kPasses = 3u;
+    constexpr std::size_t kRows = 200u;
+    std::vector<double> xs;
+    std::vector<double> ys;
+    for (std::size_t p = 0; p < kPasses; ++p) {
+        for (std::size_t r = 0; r < kRows; ++r) {
+            xs.push_back(1.0e-4 * static_cast<double>(r));
+            ys.push_back(static_cast<double>(p));
+        }
+    }
+    const ws::spice::Table t = one_signal_table(xs, ys);
+    const PngImage im = decode_png(editor::render_plot_png(
+        t, nullptr, "time", nullptr, 0u));
+    REQUIRE(im.w == 1280);
+    REQUIRE(im.h == 720);
+
+    const PngMap m(0.0, 1.0e-4 * (kRows - 1u), 0.0, 2.0);
+    const double x_mid = 0.5e-4 * (kRows - 1u);
+    // The passes are drawn (the positive control: three flat lines)...
+    for (std::size_t p = 0; p < kPasses; ++p) {
+        CHECK(im.near_ink(m.sx(x_mid), m.sy(static_cast<double>(p)), 2,
+                          kPngInk));
+    }
+    // ...and the chord between them is not: its midpoint sits half a
+    // level off either line, ~140 px from any ink.
+    for (std::size_t p = 0; p + 1u < kPasses; ++p) {
+        CHECK_FALSE(im.near_ink(m.sx(x_mid),
+                                m.sy(static_cast<double>(p) + 0.5), 4,
+                                kPngInk));
+    }
+}
+
+TEST_CASE("the plot PNG draws a falling axis in sample order") {
+    // A .dc walking its source DOWN is one falling run: still one
+    // polyline, the whole ramp (the sample at the middle sits on the
+    // line).
+    constexpr std::size_t kN = 201u;
+    std::vector<double> xs;
+    std::vector<double> ys;
+    for (std::size_t i = 0; i < kN; ++i) {
+        xs.push_back(1.0e-4 * static_cast<double>(kN - 1u - i));
+        ys.push_back(2.0 * static_cast<double>(i) /
+                     static_cast<double>(kN - 1u));
+    }
+    const ws::spice::Table t = one_signal_table(xs, ys);
+    const PngImage im = decode_png(editor::render_plot_png(
+        t, nullptr, "time", nullptr, 0u));
+    const PngMap m(0.0, 1.0e-4 * (kN - 1u), 0.0, 2.0);
+    CHECK(im.near_ink(m.sx(0.01), m.sy(1.0), 2, kPngInk));  // i = 100
+    CHECK(im.near_ink(m.sx(0.015), m.sy(0.5), 2, kPngInk)); // i = 50
+    CHECK(im.near_ink(m.sx(0.005), m.sy(1.5), 2, kPngInk)); // i = 150
+}
+
+TEST_CASE("the plot PNG breaks the line at a non-finite sample") {
+    // A flat line at level 1 with sample 100's y, then (a second image)
+    // its x, gone: either leaves a gap at that sample.
+    constexpr std::size_t kN = 201u;
+    std::vector<double> xs;
+    std::vector<double> ys(kN, 1.0);
+    for (std::size_t i = 0; i < kN; ++i) {
+        xs.push_back(1.0e-4 * static_cast<double>(i));
+    }
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const PngMap m(0.0, 1.0e-4 * (kN - 1u), 0.0, 2.0);
+
+    std::vector<double> ys_gap = ys;
+    ys_gap[100] = nan;
+    const PngImage by_y = decode_png(editor::render_plot_png(
+        one_signal_table(xs, ys_gap), nullptr, "time", nullptr, 0u));
+    CHECK(by_y.near_ink(m.sx(xs[50]), m.sy(1.0), 2, kPngInk));
+    CHECK_FALSE(by_y.near_ink(m.sx(xs[100]), m.sy(1.0), 2, kPngInk));
+
+    std::vector<double> xs_gap = xs;
+    xs_gap[100] = nan;
+    const PngImage by_x = decode_png(editor::render_plot_png(
+        one_signal_table(xs_gap, ys), nullptr, "time", nullptr, 0u));
+    CHECK(by_x.near_ink(m.sx(xs[50]), m.sy(1.0), 2, kPngInk));
+    CHECK_FALSE(by_x.near_ink(m.sx(xs[100]), m.sy(1.0), 2, kPngInk));
 }
