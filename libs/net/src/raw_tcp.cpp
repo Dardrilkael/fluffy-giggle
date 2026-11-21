@@ -19,6 +19,7 @@ struct RawTcpConnection::Impl final
   std::function<void()> connected_callback;
   std::function<void(std::span<const std::byte>)> bytes_callback;
   std::function<void(NetError)> closed_callback;
+  bool connected = false;
   bool dead = false;
   bool closing = false;
 
@@ -29,8 +30,10 @@ struct RawTcpConnection::Impl final
   void arm() { peer_stream->set_keepalive(shared_from_this()); }
   void start() { peer_stream->start(); }
   void on_connected() override {
+    if (dead) return;
+    connected = true;
     auto callback = connected_callback;
-    if (!dead && callback) callback();
+    if (callback) callback();
   }
   void on_bytes(std::span<const std::byte> bytes) override {
     // Copy before invocation: callbacks may replace themselves (or clear
@@ -90,6 +93,9 @@ ws::core::Status RawTcpConnection::send(std::span<const std::byte> bytes) {
   if (impl_->dead || impl_->closing) {
     return fail(NetError::already_closed, "raw TCP connection is closed");
   }
+  if (!impl_->connected) {
+    return fail(NetError::connect_failed, "raw TCP connection is not connected");
+  }
   if (bytes.empty()) return {};
   impl_->peer_stream->write(std::vector<std::byte>(bytes.begin(), bytes.end()));
   return {};
@@ -99,7 +105,12 @@ ws::core::Status RawTcpConnection::close() {
     return fail(NetError::already_closed, "raw TCP connection is closed");
   }
   impl_->closing = true;
-  impl_->peer_stream->finish_and_close();
+  if (impl_->connected) {
+    impl_->peer_stream->finish_and_close();
+  } else {
+    // A FIN cannot be sent before the handshake has completed.
+    impl_->peer_stream->abort();
+  }
   return {};
 }
 void RawTcpConnection::abort() {
