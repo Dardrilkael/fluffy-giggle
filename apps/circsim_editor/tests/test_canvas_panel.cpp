@@ -151,6 +151,41 @@ struct Bench {
         click_at(a);
         click_at(b);
     }
+
+    // One TOUCH frame, drawn the way the shell would pump it: the
+    // bench keeps its own accumulator `tf` (the script's held-state
+    // carrier) and PUMPS next_frame() between frames exactly as the
+    // shell does at the pump top - edges live one frame and one frame
+    // only (a reused, never-pumped frame would carry finger 1's bridged
+    // press edge from three frames back into the lift frame, where the
+    // freeze is legitimately open: a phantom click). The touches are
+    // applied onto `tf` per step; NO mouse is written (mouse_present
+    // stays false - the bridge never writes it; a touch-only device
+    // lists touches only). The panel's gesture pass reads the table,
+    // answers zoom/pan to the camera, and the freeze suppresses the
+    // whole mouse path for held contacts.
+    ws::input::InputFrame tf{};
+    // The shell's own cadence: the writers fill `tf`, ONE draw reads
+    // it (the edges ride this frame), and the pump AFTER the draw
+    // clears edges and drops lifted contacts for the next. (Pumping
+    // BEFORE the draw erases every edge the panel should have seen -
+    // the arbiter would never observe a lift and its contact book
+    // would hold a live ghost forever.)
+    void touch_step() {
+        touch_frame(tf);
+        tf.next_frame();
+    }
+    void touch_frame(const ws::input::InputFrame& in) {
+        clc.cmds.clear();
+        gui.begin_frame(in);
+        gui::LayoutCursor layout;
+        (void)layout.begin_panel(gui::Rect{0.0f, 0.0f, 640.0f, 520.0f},
+                                 12.0f, 8.0f);
+        body = layout.panel_content();
+        editor::draw_canvas_panel(ed, gui, layout, theme);
+        layout.end_panel();
+        gui.end_frame();
+    }
 };
 
 // Per-axis float compare (the assertions' tolerance helper).
@@ -3225,6 +3260,174 @@ TEST_CASE("a .dc sweep drives the transport like a transient") {
     CHECK(editor::Editor::shown_sample(*t, 0.75) == 1u);
     CHECK(editor::Editor::shown_sample(*t, 4.99) ==
           axis.size() - 2u);
+}
+
+
+// --- THE TOUCH GESTURES (the ws::gestures rewrite) --------------------------
+//
+// The contracts, driven through the REAL panel (draw_canvas_panel pumps
+// the arbiter inside handle_pointer - no seam stubbed) with the shell's
+// own pump discipline (touch_step: next_frame() between frames, edges
+// live exactly one frame):
+//   * a pinch zooms toward the fingers' mid by the span ratio, and the
+//     world under the mid stays under the mid;
+//   * two fingers drifting (span unchanged) pans the view by the mid's
+//     step - a pure translation, not the zoom's passenger;
+//   * THE FIRST FINGER OF A PINCH NEVER CLICKS: a two-finger gesture
+//     whose first finger lands dead on an entity arms no tool, lands
+//     no selection, leaves the document untouched - at every frame,
+//     including both-lift;
+//   * a plain one-finger tap DOES click (the deferred tap replayed as
+//     the tools' own left-press edge) - the junction lands selected;
+//   * a slop-crossing drag DRAGS (the deferred press replayed at the
+//     finger's press point, the follow riding the bridged mouse).
+
+TEST_CASE("a pinch zooms toward the fingers' mid, by the span ratio") {
+    Bench b;
+    b.draw();  // prime the viewport (the panel adopts vx..vh inside)
+    REQUIRE(b.ed.view.valid());
+    const double z0 = b.ed.view.zoom;
+    // The world point under the pinch mid must stay under it (fingers
+    // (200,100)-(300,100): the mid is (250, 100)).
+    const Pos under_mid0 = b.ed.view.s2w(ws::math::Vec2{250.0f, 100.0f});
+
+    b.tf.touch_down(ws::input::PointerId{1}, 200.0f, 100.0f);
+    b.touch_step();
+    // The second finger lands: the pinch's anchor frame (no zoom yet -
+    // the anchor IS this frame's span).
+    b.tf.touch_down(ws::input::PointerId{2}, 300.0f, 100.0f);
+    b.touch_step();
+    CHECK(z0 == doctest::Approx(b.ed.view.zoom));  // nothing yet
+    CHECK(b.ed.touch.state() == ws::gestures::GestureState::Pinch);
+    // The spread: 100 -> 130 px (30%, mid (250, 100) unmoved).
+    b.tf.touch_move(ws::input::PointerId{1}, 185.0f, 100.0f);
+    b.tf.touch_move(ws::input::PointerId{2}, 315.0f, 100.0f);
+    b.touch_step();
+    CHECK(b.ed.view.zoom == doctest::Approx(z0 * 1.3).epsilon(1e-6));
+    // The anchor held: the world under the mid stayed under the mid.
+    const Pos under_mid1 = b.ed.view.s2w(ws::math::Vec2{250.0f, 100.0f});
+    CHECK(under_mid1.x == doctest::Approx(under_mid0.x).epsilon(1e-9));
+    CHECK(under_mid1.y == doctest::Approx(under_mid0.y).epsilon(1e-9));
+
+    // The fingers lift (one then the other): the gesture resolves,
+    // nothing clicks, ever.
+    b.tf.touch_up(ws::input::PointerId{1}, 185.0f, 100.0f, false);
+    b.touch_step();
+    b.tf.touch_up(ws::input::PointerId{2}, 315.0f, 100.0f, false);
+    b.touch_step();
+    CHECK(b.ed.view.zoom == doctest::Approx(z0 * 1.3).epsilon(1e-6));
+    CHECK(b.ed.touch.state() == ws::gestures::GestureState::Idle);
+    CHECK(b.ed.sel.kind == editor::Selection::Kind::None);
+    CHECK(b.ed.drag.kind == editor::Editor::Drag::Kind::None);
+}
+
+TEST_CASE("two fingers drifting pans the view by the mid's step") {
+    Bench b;
+    b.draw();
+    REQUIRE(b.ed.view.valid());
+    const Pos c0 = b.ed.view.center;
+    const double z0 = b.ed.view.zoom;
+
+    b.tf.touch_down(ws::input::PointerId{1}, 200.0f, 100.0f);
+    b.touch_step();
+    b.tf.touch_down(ws::input::PointerId{2}, 300.0f, 100.0f);
+    b.touch_step();
+    // Both fingers translate 40px right, 20px down: the span is
+    // unchanged (a pure translation - no zoom), the mid drifts
+    // (250, 100) -> (290, 120).
+    b.tf.touch_move(ws::input::PointerId{1}, 240.0f, 120.0f);
+    b.tf.touch_move(ws::input::PointerId{2}, 340.0f, 120.0f);
+    b.touch_step();
+    CHECK(b.ed.view.zoom == doctest::Approx(z0).epsilon(1e-9));  // no zoom
+    // pan_by(-40/zoom, +20/zoom) in world units (screen y grows down).
+    CHECK(b.ed.view.center.x ==
+          doctest::Approx(c0.x - 40.0 / b.ed.view.zoom).epsilon(1e-9));
+    CHECK(b.ed.view.center.y ==
+          doctest::Approx(c0.y + 20.0 / b.ed.view.zoom).epsilon(1e-9));
+}
+
+TEST_CASE("THE FIRST FINGER OF A PINCH NEVER CLICKS: no tool arms, no command lands") {
+    Bench b;
+    b.place_wire();
+    b.draw();
+    // The first finger lands dead on junction a (1, 1) - exactly where
+    // a Select press would arm a drag. The whole gesture must leave the
+    // document untouched.
+    const ws::math::Vec2 sp = b.ed.view.w2s({1.0, 1.0});
+    b.tf.touch_down(ws::input::PointerId{1}, sp.x, sp.y);
+    b.touch_step();
+    CHECK(b.ed.sel.kind == editor::Selection::Kind::None);  // never at press
+
+    // The SECOND finger lands: the pinch owns every frame from here.
+    b.tf.touch_down(ws::input::PointerId{2}, sp.x + 100.0f, sp.y);
+    b.touch_step();
+    CHECK(b.ed.touch.state() == ws::gestures::GestureState::Pinch);
+    CHECK(b.ed.sel.kind == editor::Selection::Kind::None);
+    CHECK(b.ed.drag.kind == editor::Editor::Drag::Kind::None);
+    CHECK(!b.ed.box.active);
+
+    // The pinch runs, fingers lift one then the other: still nothing.
+    b.tf.touch_move(ws::input::PointerId{2}, sp.x + 130.0f, sp.y);
+    b.touch_step();
+    b.tf.touch_up(ws::input::PointerId{1}, sp.x, sp.y, false);
+    b.touch_step();
+    b.tf.touch_up(ws::input::PointerId{2}, sp.x + 130.0f, sp.y, false);
+    b.touch_step();
+    CHECK(b.ed.sel.kind == editor::Selection::Kind::None);
+    CHECK(b.ed.drag.kind == editor::Editor::Drag::Kind::None);
+    CHECK(!b.ed.box.active);
+    CHECK(b.ed.touch.state() == ws::gestures::GestureState::Idle);
+}
+
+TEST_CASE("a plain one-finger tap DOES click: the deferred tap selects the part") {
+    Bench b;
+    b.place_wire();
+    b.draw();
+    const ws::math::Vec2 sp = b.ed.view.w2s({1.0, 1.0});  // junction a
+    b.tf.touch_down(ws::input::PointerId{1}, sp.x, sp.y);
+    b.touch_step();
+    CHECK(b.ed.touch.state() == ws::gestures::GestureState::Touching);
+    CHECK(b.ed.sel.kind == editor::Selection::Kind::None);  // not at press!
+    // The lift (inside the tap window, no slop crossing): the deferred
+    // tap lands as the tools' own left-press edge - the junction is
+    // selected, exactly as a mouse click would have. The tap frame also
+    // carries the button's release edge (a tap IS press+release in one
+    // gesture); the armed drag settles on the next quiet frame.
+    b.tf.touch_up(ws::input::PointerId{1}, sp.x, sp.y, false);
+    b.touch_step();
+    CHECK(b.ed.sel.kind == editor::Selection::Kind::Junction);
+    b.touch_step();  // a quiet frame: the button is gone, nothing follows
+    CHECK(b.ed.drag.kind == editor::Editor::Drag::Kind::None);
+    CHECK(b.ed.touch.state() == ws::gestures::GestureState::Idle);
+}
+
+TEST_CASE("a slop-crossing drag drags the junction (the deferred press replayed)") {
+    Bench b;
+    b.place_wire();
+    b.draw();
+    // A mouse drag's own rule: press ON the entity, the follow rides.
+    // The finger presses junction a (1, 1), wanders past slop - the
+    // arbiter answers Drag, the panel replays the deferred press AT
+    // THE PRESS POINT, and the bridged mouse (the finger's own mirror)
+    // carries the drag. The junction follows the finger.
+    const ws::math::Vec2 sp = b.ed.view.w2s({1.0, 1.0});
+    const Pos j0 = b.doc.schem.junctions().front().pos;  // (1, 1)
+
+    b.tf.touch_down(ws::input::PointerId{1}, sp.x, sp.y);
+    b.touch_step();
+    CHECK(b.ed.sel.kind == editor::Selection::Kind::None);  // deferred
+    // 60px right, past the 24px slop: the drag arms (the press
+    // replayed at the finger's PRESS point, on the junction).
+    b.tf.touch_move(ws::input::PointerId{1}, sp.x + 60.0f, sp.y);
+    b.touch_step();
+    CHECK(b.ed.sel.kind == editor::Selection::Kind::Junction);
+    CHECK(b.ed.drag.kind == editor::Editor::Drag::Kind::Junction);
+    // The finger keeps moving: the junction follows (the live drag's
+    // own writes - snap-free here, the world grid at default zoom).
+    b.tf.touch_move(ws::input::PointerId{1}, sp.x + 120.0f, sp.y);
+    b.touch_step();
+    const Pos j1 = b.doc.schem.junctions().front().pos;
+    CHECK(j1.x > j0.x);  // it moved toward the finger
 }
 
 }  // namespace

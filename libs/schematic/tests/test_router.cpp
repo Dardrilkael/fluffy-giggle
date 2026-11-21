@@ -138,7 +138,12 @@ struct RtFixture {
     RtFixture() {
         p1 = d.add_pin(1, 0, {10.0, 0.0});
         p2 = d.add_pin(2, 0, {24.0, 0.0});
-        w = d.add_wire(p1, p2, {{10.0, 6.0}, {24.0, 6.0}}, 90, 270);
+        // Both pins face NORTH: the wire leaves p1 up, crosses at y = 6 and
+        // comes down into p2 from the north - the side p2 faces. (This
+        // used to declare p2 as facing south while attaching from the
+        // north: a wire leaving its pin backwards through the part, which
+        // the router slid along unchecked.)
+        w = d.add_wire(p1, p2, {{10.0, 6.0}, {24.0, 6.0}}, 90, 90);
     }
 };
 
@@ -198,7 +203,17 @@ TEST_CASE("golden 3: pin facing away from target -> legal pattern never backward
 
     REQUIRE(path.size() >= 3);
     CHECK(path[1].y > 10.0);  // first leg leaves along the face (+y)
-    CHECK(bends(path) <= 3);  // an L or a U, never more
+    // p2 faces SOUTH, so the wire must arrive from the south: out past
+    // the stub, around, and up into the pin. That needs 4 bends. (The old
+    // "<= 3" was met only by a path that ran down THROUGH p2 and back up
+    // over itself - a doubled-back wire the bend count cannot see.)
+    CHECK(bends(path) <= 4);
+    CHECK(path[path.size() - 2].y < 0.0);  // arrives from p2's open side
+    for (std::size_t i = 1; i + 1 < path.size(); ++i) {
+        const double dot = (path[i].x - path[i - 1].x) * (path[i + 1].x - path[i].x) +
+                           (path[i].y - path[i - 1].y) * (path[i + 1].y - path[i].y);
+        CHECK(dot >= 0.0);  // no leg runs back over the one before it
+    }
     for (std::size_t i = 1; i < path.size(); ++i) {
         const bool axis = (std::fabs(path[i].x - path[i - 1].x) < 1e-9) ||
                           (std::fabs(path[i].y - path[i - 1].y) < 1e-9);

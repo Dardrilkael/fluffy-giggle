@@ -61,6 +61,7 @@
                                 // magnetism/series_color - the pure math
                                 // this header's methods forward onto)
 #include <ws/circsim/library.hpp>
+#include <ws/gestures/arbiter.hpp>
 #include <ws/circsim/locate.hpp>
 #include <ws/circsim/model.hpp>
 #include <ws/circsim/nets.hpp>
@@ -897,6 +898,35 @@ struct Editor {
         bool armed = false;
         ws::math::Vec2 from{0.0f, 0.0f};
     } pan;
+
+    // THE TOUCH GESTURE SEAM (the ws::gestures rewrite): the arbiter
+    // that turns multi-touch frames into view actions. A finger is not
+    // a mouse - the InputFrame bridges the first touch as button 0,
+    // which is exactly what would make the first finger of a pinch arm
+    // a tool. So while the arbiter holds contacts (Touching, Drag,
+    // Pinch, LongPress) the pointer handler MUST NOT read the bridged
+    // mouse as a click source; the ONLY click it may honor is the
+    // arbiter's own deferred tap, answered at the finger's LIFT frame
+    // (and never for a contact that rode a pinch). Pinch frames apply
+    // zoom_at (span ratio toward the finger mid) and pan_by (the mid
+    // drift) directly - the same calls the wheel and the pan drags
+    // already make, so the camera code stays single-pathed.
+    ws::gestures::TouchArbiter touch;
+    // The deferred tap's landing (screen px), set by the gesture pass
+    // on the finger's lift frame and consumed by the pointer handler's
+    // one-frame replay (a LEFT press+release at the point) - exactly
+    // once, the same frame it was answered.
+    bool touch_tap_pending = false;
+    ws::math::Vec2 touch_tap_at{0.0f, 0.0f};
+    // The one-finger drag's deferred press (the slop crossing point),
+    // replayed as the mouse path's own LEFT press edge on the drag's
+    // first frame - the finger's contact keeps the button held through
+    // the platform's bridge from there, so the drag follows exactly the
+    // mouse drag's own machinery. touch_drag_id names the contact whose
+    // drag owns the replay (kNoPointer = none).
+    bool touch_press_pending = false;
+    ws::math::Vec2 touch_press_at{0.0f, 0.0f};
+    ws::input::PointerId touch_drag_id{ws::input::kNoPointer.value};
 
     // --- the frame tick, the locate pulse, the panel's key edges ---------
     // The Schematic panel calls tick() once per frame: it advances the

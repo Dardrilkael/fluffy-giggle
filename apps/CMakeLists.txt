@@ -44,6 +44,8 @@ ws_app_wants(_want circsim_cli circsim)
 set(ws_want_circsim_cli ${_want})
 ws_app_wants(_want circsim_editor ui circsim jobs platform app settings)
 set(ws_want_circsim_editor ${_want})
+ws_app_wants(_want schematic_test ui schematic jobs platform app settings)
+set(ws_want_schematic_test ${_want})
 unset(_want)
 
 if(ws_want_playground)
@@ -127,4 +129,11 @@ if(ws_want_circsim_editor)
   # app TU's bridge - the pickers' worker dispatch and the touch
   # ->mouse bridge the window layer already owns.
   add_subdirectory(circsim_editor)
+endif()
+
+if(ws_want_schematic_test)
+  # schematic_test is a minimal test app: schematic + canvas wiring.
+  # Simple rectangular components with pins that can be wired together.
+  # Uses ws::schematic (the headless routing core) + ws::ui::canvas directly.
+  add_subdirectory(schematic_test)
 endif()

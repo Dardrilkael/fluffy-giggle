@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <optional>
+#include <vector>
 
 #include "geom.hpp"
 
@@ -23,7 +25,8 @@ constexpr double kLead = 1.0;  // the stub length a pinned exit commits to
         case 0: return {1.0, 0.0};
         case 90: return {0.0, 1.0};
         case 180: return {-1.0, 0.0};
-        default: return {0.0, -1.0};
+        case 270: return {0.0, -1.0};
+        default: return {0.0, 0.0};  // free / invalid: no lead
     }
 }
 
@@ -56,6 +59,82 @@ struct Cost {
         }
     }
     return c;
+}
+
+// Drops consecutive duplicate points ONLY. Collinear points stay, so a
+// reversal (the wire running back over itself) remains visible to
+// legal_route; cleanup() is what folds them afterwards.
+[[nodiscard]] std::vector<Vec2> dedupe(const std::vector<Vec2>& p) {
+    std::vector<Vec2> out;
+    for (const Vec2& q : p) {
+        if (out.empty() || !detail::near(out.back(), q)) {
+            out.push_back(q);
+        }
+    }
+    return out;
+}
+
+// A route is LEGAL when it is a clean orthogonal walk:
+//   * every leg is axis-aligned and has length;
+//   * no collinear REVERSAL (a leg running back over the one before it -
+//     the wire doubling back on itself, usually through its own part);
+//   * a pinned end's first / last leg does not head backwards into its
+//     part;
+//   * no two non-adjacent legs touch (a wire never crosses or touches
+//     itself - that would be an implicit self-connection).
+// cost_of() cannot see a reversal (its cross product is 0, so it counts
+// 0 bends): without this check a doubled-back path looked CHEAPER than an
+// honest one and won the candidate race.
+[[nodiscard]] bool legal_route(const std::vector<Vec2>& p, int a_dir,
+                               int b_dir) {
+    const std::size_t n = p.size();
+    if (n < 2u) {
+        return false;
+    }
+    for (std::size_t i = 1; i < n; ++i) {
+        const bool h = std::fabs(p[i].y - p[i - 1].y) <= kEps;
+        const bool v = std::fabs(p[i].x - p[i - 1].x) <= kEps;
+        if (h == v) {
+            return false;  // diagonal (neither) or zero-length (both)
+        }
+    }
+    for (std::size_t i = 1; i + 1 < n; ++i) {
+        const double dot = (p[i].x - p[i - 1].x) * (p[i + 1].x - p[i].x) +
+                           (p[i].y - p[i - 1].y) * (p[i + 1].y - p[i].y);
+        const double cross = (p[i].x - p[i - 1].x) * (p[i + 1].y - p[i].y) -
+                             (p[i].y - p[i - 1].y) * (p[i + 1].x - p[i].x);
+        if (std::fabs(cross) <= kEps && dot < 0.0) {
+            return false;  // reversal
+        }
+    }
+    if (a_dir >= 0) {
+        const Vec2 u = unit(a_dir);
+        if ((p[1].x - p[0].x) * u.x + (p[1].y - p[0].y) * u.y < -kEps) {
+            return false;
+        }
+    }
+    if (b_dir >= 0) {
+        const Vec2 u = unit(b_dir);
+        if ((p[n - 2].x - p[n - 1].x) * u.x +
+                (p[n - 2].y - p[n - 1].y) * u.y < -kEps) {
+            return false;
+        }
+    }
+    // Axis-aligned legs: a closed segment IS its bounding box.
+    const auto touch = [&](std::size_t i, std::size_t j) {
+        return !(std::max(p[i - 1].x, p[i].x) < std::min(p[j - 1].x, p[j].x) - kEps ||
+                 std::max(p[j - 1].x, p[j].x) < std::min(p[i - 1].x, p[i].x) - kEps ||
+                 std::max(p[i - 1].y, p[i].y) < std::min(p[j - 1].y, p[j].y) - kEps ||
+                 std::max(p[j - 1].y, p[j].y) < std::min(p[i - 1].y, p[i].y) - kEps);
+    };
+    for (std::size_t i = 1; i < n; ++i) {
+        for (std::size_t j = i + 2; j < n; ++j) {
+            if (touch(i, j)) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 // The L: out from a (free), one corner, into b (free).
@@ -130,154 +209,180 @@ struct Cost {
 //
 // The rules (the spec's own):
 //   * both ends free: the two Ls, cheapest wins;
-//   * one end pinned: keep the pinned stub (out kLead along its exit),
-//     route the free end to the stub's tip with the two Ls;
-//   * both ends pinned: the L family against both stubs, plus the U
-//     escapes when the stubs face each other's lanes head-on (an L would
-//     leave a pin backwards - the only case a U wins);
+//   * one end pinned: the direct Ls, plus the route that keeps the pinned
+//     stub (out kLead along its exit) and runs the two Ls from the tip;
+//   * both ends pinned: the centred Z lanes and the L family through both
+//     stubs, plus the U escapes when a stub faces away from the other pin;
+//   * detours (C-shaped lanes) always join the race, so it never has zero
+//     legal entrants;
 //   * deterministic: candidates in a fixed order, strict better-only.
 [[nodiscard]] std::vector<Vec2> route_ends(Vec2 a, int a_dir, Vec2 b,
                                             int b_dir) {
     std::vector<std::vector<Vec2>> cands;
+    cands.reserve(16);
 
+    const bool pinned_a = a_dir >= 0;
+    const bool pinned_b = b_dir >= 0;
     const auto stub = [](Vec2 p, int dir) -> Vec2 {
         const Vec2 u = unit(dir);
         return {p.x + u.x * kLead, p.y + u.y * kLead};
     };
-    const bool pinned_a = a_dir >= 0;
-    const bool pinned_b = b_dir >= 0;
+    // The stub tips (the pins themselves when free).
+    const Vec2 ta = pinned_a ? stub(a, a_dir) : a;
+    const Vec2 tb = pinned_b ? stub(b, b_dir) : b;
+
+    // a -> [ta] -> L(ta, tb) -> [tb] -> b. Free ends collapse into their
+    // neighbour (dedupe() drops the repeated point), so one builder serves
+    // every pinned / free combination.
+    const auto through = [&](bool hfirst) {
+        std::vector<Vec2> via{a};
+        if (pinned_a) {
+            via.push_back(ta);
+        }
+        const std::vector<Vec2> rest = pattern_l(ta, tb, hfirst);
+        via.insert(via.end(), rest.begin(), rest.end());
+        if (pinned_b) {
+            via.push_back(b);
+        }
+        cands.push_back(std::move(via));
+    };
+    const bool a_h = pinned_a && unit(a_dir).y == 0.0;
+    const bool b_h = pinned_b && unit(b_dir).y == 0.0;
 
     if (!pinned_a && !pinned_b) {
         cands.push_back(pattern_l(a, b, true));
         cands.push_back(pattern_l(a, b, false));
     } else if (pinned_a && !pinned_b) {
-        const Vec2 out_a = stub(a, a_dir);
-        cands.push_back(pattern_l(a, b, unit(a_dir).y == 0.0));
-        cands.push_back(pattern_l(a, b, unit(a_dir).y != 0.0));
-        // Out the stub then free L from the tip to b.
-        std::vector<Vec2> via{a, out_a};
-        const auto rest = pattern_l(out_a, b, unit(a_dir).y == 0.0);
-        via.insert(via.end(), rest.begin() + 1, rest.end());
-        cands.push_back(via);
-        std::vector<Vec2> via2{a, out_a};
-        const auto rest2 = pattern_l(out_a, b, unit(a_dir).y != 0.0);
-        via2.insert(via2.end(), rest2.begin() + 1, rest2.end());
-        cands.push_back(via2);
+        cands.push_back(pattern_l(a, b, a_h));
+        cands.push_back(pattern_l(a, b, !a_h));
+        through(a_h);
+        through(!a_h);
     } else if (!pinned_a && pinned_b) {
-        const Vec2 out_b = stub(b, b_dir);
         cands.push_back(pattern_l(a, b, true));
         cands.push_back(pattern_l(a, b, false));
-        std::vector<Vec2> via{a};
-        const auto rest = pattern_l(a, out_b, unit(b_dir).y == 0.0);
-        via.insert(via.end(), rest.begin() + 1, rest.end());
-        via.push_back(b);
-        cands.push_back(via);
-        std::vector<Vec2> via2{a};
-        const auto rest2 = pattern_l(a, out_b, unit(b_dir).y != 0.0);
-        via2.insert(via2.end(), rest2.begin() + 1, rest2.end());
-        via2.push_back(b);
-        cands.push_back(via2);
+        through(b_h);
+        through(!b_h);
     } else {
-        // Both pinned: the Ls through both stubs, both orientations.
-        const Vec2 out_a = stub(a, a_dir);
-        const Vec2 out_b = stub(b, b_dir);
-        for (const bool hfirst : {true, false}) {
-            std::vector<Vec2> via{a, out_a};
-            const auto rest = pattern_l(out_a, out_b, hfirst);
-            via.insert(via.end(), rest.begin() + 1, rest.end());
-            via.push_back(b);
-            cands.push_back(std::move(via));
-        }
-        // The U escapes: a facing away from b's lane, or head-on.
-        const Vec2 ua = unit(a_dir);
-        const Vec2 ub = unit(b_dir);
-        const Vec2 rel{b.x - a.x, b.y - a.y};
-        const bool a_back = rel.x * ua.x + rel.y * ua.y < -kEps;
-        const Vec2 rel_b{a.x - b.x, a.y - b.y};
-        const bool b_back = rel_b.x * ub.x + rel_b.y * ub.y < -kEps;
-        if (a_back || b_back) {
-            cands.push_back(pattern_u(a, a_dir, b, b_dir, false));
-            cands.push_back(pattern_u(a, a_dir, b, b_dir, true));
-        }
-        // The Zs: stub out, run a lane, land into the other stub - the
-        // workhorse when the pins face the same axis but offset lanes.
+        // The Zs: stub out, run a lane HALFWAY between the two stub tips
+        // (rounded to the whole grid unit, as kLead is one), land into the
+        // other stub. They come first so a centred lane wins a tie against
+        // the L that hugs the far stub. (The previous lane was the stub's
+        // own coordinate, which made every Z a copy of an L.)
         for (const bool lane_is_y : {true, false}) {
-            const double lane = lane_is_y ? out_a.y : out_a.x;
-            std::vector<Vec2> via{a, out_a};
-            const auto z = pattern_z(out_a, out_b, lane, lane_is_y);
+            const double lane = std::round(
+                lane_is_y ? 0.5 * (ta.y + tb.y) : 0.5 * (ta.x + tb.x));
+            std::vector<Vec2> via{a, ta};
+            const auto z = pattern_z(ta, tb, lane, lane_is_y);
             via.insert(via.end(), z.begin() + 1, z.end());
             via.push_back(b);
             cands.push_back(std::move(via));
         }
+        // The Ls through both stubs, both orientations.
+        through(true);
+        through(false);
+        // The U escapes: a facing away from b's lane, or head-on.
+        const Vec2 ua = unit(a_dir);
+        const Vec2 ub = unit(b_dir);
+        const bool a_back =
+            (b.x - a.x) * ua.x + (b.y - a.y) * ua.y < -kEps;
+        const bool b_back =
+            (a.x - b.x) * ub.x + (a.y - b.y) * ub.y < -kEps;
+        if (a_back || b_back) {
+            cands.push_back(pattern_u(a, a_dir, b, b_dir, false));
+            cands.push_back(pattern_u(a, a_dir, b, b_dir, true));
+        }
     }
 
-    // The exit-leg legality filter: a pinned end's FIRST/LAST leg must
-    // not head backwards into its part (dot with the exit unit >= 0).
+    // The detours: from the two stub tips run a C-shaped lane past BOTH on
+    // each of the four sides. They cost two bends so they never beat a
+    // real pattern, but they guarantee the race always has a legal entrant
+    // when every L / Z / U would double back.
+    {
+        const double right = std::max(ta.x, tb.x) + kLead;
+        const double left = std::min(ta.x, tb.x) - kLead;
+        const double top = std::max(ta.y, tb.y) + kLead;
+        const double bottom = std::min(ta.y, tb.y) - kLead;
+        const auto around = [&](Vec2 m1, Vec2 m2) {
+            std::vector<Vec2> via{a};
+            if (pinned_a) {
+                via.push_back(ta);
+            }
+            via.push_back(m1);
+            via.push_back(m2);
+            if (pinned_b) {
+                via.push_back(tb);
+            }
+            via.push_back(b);
+            cands.push_back(std::move(via));
+        };
+        for (const double lx : {right, left}) {
+            around({lx, ta.y}, {lx, tb.y});
+        }
+        for (const double ly : {top, bottom}) {
+            around({ta.x, ly}, {tb.x, ly});
+        }
+    }
+
+    // The race: only LEGAL candidates run (see legal_route), cheapest
+    // (bends, then length) wins, ties by construction order.
     std::vector<Vec2> best;
     Cost best_cost;
     bool have = false;
-    for (const auto& cand : cands) {
-        if (cand.size() < 2u) {
+    for (const auto& raw : cands) {
+        std::vector<Vec2> cand = dedupe(raw);
+        if (!legal_route(cand, a_dir, b_dir)) {
             continue;
-        }
-        if (pinned_a) {
-            const Vec2 u = unit(a_dir);
-            const double dot = (cand[1].x - cand[0].x) * u.x +
-                               (cand[1].y - cand[0].y) * u.y;
-            if (dot < -kEps) {
-                continue;
-            }
-        }
-        if (pinned_b) {
-            const Vec2 u = unit(b_dir);
-            const double dot =
-                (cand[cand.size() - 2].x - cand.back().x) * u.x +
-                (cand[cand.size() - 2].y - cand.back().y) * u.y;
-            if (dot < -kEps) {
-                continue;
-            }
         }
         const Cost c = cost_of(cand);
         if (!have || c.better(best_cost)) {
-            best = cand;
+            best = std::move(cand);
             best_cost = c;
             have = true;
         }
     }
     if (!have) {
-        // No legal candidate (degenerate geometry): the plain L, the
-        // honest fallback.
+        // No legal candidate (degenerate geometry, e.g. both ends on the
+        // same spot): the plain L. NOT checked by legal_route - it may
+        // leave a pin backwards; the detours make this practically
+        // unreachable.
         best = pattern_l(a, b, true);
     }
     return best;
 }
 
-// The final cleanup: duplicate vertices, zero-length legs, collinear
-// continuing middles fold away. A collinear REVERSAL keeps its corner
-// (folding it would run the wire back through the part it just left).
+// The final cleanup: duplicate vertices, zero-length legs and collinear
+// middles fold away, and a SPIKE (a leg that runs out and straight back,
+// A -> B -> C collinear with C behind B) is removed. Each removal can
+// expose another on the tail, so the tail is re-examined until stable.
+// (It used to KEEP a collinear reversal "so the wire does not run back
+// through the part it just left" - which is exactly the doubled-back wire
+// users saw. Whether the cleaned wire still leaves its pin correctly is
+// legal_route's question, asked by the caller.)
 [[nodiscard]] std::vector<Vec2> cleanup(const std::vector<Vec2>& full) {
     std::vector<Vec2> out;
     for (const Vec2& p : full) {
-        if (!out.empty() && std::fabs(out.back().x - p.x) <= kEps &&
-            std::fabs(out.back().y - p.y) <= kEps) {
+        if (!out.empty() && detail::near(out.back(), p)) {
             continue;  // duplicate / zero-length leg
         }
-        if (out.size() >= 2u) {
-            const Vec2& p0 = out[out.size() - 2u];
-            const Vec2& p1 = out[out.size() - 1u];
+        out.push_back(p);
+        while (out.size() >= 3u) {
+            const std::size_t n = out.size();
+            const Vec2 p0 = out[n - 3];
+            const Vec2 p1 = out[n - 2];
+            const Vec2 p2 = out[n - 1];
             const bool collinear =
                 (std::fabs(p0.x - p1.x) <= kEps &&
-                 std::fabs(p1.x - p.x) <= kEps) ||
+                 std::fabs(p1.x - p2.x) <= kEps) ||
                 (std::fabs(p0.y - p1.y) <= kEps &&
-                 std::fabs(p1.y - p.y) <= kEps);
-            const double along = (p1.x - p0.x) * (p.x - p1.x) +
-                                 (p1.y - p0.y) * (p.y - p1.y);
-            if (collinear && along > 0.0) {
-                out.back() = p;  // the leg extends: fold
-                continue;
+                 std::fabs(p1.y - p2.y) <= kEps);
+            if (!collinear) {
+                break;
+            }
+            out.erase(out.end() - 2);  // fold (continuing) or spike (reversal)
+            if (detail::near(out[out.size() - 2], out.back())) {
+                out.erase(out.end() - 2);  // the spike returned to its start
             }
         }
-        out.push_back(p);
     }
     return out;
 }
@@ -323,65 +428,66 @@ Overlay resolve_move(const Doc& doc, const MoveSession& session) {
         if (n == nullptr) {
             continue;
         }
-        const bool moved =
-            std::fabs(n->pos.x - pos.x) > kEps ||
-            std::fabs(n->pos.y - pos.y) > kEps;
-        if (moved) {
+        if (std::fabs(n->pos.x - pos.x) > kEps ||
+            std::fabs(n->pos.y - pos.y) > kEps) {
             ov.nodePos[id] = pos;
         }
     }
 
-    // The ends dragged free: their wires' paths bend to the new point.
-    std::map<WireId, bool> end_move;  // wire -> a side moved
+    // The ends dragged free, by wire (a wire may have both ends dragged;
+    // for a repeated side the last entry wins).
+    struct EndDrag {
+        std::optional<Vec2> a_to;
+        std::optional<Vec2> b_to;
+    };
+    std::map<WireId, EndDrag> drags;
     for (const auto& e : session.ends) {
-        end_move[e.wire] = e.a_side;
+        EndDrag& d = drags[e.wire];
+        (e.a_side ? d.a_to : d.b_to) = e.to;
     }
 
     // 2. Wires: every wire whose endpoints (or a dragged end) moved.
     for (const Wire& w : doc.wires) {
+        const bool a_moved = ov.nodePos.count(w.a) != 0;
+        const bool b_moved = ov.nodePos.count(w.b) != 0;
+        const bool a_turned = session.land_dir.count(w.a) != 0;
+        const bool b_turned = session.land_dir.count(w.b) != 0;
+        const auto dr = drags.find(w.id);
+        const bool end_moved = dr != drags.end();
+        if (!a_moved && !b_moved && !end_moved && !a_turned && !b_turned) {
+            continue;  // untouched: keeps its shape (decided FIRST, cheaply)
+        }
+
         const Node* na = doc.find_node(w.a);
         const Node* nb = doc.find_node(w.b);
         if (na == nullptr || nb == nullptr) {
             continue;  // dangling: nothing to route
         }
-        const bool a_moved = ov.nodePos.count(w.a) != 0;
-        const bool b_moved = ov.nodePos.count(w.b) != 0;
-        const bool a_turned = session.land_dir.count(w.a) != 0;
-        const bool b_turned = session.land_dir.count(w.b) != 0;
-        const auto em = end_move.find(w.id);
-        const bool end_moved = em != end_move.end();
 
-        Vec2 a = na->pos;
-        Vec2 b = nb->pos;
-        if (a_moved) {
-            a = ov.nodePos.at(w.a);
-        }
-        if (b_moved) {
-            b = ov.nodePos.at(w.b);
-        }
+        Vec2 a = a_moved ? ov.nodePos.at(w.a) : na->pos;
+        Vec2 b = b_moved ? ov.nodePos.at(w.b) : nb->pos;
 
         // The exit directions: the stored ones, overridden by the
         // session's rotation map (a rotated pin's new face).
         int a_dir = w.a_dir;
         int b_dir = w.b_dir;
-        const auto da = session.land_dir.find(w.a);
-        if (da != session.land_dir.end()) {
-            a_dir = da->second;
+        if (const auto it = session.land_dir.find(w.a);
+            it != session.land_dir.end()) {
+            a_dir = it->second;
             ov.endDir[{w.id, true}] = a_dir;
         }
-        const auto db = session.land_dir.find(w.b);
-        if (db != session.land_dir.end()) {
-            b_dir = db->second;
+        if (const auto it = session.land_dir.find(w.b);
+            it != session.land_dir.end()) {
+            b_dir = it->second;
             ov.endDir[{w.id, false}] = b_dir;
         }
-        // A junction's end is never pinned; a dragged free end is free.
-        for (const auto& e : session.ends) {
-            if (e.wire == w.id) {
-                if (e.a_side) {
-                    a_dir = kDirFree;  // dragged loose: free
-                } else {
-                    b_dir = kDirFree;
-                }
+        // A dragged free end is free; a junction's end is never pinned.
+        if (end_moved) {
+            if (dr->second.a_to) {
+                a_dir = kDirFree;
+            }
+            if (dr->second.b_to) {
+                b_dir = kDirFree;
             }
         }
         if (!na->is_pin()) {
@@ -391,86 +497,100 @@ Overlay resolve_move(const Doc& doc, const MoveSession& session) {
             b_dir = kDirFree;
         }
 
-        // The stored path (waypoints may be stale after the move).
-        std::vector<Vec2> path;
-        path.push_back(a);
-        path.insert(path.end(), w.mid.begin(), w.mid.end());
-        path.push_back(b);
-
-        std::vector<Vec2> fresh;
-        const std::size_t old_bends = [&] {
-            std::vector<Vec2> fp;
-            fp.push_back(na->pos);
-            fp.insert(fp.end(), w.mid.begin(), w.mid.end());
-            fp.push_back(nb->pos);
-            return cost_of(fp).bends;
-        }();
-
-        if (!a_moved && !b_moved && !end_moved && !a_turned && !b_turned) {
-            continue;  // untouched: keeps its shape
-        }
-
         // THE RULES:
-        //  * both ends moved (same delta - the part/group drag): the
-        //    corridor translates rigidly, else re-route;
+        //  * an end dragged free: route to the session's point;
+        //  * both ends moved (same delta - the part/group drag, no pin
+        //    turned): the corridor translates rigidly, else re-route;
         //  * one end moved: the fixed end's stub + exit direction kept,
         //    the nearest waypoint slides; a short wire re-routes;
-        //  * an end dragged free: route to the session's point.
+        //  * a pin's face turned: the old corridor leaves the old face,
+        //    so re-route.
+        std::vector<Vec2> fresh;
         if (end_moved) {
-            // The dragged end's new position is the session's point.
-            for (const auto& e : session.ends) {
-                if (e.wire == w.id) {
-                    if (e.a_side) {
-                        a = e.to;
-                    } else {
-                        b = e.to;
-                    }
-                }
+            if (dr->second.a_to) {
+                a = *dr->second.a_to;
+            }
+            if (dr->second.b_to) {
+                b = *dr->second.b_to;
             }
             fresh = route_ends(a, a_dir, b, b_dir);
-        } else if (a_moved && b_moved) {
-            // Rigid translate: same shape offset by the a-side delta
-            // when both ends moved by the same delta (the group drag's
-            // own invariant); otherwise a fresh route.
-            const Vec2 da2{a.x - na->pos.x, a.y - na->pos.y};
-            const Vec2 db2{b.x - nb->pos.x, b.y - nb->pos.y};
-            const bool same =
-                std::fabs(da2.x - db2.x) <= kEps &&
-                std::fabs(da2.y - db2.y) <= kEps;
-            if (same) {
-                fresh.clear();
+        } else if (a_moved && b_moved && !a_turned && !b_turned) {
+            const Vec2 da{a.x - na->pos.x, a.y - na->pos.y};
+            const Vec2 db{b.x - nb->pos.x, b.y - nb->pos.y};
+            if (std::fabs(da.x - db.x) <= kEps &&
+                std::fabs(da.y - db.y) <= kEps) {
+                // The STORED mids ride the delta (they were authored at
+                // press geometry).
+                fresh.reserve(w.mid.size() + 2u);
                 fresh.push_back(a);
-                // The corridor translates rigidly: the STORED mids ride
-                // the delta (they were authored at press geometry).
                 for (const Vec2& m : w.mid) {
-                    fresh.push_back({m.x + da2.x, m.y + da2.y});
+                    fresh.push_back({m.x + da.x, m.y + da.y});
                 }
                 fresh.push_back(b);
             } else {
                 fresh = route_ends(a, a_dir, b, b_dir);
             }
-        } else if (a_moved || b_moved || a_turned || b_turned) {
-            // One end moved (or a rotation turned a pin's face): keep the
-            // shape when it has bends to keep, sliding the adjacent
-            // waypoint; re-route when short or when the pin's face turned
-            // (the old corridor leaves the old face).
+        } else {
+            // Here either exactly one end moved (no turn) or a face
+            // turned. Only the first case can keep an authored shape.
+            const auto bends_of = [&](Vec2 p, Vec2 q) {
+                std::vector<Vec2> fp;
+                fp.reserve(w.mid.size() + 2u);
+                fp.push_back(p);
+                fp.insert(fp.end(), w.mid.begin(), w.mid.end());
+                fp.push_back(q);
+                return cost_of(fp).bends;
+            };
+            const int old_bends = bends_of(na->pos, nb->pos);
             if (old_bends >= 2 && !a_turned && !b_turned) {
+                std::vector<Vec2> path;
+                path.reserve(w.mid.size() + 2u);
+                path.push_back(a);
+                path.insert(path.end(), w.mid.begin(), w.mid.end());
+                path.push_back(b);
                 fresh = slide_one_end(path, a_moved);
+                // Sliding one waypoint keeps the author's shape but knows
+                // nothing about the pins: the moved end may now leave its
+                // part backwards, the corridor may fold over itself, or
+                // the wire may cross itself. Keep the slid shape only if
+                // it is a legal route; otherwise re-route from scratch.
+                //
+                // And keep it only if the move did not make it MORE
+                // WASTEFUL than it already was ("waste" = bends beyond
+                // the best route for the same ends; the pattern router is
+                // within one bend of optimal in practice, so it stands in
+                // for the minimum). An authored two-bend detour stays a
+                // two-bend detour; a detour that was necessary before the
+                // move and pointless after it is re-routed.
+                const std::vector<Vec2> kept = cleanup(fresh);
+                const std::vector<Vec2> best_new =
+                    cleanup(route_ends(a, a_dir, b, b_dir));
+                const std::vector<Vec2> best_old =
+                    cleanup(route_ends(na->pos, a_dir, nb->pos, b_dir));
+                const int waste_before =
+                    std::max(0, old_bends - cost_of(best_old).bends);
+                if (!legal_route(kept, a_dir, b_dir) ||
+                    cost_of(kept).bends > cost_of(best_new).bends + waste_before) {
+                    fresh = best_new;
+                }
             } else {
                 fresh = route_ends(a, a_dir, b, b_dir);
             }
         }
 
-        // Cleanup: collinear middles and zero-length legs fold away;
-        // only CHANGED shapes ride the overlay (the wire's emitted mids
-        // vs its stored ones - a straightened wire emits EMPTY mids and
-        // is a real change, an untouched wire emits nothing at all).
+        // Cleanup: collinear middles and zero-length legs fold away; only
+        // CHANGED shapes ride the overlay (a straightened wire emits EMPTY
+        // mids and is a real change, an untouched wire emits nothing).
         fresh = cleanup(fresh);
+        std::vector<Vec2> mid;
         if (fresh.size() >= 2u) {
-            std::vector<Vec2> mid(fresh.begin() + 1, fresh.end() - 1);
-            if (mid != w.mid) {
-                ov.wirePath[w.id] = std::move(mid);
-            }
+            mid.assign(fresh.begin() + 1, fresh.end() - 1);
+        }
+        // (fewer than 2 points = both ends landed on the same spot: the
+        // wire has no length, so no waypoints - never leave the stale
+        // ones behind to run diagonally between the old corners.)
+        if (mid != w.mid) {
+            ov.wirePath[w.id] = std::move(mid);
         }
     }
     return ov;

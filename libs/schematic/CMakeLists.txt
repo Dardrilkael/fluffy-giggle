@@ -31,4 +31,5 @@ ws_add_test(schematic
           tests/test_router.cpp
           tests/test_commands.cpp
           tests/test_regressions.cpp
+          tests/test_router_fuzz.cpp
   )

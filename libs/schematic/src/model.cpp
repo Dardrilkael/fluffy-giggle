@@ -5,9 +5,13 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cmath>
+#include <cstddef>
 #include <limits>
+#include <optional>
+#include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "geom.hpp"
 
@@ -16,48 +20,15 @@ namespace ws::sch {
 // --- Doc: find -----------------------------------------------------------------
 
 const Node* Doc::find_node(NodeId id) const {
-    for (const Node& n : nodes) {
-        if (n.id == id) {
-            return &n;
-        }
-    }
-    return nullptr;
+    return detail::find_by_id(nodes, id);
 }
-
-Node* Doc::find_node(NodeId id) {
-    for (Node& n : nodes) {
-        if (n.id == id) {
-            return &n;
-        }
-    }
-    return nullptr;
-}
-
+Node* Doc::find_node(NodeId id) { return detail::find_by_id(nodes, id); }
 const Wire* Doc::find_wire(WireId id) const {
-    for (const Wire& w : wires) {
-        if (w.id == id) {
-            return &w;
-        }
-    }
-    return nullptr;
+    return detail::find_by_id(wires, id);
 }
-
-Wire* Doc::find_wire(WireId id) {
-    for (Wire& w : wires) {
-        if (w.id == id) {
-            return &w;
-        }
-    }
-    return nullptr;
-}
-
+Wire* Doc::find_wire(WireId id) { return detail::find_by_id(wires, id); }
 const Label* Doc::find_label(LabelId id) const {
-    for (const Label& l : labels) {
-        if (l.id == id) {
-            return &l;
-        }
-    }
-    return nullptr;
+    return detail::find_by_id(labels, id);
 }
 
 // --- Doc: builders ---------------------------------------------------------------
@@ -88,8 +59,8 @@ LabelId Doc::add_label(Vec2 pos, std::string name, WireId wire) {
     l.pos = pos;
     l.name = std::move(name);
     l.wire = wire;
-    labels.push_back(l);
-    return l.id;
+    labels.push_back(std::move(l));
+    return labels.back().id;
 }
 
 WireId Doc::add_wire(NodeId a, NodeId b, std::vector<Vec2> mid, int a_dir,
@@ -101,14 +72,16 @@ WireId Doc::add_wire(NodeId a, NodeId b, std::vector<Vec2> mid, int a_dir,
     w.mid = std::move(mid);
     w.a_dir = a_dir;
     w.b_dir = b_dir;
-    wires.push_back(w);
-    return w.id;
+    wires.push_back(std::move(w));
+    return wires.back().id;
 }
 
 // --- Doc: the split / merge (the ONLY T-connection) -------------------------------
 
 WireId Doc::restore_wire(const Wire& w) {
-    wires.push_back(w);
+    // Sorted insert: an undo puts the wire back where it was in the
+    // sequence, not at the end.
+    detail::insert_by_id(wires, w);
     raise_wire_counter(w.id);
     return w.id;
 }
@@ -190,12 +163,11 @@ std::optional<Doc::Split> Doc::split_wire(WireId id, Vec2 pos, SplitIds ids) {
         }
     }
 
-    const WireId first_id = first.id;
-    const WireId second_id = second.id;
-    nodes.push_back(j);
-    *w = first;  // w is not used after this line (push_back below may move it)
-    wires.push_back(std::move(second));
-    return Split{j.id, first_id, second_id};
+    const Split result{j.id, first.id, second.id};
+    detail::insert_by_id(nodes, j);  // different vector: `w` stays valid
+    *w = std::move(first);           // last use of `w`: the insert below may move it
+    detail::insert_by_id(wires, std::move(second));
+    return result;
 }
 
 WireId Doc::merge_split(NodeId jid, bool allow_any) {
@@ -251,20 +223,17 @@ WireId Doc::merge_split(NodeId jid, bool allow_any) {
     Wire merged = p;
     merged.b = q.b;
     merged.b_dir = q.b_dir;
-    merged.mid.push_back(j->pos);
+    merged.mid.push_back(j->pos);  // `j` is read here, BEFORE the erase below
     merged.mid.insert(merged.mid.end(), q.mid.begin(), q.mid.end());
 
     const WireId keep = p.id;
     const WireId gone = q.id;
     const WireId group = p.split_of == q.split_of ? p.split_of : 0;
 
-    wires.erase(std::remove_if(wires.begin(), wires.end(),
-                               [&](const Wire& w) { return w.id == gone; }),
-                wires.end());
-    nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
-                               [&](const Node& n) { return n.id == jid; }),
-                nodes.end());
-    *find_wire(keep) = merged;
+    detail::erase_by_id(wires, gone);  // invalidates wa / wb / j: not used again
+    detail::erase_by_id(nodes, jid);
+    Wire* kept = find_wire(keep);
+    *kept = std::move(merged);
 
     // Labels bound to the absorbed half now name the merged wire.
     for (Label& l : labels) {
@@ -273,34 +242,16 @@ WireId Doc::merge_split(NodeId jid, bool allow_any) {
         }
     }
     // The group id survives only while other pieces of it remain.
-    const bool others = std::any_of(
-        wires.begin(), wires.end(), [&](const Wire& w) {
-            return w.id != keep && group != 0 && w.split_of == group;
-        });
-    find_wire(keep)->split_of = others ? group : 0;
+    const bool others = group != 0 && std::any_of(
+        wires.begin(), wires.end(),
+        [&](const Wire& w) { return w.id != keep && w.split_of == group; });
+    kept->split_of = others ? group : 0;
     return keep;
 }
 
-bool Doc::erase_node(NodeId id) {
-    const auto it = std::remove_if(
-        nodes.begin(), nodes.end(), [&](const Node& n) { return n.id == id; });
-    if (it == nodes.end()) {
-        return false;
-    }
-    nodes.erase(it, nodes.end());
-    return true;
-}
+bool Doc::erase_node(NodeId id) { return detail::erase_by_id(nodes, id); }
 
-bool Doc::erase_wire(WireId id) {
-    const auto it = std::remove_if(
-        wires.begin(), wires.end(),
-        [&](const Wire& w) { return w.id == id; });
-    if (it == wires.end()) {
-        return false;
-    }
-    wires.erase(it, wires.end());
-    return true;
-}
+bool Doc::erase_wire(WireId id) { return detail::erase_by_id(wires, id); }
 
 std::vector<Vec2> Doc::wire_path(WireId id) const {
     const Wire* w = find_wire(id);
@@ -355,26 +306,31 @@ public:
 
 private:
     std::vector<std::size_t> parent_;
-    std::vector<std::size_t> rank_;
+    std::vector<std::uint8_t> rank_;
 };
+
+[[nodiscard]] std::string to_lower(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (const char c : s) {
+        out.push_back(static_cast<char>(
+            std::tolower(static_cast<unsigned char>(c))));
+    }
+    return out;
+}
 
 }  // namespace
 
 NetList build_nets(const Doc& doc) {
-    // One slot per node (labels get their own slots through the binding
-    // pass below - a label node joins the graph only when bound).
-    std::vector<std::size_t> node_slot(doc.nodes.size(), doc.nodes.size());
-    for (std::size_t i = 0; i < doc.nodes.size(); ++i) {
-        node_slot[i] = i;
-    }
-    // Labels: unbound labels are DECORATIONS (no slot of their own - they
-    // join no net); bound labels get a slot past the nodes. The "no slot"
-    // sentinel must be a value no slot can take: it used to be
-    // nodes.size(), which is exactly the FIRST bound label's slot, so that
-    // label was silently dropped from every net.
+    using detail::index_by_id;
+    using detail::kNpos;
+
+    // Slots: one per node (its index), then one per BOUND label. Unbound
+    // labels are DECORATIONS - no slot, they join no net.
     constexpr std::size_t kNoSlot = std::numeric_limits<std::size_t>::max();
+    const std::size_t n_nodes = doc.nodes.size();
     std::vector<std::size_t> label_slot(doc.labels.size(), kNoSlot);
-    std::size_t slots = doc.nodes.size();
+    std::size_t slots = n_nodes;
     for (std::size_t i = 0; i < doc.labels.size(); ++i) {
         if (doc.labels[i].wire != 0) {
             label_slot[i] = slots++;
@@ -382,29 +338,19 @@ NetList build_nets(const Doc& doc) {
     }
     Dsu dsu(slots);
 
-    const auto node_index = [&](NodeId id) -> std::optional<std::size_t> {
-        for (std::size_t i = 0; i < doc.nodes.size(); ++i) {
-            if (doc.nodes[i].id == id) {
-                return i;
-            }
-        }
-        return std::nullopt;
-    };
-
-    // Wires join their endpoint nodes.
+    // Wires join their endpoint nodes (a dangling wire joins nothing).
     for (const Wire& w : doc.wires) {
-        const auto a = node_index(w.a);
-        const auto b = node_index(w.b);
-        if (!a || !b) {
-            continue;  // dangling: joins nothing
+        const std::size_t a = index_by_id(doc.nodes, w.a);
+        const std::size_t b = index_by_id(doc.nodes, w.b);
+        if (a != kNpos && b != kNpos) {
+            dsu.unite(a, b);
         }
-        dsu.unite(*a, *b);
     }
 
     // Bound labels join the wire's a-end node; same-name labels merge.
     // (The binding is by WIRE ID - geometry never enters: the label does
     // not need to sit on the wire to name it.)
-    std::map<std::string, std::size_t> by_lower;
+    std::unordered_map<std::string, std::size_t> by_lower;
     for (std::size_t i = 0; i < doc.labels.size(); ++i) {
         const Label& l = doc.labels[i];
         if (l.wire == 0) {
@@ -414,41 +360,38 @@ NetList build_nets(const Doc& doc) {
         if (w == nullptr) {
             continue;  // bound to a deleted wire: a dangling name
         }
-        const auto a = node_index(w->a);
-        if (a) {
-            dsu.unite(label_slot[i], *a);
+        const std::size_t a = index_by_id(doc.nodes, w->a);
+        if (a != kNpos) {
+            dsu.unite(label_slot[i], a);
         }
-        std::string low;
-        for (char c : l.name) {
-            low.push_back(static_cast<char>(
-                std::tolower(static_cast<unsigned char>(c))));
-        }
-        const auto it = by_lower.find(low);
-        if (it != by_lower.end()) {
+        const auto [it, fresh] =
+            by_lower.try_emplace(to_lower(l.name), label_slot[i]);
+        if (!fresh) {
             dsu.unite(label_slot[i], it->second);
-        } else {
-            by_lower.emplace(std::move(low), label_slot[i]);
         }
     }
 
-    // Collect: slot -> node ids (labels joined the component their slot
-    // rides with).
-    std::map<std::size_t, std::vector<NodeId>> comps;
-    for (std::size_t i = 0; i < doc.nodes.size(); ++i) {
-        comps[dsu.find(node_slot[i])].push_back(doc.nodes[i].id);
+    // Collect per component. Ids within a net are sorted; nets are ordered
+    // by their first id (the contract in model.hpp), independent of DSU
+    // internals and of the storage order of doc.nodes.
+    std::vector<std::vector<NodeId>> by_root(slots);
+    for (std::size_t i = 0; i < n_nodes; ++i) {
+        by_root[dsu.find(i)].push_back(doc.nodes[i].id);
     }
     for (std::size_t i = 0; i < doc.labels.size(); ++i) {
         if (label_slot[i] != kNoSlot) {
-            comps[dsu.find(label_slot[i])].push_back(
-                static_cast<NodeId>(0x8000'0000u | i));  // label marker
+            by_root[dsu.find(label_slot[i])].push_back(label_marker(i));
         }
     }
-
     NetList out;
-    for (auto& [root, ids] : comps) {
-        std::sort(ids.begin(), ids.end());
-        out.nets.push_back(std::move(ids));
+    for (auto& ids : by_root) {
+        if (!ids.empty()) {
+            std::sort(ids.begin(), ids.end());
+            out.nets.push_back(std::move(ids));
+        }
     }
+    std::sort(out.nets.begin(), out.nets.end(),
+              [](const auto& x, const auto& y) { return x.front() < y.front(); });
     // Nets with a single UNBOUND node are still nets (a dot alone) - the
     // editor's cleanup policy, not the net builder's, drops those.
     return out;
@@ -469,24 +412,21 @@ std::vector<PinPair> pin_connections(const Doc& doc) {
     std::vector<NodeId> pins;
     for (const auto& net : nets.nets) {
         pins.clear();
-        for (NodeId id : net) {
-            if ((id & 0x8000'0000u) != 0u) {
-                continue;  // a label slot marker
+        for (const NodeId id : net) {
+            if (is_label_marker(id)) {
+                continue;
             }
             const Node* n = doc.find_node(id);
             if (n != nullptr && n->is_pin()) {
                 pins.push_back(id);
             }
         }
+        // `pins` is sorted (net ids are), so each pair is already ordered
+        // (first < second) and distinct across nets (a pin is in one net).
         for (std::size_t i = 0; i < pins.size(); ++i) {
             for (std::size_t j = i + 1; j < pins.size(); ++j) {
                 out.emplace_back(pins[i], pins[j]);
             }
-        }
-    }
-    for (auto& p : out) {
-        if (p.first > p.second) {
-            std::swap(p.first, p.second);
         }
     }
     std::sort(out.begin(), out.end());

@@ -554,8 +554,88 @@ bool set_member_pos(Editor& ed, const Selection& m, Pos at) {
     return false;
 }
 
+// THE TOUCH GESTURE PASS (the ws::gestures rewrite). One call per
+// frame, before any mouse read: the arbiter folds the frame's touch
+// table into its gesture state and answers the actions; this function
+// applies them to the camera and decides whether the bridged mouse
+// path may act as a click source at all this frame.
+//
+// The bridged mouse is ws::input's own touch->mouse mirror (the first
+// contact rides mouse button 0 so mouse-shaped widgets keep working on
+// touch): the mirror is exactly what would make the FIRST FINGER OF A
+// PINCH arm a tool. So the return value is the gate - false while the
+// arbiter holds contacts it has not resolved (Touching, Drag, Pinch,
+// LongPress) - and the caller suppresses every press-edge tool arming
+// and drag follow on a false gate. The ONLY click the canvas honors
+// from touch is the arbiter's deferred TAP action (it arrives at the
+// finger's lift, never at its press, and never for a pinch member),
+// which this function converts into the same press-edge the mouse
+// path itself reads - one verdict, one code path.
+[[nodiscard]] bool apply_touch_gesture(Editor& ed,
+                                        const ws::input::InputFrame& in) {
+    // A frame without the mouse present but with a bridged touch is
+    // still a touch frame (the bridge never writes mouse_present -
+    // ws::input's rule); the arbiter reads only the touch table, so
+    // the pass itself needs nothing else from the frame.
+    const ws::gestures::GestureActions a = ed.touch.pass(in);
+    // Apply the camera actions (zoom toward the pinch's finger mid,
+    // pan by the mid drift - the same two calls the wheel and the pan
+    // drags already make, so the camera stays single-pathed).
+    if (a.has_zoom) {
+        ed.view.zoom_at(ws::math::Vec2{a.zoom.anchor_x, a.zoom.anchor_y},
+                        a.zoom.factor);
+    }
+    if (a.has_pan) {
+        ed.view.pan_by(ws::math::Vec2{a.pan.dx, a.pan.dy});
+    }
+    // The deferred tap: the only click touch ever produces. Recorded,
+    // not applied here - the caller replays it into the frame it reads
+    // (one LEFT press + release at the tap point, exactly once, on this
+    // the finger's lift frame). A pinch member never reaches this line
+    // (the arbiter's own gate).
+    if (a.has_tap) {
+        ed.touch_tap_pending = true;
+        ed.touch_tap_at = {a.tap.x, a.tap.y};
+    }
+    // The drag replay's bookkeeping: the FIRST drag frame of a touch
+    // drag needs the mouse path armed (a press edge at the slop
+    // crossing - the deferred press spent on the drag instead of the
+    // tap), and every later frame needs the button HELD (the bridged
+    // mouse's down already rides the finger's contact - the platform's
+    // mirror keeps button 0 down while the contact is down - so the
+    // hold needs no help; only the arming press is ours to answer).
+    if (a.has_drag) {
+        const bool first_drag_frame = ed.touch_drag_id != a.drag.pointer;
+        if (first_drag_frame) {
+            ed.touch_press_pending = true;
+            // The press point, not the crossing: a mouse drag's own
+            // rule - the press selects the entity under it, the follow
+            // starts wherever the slop crossing happened. Replaying the
+            // press AT the crossing would select whatever the finger
+            // happened to wander over, not what it pressed on.
+            ed.touch_press_at = {a.drag.press_x, a.drag.press_y};
+            ed.touch_drag_id = a.drag.pointer;
+        }
+    } else if (ed.touch_drag_id.value != ws::input::kNoPointer.value) {
+        // The drag ended (lift, pinch takeover, cancel): the replay's
+        // memory clears. The release frame rides the platform's own
+        // bridge lift (mouse_released fires with the contact's up).
+        ed.touch_drag_id = ws::input::kNoPointer;
+    }
+    // THE GATE: the freeze applies to Touching, Pinch and LongPress -
+    // the states where the bridged mouse's press would be a CLICK the
+    // gesture has not resolved. Drag is NOT frozen: a one-finger drag
+    // after slop IS the mouse path's own drag (the platform's bridge
+    // holds button 0 down and mirrors the finger's position; the panel
+    // needs only the arming press this pass supplies). A pinch
+    // takeover mid-drag re-freezes (the state moved on).
+    const bool frozen = ed.touch.holding() &&
+                        ed.touch.state() != ws::gestures::GestureState::Drag;
+    return !frozen;
+}
+
 void handle_pointer(Editor& ed, gui::GuiContext& gui,
-                     const gui::Rect& body) {
+                    const gui::Rect& body) {
     // If the tool changed away from Wire, cancel any in-flight draft.
     // This catches tool switches via hotkeys, commands, or menu clicks.
     // (A draft whose start DIED is the commit's own check, not this
@@ -565,7 +645,52 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
         ed.wire_draft = Editor::WireDraft{};
     }
 
-    const ws::input::InputFrame& in = gui.input();
+    // THE TOUCH GATE: one arbiter pass per frame, before every mouse
+    // read. While it answers false (contacts held: a touch in flight -
+    // the first finger of a pinch, a slop-pending wander, a long-press)
+    // the bridged mouse below is NOT a click source: the panel freezes
+    // its own mouse path for the frame (the tools, the drags, the pan
+    // drags) and the frame's verdicts come back as camera actions
+    // applied inside the pass. The deferred TAP - the only click touch
+    // produces - is replayed into the frame the panel reads below: a
+    // LEFT press edge (and the position) at the tap point, exactly once,
+    // on the finger's LIFT frame. The replay rides a local frame copy
+    // (the shell's own InputFrame is const; a tap must not leak into
+    // any other panel reading the same frame).
+    const ws::input::InputFrame& raw_in = gui.input();
+    const bool touch_ok = apply_touch_gesture(ed, raw_in);
+    ws::input::InputFrame touch_frame_copy{};
+    const ws::input::InputFrame* frame_ptr = &raw_in;
+    if (ed.touch_tap_pending) {
+        touch_frame_copy = raw_in;  // the shell's frame, verbatim
+        touch_frame_copy.mouse_x = ed.touch_tap_at.x;
+        touch_frame_copy.mouse_y = ed.touch_tap_at.y;
+        touch_frame_copy.mouse_present = true;  // the tap IS a pointer
+        touch_frame_copy.mouse_pressed[ws::input::mouse::kLeft] = true;
+        // A tap is press-and-release in one gesture; the tools below
+        // arm on the press edge, the drag followers read mouse_down -
+        // the tap frame carries the release too (a tool that arms will
+        // see the button gone next frame, a tap-natured click).
+        touch_frame_copy.mouse_released[ws::input::mouse::kLeft] = true;
+        frame_ptr = &touch_frame_copy;
+        ed.touch_tap_pending = false;  // exactly once
+    } else if (ed.touch_press_pending) {
+        // The drag's arming press: the deferred press spent on a
+        // one-finger drag (the slop crossing), replayed as the mouse
+        // path's own LEFT press edge at the crossing point. The button
+        // hold rides the platform's bridge from here on (the finger's
+        // contact keeps button 0 down and mirrors the position).
+        touch_frame_copy = raw_in;
+        touch_frame_copy.mouse_x = ed.touch_press_at.x;
+        touch_frame_copy.mouse_y = ed.touch_press_at.y;
+        touch_frame_copy.mouse_present = true;
+        touch_frame_copy.mouse_pressed[ws::input::mouse::kLeft] = true;
+        touch_frame_copy.mouse_down[ws::input::mouse::kLeft] = true;
+        frame_ptr = &touch_frame_copy;
+        ed.touch_press_pending = false;  // exactly once
+    }
+    const ws::input::InputFrame& in = *frame_ptr;
+
     const bool inside =
         in.mouse_x >= body.x && in.mouse_x < body.x + body.width &&
         in.mouse_y >= body.y && in.mouse_y < body.y + body.height;
@@ -581,6 +706,21 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
     const bool coarse =
         in.key_down[ws::input::keys::kLeftShift] != 0 ||
         in.key_down[ws::input::keys::kRightShift] != 0;
+
+    // THE FREEZE: while the arbiter holds contacts - a touch in flight -
+    // the bridged mouse is not a click source. Everything below reads
+    // a left press edge, a left hold, the wheel, or the bridged mouse
+    // POSITION (the conveniences' `inside` gate included: a moving
+    // bridged finger must not toggle F-frame flips mid-pinch). A mouse
+    // gesture this frame would arm a tool with the first finger of
+    // someone's pinch, so the pointer handler ends here for the frame.
+    // The camera actions already applied inside the pass are this
+    // frame's whole touch verdict. The tap's own replay passed the gate
+    // already: touch_ok is true on the tap's frame, the one frame a
+    // touch click is legitimate.
+    if (!touch_ok) {
+        return;
+    }
 
     // The panel's keyboard conveniences (edge-detected; the memory rides
     // the Editor). Only while the pointer is over the canvas, the claims

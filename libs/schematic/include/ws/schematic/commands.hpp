@@ -5,6 +5,7 @@
 // stack's seat in its own undo system (the adapter forwards). Everything
 // here remains headless: no ImGui, no ui, no rendering.
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -78,6 +79,13 @@ private:
         std::vector<std::pair<WireId, Wire>> wire_before;
         std::vector<LandedStep> steps;
     };
+    // Entries kept; the oldest is dropped past this (undo memory is
+    // bounded: each entry holds full copies of the wires it touched).
+    static constexpr std::size_t kMaxEntries = 1000;
+
+    // Drops the redo tail, appends, trims to kMaxEntries.
+    void push_entry(Entry e);
+
     std::vector<Entry> list_;
     std::size_t at_ = 0;
 };

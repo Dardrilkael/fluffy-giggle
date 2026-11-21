@@ -20,8 +20,6 @@ using ws::sch::Vec2;
 
 namespace {
 
-constexpr double kEps = 1e-9;
-
 Vec2 v(ws::circsim::Pos p) { return {p.x, p.y}; }
 ws::circsim::Pos p(Vec2 q) { return {q.x, q.y}; }
 

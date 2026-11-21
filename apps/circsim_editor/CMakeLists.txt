@@ -13,7 +13,8 @@
 # The direct deps follow the shell_example's rule (ws::ui links the gui
 # archive PRIVATEly, so the app lists the libs it names itself).
 ws_add_app(circsim_editor DEPENDS ws::ui ws::circsim ws::jobs ws::platform
-                               ws::app ws::settings ws::schematic)
+                               ws::app ws::settings ws::schematic
+                               ws::gestures)
 
 # The stage-4 headless gate: the Results panel driven the way the shell
 # drives it (a GuiContext frame + a panel rect), with a
@@ -34,7 +35,8 @@ ws_add_test(circsim_editor_panel
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
   LINK ws::circsim
-  DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic)
+  DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic
+          ws::gestures)
 if(TARGET test_circsim_editor_panel)
   # "editor.hpp"/"results_panel.hpp" from the app's src, the stub's
   # "ui_gui_stub.hpp" and font.cpp's "text/font.h" from libs/ui's src
@@ -64,7 +66,8 @@ ws_add_test(circsim_editor_canvas
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
   LINK ws::circsim
-  DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic)
+  DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic
+          ws::gestures)
 if(TARGET test_circsim_editor_canvas)
   target_include_directories(test_circsim_editor_canvas PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -83,7 +86,8 @@ ws_add_test(circsim_editor_canvas_cost
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
   LINK ws::circsim
-  DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic)
+  DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic
+          ws::gestures)
 if(TARGET test_circsim_editor_canvas_cost)
   target_include_directories(test_circsim_editor_canvas_cost PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -115,7 +119,8 @@ ws_add_test(circsim_editor_side_panels
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
   LINK ws::circsim
-  DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic)
+  DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic
+          ws::gestures)
 if(TARGET test_circsim_editor_side_panels)
   target_include_directories(test_circsim_editor_side_panels PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -141,7 +146,8 @@ ws_add_test(circsim_editor_waveform_prof
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
   LINK ws::circsim
-  DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic)
+  DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic
+          ws::gestures)
 if(TARGET test_circsim_editor_waveform_prof)
   target_include_directories(test_circsim_editor_waveform_prof PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"

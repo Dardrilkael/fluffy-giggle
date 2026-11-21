@@ -37,6 +37,16 @@ endif()
 # VMA allocator. volk/vma stay PRIVATE here (handles cross to ui as
 # opaque void*), and ui is the only consumer - never the other way
 # around.
+# ws::gestures is the multi-touch arbiter (the touch rewrite's lib): a
+# pure state machine over ws::input's touch table that decides tap vs
+# drag vs pinch per frame - the first finger of a pinch is never a
+# click. Any touch-capable surface feeds it one InputFrame per pump and
+# applies the answered zoom/pan/tap actions; the editor canvas is the
+# first consumer (the ui CanvasView policy and the playground demo still
+# carry their own private pinch math - retirement candidates).
+if(ws_want_gestures)
+  add_subdirectory(gestures)
+endif()
 if(ws_want_gfx)
   add_subdirectory(gfx)
 endif()

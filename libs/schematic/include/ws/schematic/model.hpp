@@ -26,6 +26,7 @@
 // The editor app adapts its own document to Doc at the seam (editor's
 // SchematicAdapter) and owns all input/undo policy.
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -232,13 +233,29 @@ private:
 // enters. Answered as sorted node-id sets per net, so "the set of pin-to-
 // pin connections" is stable and comparable across edits.
 struct NetList {
-    // Each net: every node id in the component (pins, junctions, labels
-    // that name it), sorted. Net order is by first node id (stable).
+    // Each net: every node id in the component (pins, junctions) plus a
+    // label marker (see label_marker) per bound label that names it,
+    // sorted. Net order is by first id (stable).
     std::vector<std::vector<NodeId>> nets;
 
     // The net containing node `n`, or nullptr.
     [[nodiscard]] const std::vector<NodeId>* net_of(NodeId n) const;
 };
+
+// A BOUND label appears in a net as a marker id, not a node id: the high
+// bit plus the label's index in Doc::labels. Node ids are minted from 1
+// upward and must stay below kLabelMarkerBit (2^31) - far beyond any
+// real document. Use these helpers; never open-code the bit.
+inline constexpr NodeId kLabelMarkerBit = 0x8000'0000u;
+[[nodiscard]] constexpr NodeId label_marker(std::size_t label_index) {
+    return kLabelMarkerBit | static_cast<NodeId>(label_index);
+}
+[[nodiscard]] constexpr bool is_label_marker(NodeId id) {
+    return (id & kLabelMarkerBit) != 0u;
+}
+[[nodiscard]] constexpr std::size_t label_index(NodeId id) {
+    return static_cast<std::size_t>(id & ~kLabelMarkerBit);
+}
 
 // Builds the nets: DSU over (nodes joined by wires) + (labels joined by
 // the authored wire binding + same-name merging). GEOMETRY NEVER CREATES

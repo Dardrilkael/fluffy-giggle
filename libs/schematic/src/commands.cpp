@@ -18,7 +18,7 @@
 #include <ws/schematic/commands.hpp>
 
 #include <algorithm>
-#include <cmath>
+#include <cassert>
 #include <map>
 #include <optional>
 #include <utility>
@@ -35,62 +35,75 @@ std::vector<DropCandidate> drop_candidates(const Doc& doc,
     using detail::on_segment;
 
     std::vector<DropCandidate> out;
+    if (overlay.nodePos.empty()) {
+        return out;  // nothing dragged: nothing to offer
+    }
 
-    // The effective position of every node: the overlay's landing for
-    // moved ones, the stored one otherwise.
-    const auto pos_of = [&](NodeId n) -> std::optional<Vec2> {
-        const Node* node = doc.find_node(n);
-        if (node == nullptr) {
-            return std::nullopt;
-        }
-        const auto it = overlay.nodePos.find(n);
-        return it != overlay.nodePos.end() ? it->second : node->pos;
+    // A node's effective position: the overlay's landing, else stored.
+    const auto eff = [&](const Node& n) {
+        const auto it = overlay.nodePos.find(n.id);
+        return it != overlay.nodePos.end() ? it->second : n.pos;
     };
 
-    // The effective path of every wire (overlay shapes for bent ones).
-    const auto path_of = [&](WireId id) -> std::vector<Vec2> {
-        const Wire* w = doc.find_wire(id);
-        if (w == nullptr) {
-            return {};
-        }
+    // Every wire's effective path (overlay shapes for bent ones) + its
+    // bounding box, built LAZILY and AT MOST ONCE per call: this runs on
+    // every mouse-move of a drag, so it must not rebuild a wire's path
+    // per dragged pin.
+    struct EffPath {
+        bool built = false;
         std::vector<Vec2> path;
-        const auto pa = pos_of(w->a);
-        if (!pa) {
-            return {};
+        Vec2 lo{0.0, 0.0};
+        Vec2 hi{0.0, 0.0};
+    };
+    std::vector<EffPath> cache(doc.wires.size());
+    const auto eff_path = [&](std::size_t wi) -> const EffPath& {
+        EffPath& e = cache[wi];
+        if (e.built) {
+            return e;
         }
-        path.push_back(*pa);
-        const auto it = overlay.wirePath.find(id);
-        if (it != overlay.wirePath.end()) {
-            path.insert(path.end(), it->second.begin(), it->second.end());
-        } else {
-            path.insert(path.end(), w->mid.begin(), w->mid.end());
+        e.built = true;
+        const Wire& w = doc.wires[wi];
+        const Node* na = doc.find_node(w.a);
+        const Node* nb = doc.find_node(w.b);
+        if (na == nullptr || nb == nullptr) {
+            return e;  // dangling: empty path
         }
-        const auto pb = pos_of(w->b);
-        if (!pb) {
-            return {};
+        const auto wp = overlay.wirePath.find(w.id);
+        const std::vector<Vec2>& mid =
+            wp != overlay.wirePath.end() ? wp->second : w.mid;
+        e.path.reserve(mid.size() + 2u);
+        e.path.push_back(eff(*na));
+        e.path.insert(e.path.end(), mid.begin(), mid.end());
+        e.path.push_back(eff(*nb));
+        e.lo = e.hi = e.path.front();
+        for (const Vec2& p : e.path) {
+            e.lo = {std::min(e.lo.x, p.x), std::min(e.lo.y, p.y)};
+            e.hi = {std::max(e.hi.x, p.x), std::max(e.hi.y, p.y)};
         }
-        path.push_back(*pb);
-        return path;
+        return e;
     };
 
     // Only DRAGGED pins offer candidates (wires over wires never
     // auto-connect, and neither does a wire re-routed over a pin that did
     // not move). The overlay's node map is exactly the set of nodes that
     // landed somewhere new; std::map order keeps the answer deterministic.
-    for (const auto& [pin_id, landed] : overlay.nodePos) {
+    for (const auto& [pin_id, at] : overlay.nodePos) {
         const Node* n = doc.find_node(pin_id);
         if (n == nullptr || !n->is_pin()) {
             continue;
         }
-        const Vec2 at = landed;
 
-        // PinOnPin: another PIN node at the same effective spot.
+        // PinOnPin: another PIN node at the same effective spot. `pin` is
+        // always the dragged one. When BOTH pins were dragged onto each
+        // other the pair is reported once, by the smaller id.
         for (const Node& other : doc.nodes) {
             if (!other.is_pin() || other.id == pin_id) {
                 continue;
             }
-            const std::optional<Vec2> op = pos_of(other.id);
-            if (op && near(*op, at)) {
+            if (other.id < pin_id && overlay.nodePos.count(other.id) != 0) {
+                continue;  // the smaller dragged pin reports this pair
+            }
+            if (near(eff(other), at)) {
                 DropCandidate c;
                 c.kind = DropCandidate::Kind::PinOnPin;
                 c.pin = pin_id;
@@ -103,21 +116,27 @@ std::vector<DropCandidate> drop_candidates(const Doc& doc,
         // PinOnWire: the pin's landing lies on another wire's effective
         // path INTERIOR (a wire whose own endpoint this pin is, is not a
         // candidate - the connection already exists by reference).
-        for (const Wire& w : doc.wires) {
+        for (std::size_t wi = 0; wi < doc.wires.size(); ++wi) {
+            const Wire& w = doc.wires[wi];
             if (w.a == pin_id || w.b == pin_id) {
                 continue;
             }
-            const std::vector<Vec2> path = path_of(w.id);
-            if (path.size() < 2u) {
+            const EffPath& e = eff_path(wi);
+            if (e.path.size() < 2u) {
+                continue;
+            }
+            // Cheap reject: outside the path's bounding box.
+            if (at.x < e.lo.x - detail::kEps || at.x > e.hi.x + detail::kEps ||
+                at.y < e.lo.y - detail::kEps || at.y > e.hi.y + detail::kEps) {
                 continue;
             }
             // An endpoint's own position is not a drop onto the path (if
             // a PIN sits there it is the PinOnPin case above).
-            if (near(path.front(), at) || near(path.back(), at)) {
+            if (near(e.path.front(), at) || near(e.path.back(), at)) {
                 continue;
             }
-            for (std::size_t i = 1; i < path.size(); ++i) {
-                if (on_segment(path[i - 1], path[i], at)) {
+            for (std::size_t i = 1; i < e.path.size(); ++i) {
+                if (on_segment(e.path[i - 1], e.path[i], at)) {
                     DropCandidate c;
                     c.kind = DropCandidate::Kind::PinOnWire;
                     c.pin = pin_id;
@@ -129,35 +148,16 @@ std::vector<DropCandidate> drop_candidates(const Doc& doc,
             }
         }
     }
-
-    // Dedup: two dragged pins landing on each other each report the pair;
-    // collapse each unordered pin pair to one entry - the pin with the
-    // smaller id stands as `pin`.
-    std::vector<DropCandidate> dedup;
-    for (DropCandidate c : out) {
-        if (c.kind == DropCandidate::Kind::PinOnPin && c.pin > c.other) {
-            std::swap(c.pin, c.other);
-        }
-        const bool dup = std::any_of(
-            dedup.begin(), dedup.end(), [&](const DropCandidate& k) {
-                return k.pin == c.pin &&
-                       ((c.kind == DropCandidate::Kind::PinOnPin &&
-                         k.kind == DropCandidate::Kind::PinOnPin &&
-                         k.other == c.other) ||
-                        (c.kind == DropCandidate::Kind::PinOnWire &&
-                         k.kind == DropCandidate::Kind::PinOnWire &&
-                         k.wire == c.wire));
-            });
-        if (!dup) {
-            dedup.push_back(c);
-        }
-    }
-    return dedup;
+    // No dedup pass needed: (pin, other) pairs are unique by the rule
+    // above, and a (pin, wire) pair is visited once.
+    return out;
 }
 
 // --- the command ----------------------------------------------------------------
 
 namespace {
+
+using Step = LandedStep;
 
 // The overlay half of a commit / redo (node positions, wire shapes, end
 // dirs). One function, so commit and redo cannot drift.
@@ -179,7 +179,15 @@ void apply_overlay(Doc& d, const Overlay& overlay) {
     }
 }
 
-using Step = LandedStep;
+// The tie wire every landed step mints. ONE constructor for commit and
+// replay: a tie is a plain two-node wire, free at both ends, no waypoints.
+[[nodiscard]] Wire make_tie(WireId id, NodeId pin, NodeId other) {
+    Wire t;
+    t.id = id;
+    t.a = pin;
+    t.b = other;
+    return t;
+}
 
 // Lands one PinOnWire candidate. `pieces` are the wires currently
 // carrying what used to be ONE wire: a split keeps the original id on its
@@ -232,29 +240,32 @@ std::optional<Step> land_on_wire(Doc& d, std::vector<WireId>& pieces,
 
 // Replays a landed step with the ids it originally minted (redo).
 void replay_step(Doc& d, const Step& s) {
-    Wire tie;
-    tie.id = s.tie;
-    tie.a = s.pin;
-    switch (s.kind) {
-        case Step::Kind::Split: {
-            (void)d.split_wire(s.wire, s.at, SplitIds{s.junction, s.second});
-            tie.b = s.junction;
-            break;
-        }
-        case Step::Kind::Join:
-        case Step::Kind::PinPin:
-            tie.b = s.other;
-            break;
+    NodeId tie_to = s.other;
+    if (s.kind == Step::Kind::Split) {
+        [[maybe_unused]] const auto split =
+            d.split_wire(s.wire, s.at, SplitIds{s.junction, s.second});
+        assert(split && "redo desync: a committed split no longer lands");
+        tie_to = s.junction;
     }
-    d.restore_wire(tie);
+    d.restore_wire(make_tie(s.tie, s.pin, tie_to));
 }
 
 }  // namespace
 
+void UndoStack::push_entry(Entry e) {
+    // Dropping the redo tail; erase (not resize) so Entry need not be
+    // default-constructible.
+    list_.erase(list_.begin() + static_cast<std::ptrdiff_t>(at_), list_.end());
+    list_.push_back(std::move(e));
+    if (list_.size() > kMaxEntries) {
+        list_.erase(list_.begin());
+    }
+    at_ = list_.size();
+}
+
 bool commit_move(Doc& d, UndoStack& undo, const Overlay& overlay,
                  const std::vector<DropCandidate>& candidates) {
-    const bool any = !overlay.empty() || !candidates.empty();
-    if (!any) {
+    if (overlay.empty() && candidates.empty()) {
         return false;  // a no-op gesture is no undo step
     }
 
@@ -301,6 +312,12 @@ bool commit_move(Doc& d, UndoStack& undo, const Overlay& overlay,
                 e.steps.push_back(*s);
             }
         } else {
+            // A stale candidate (a node deleted since the drag showed it)
+            // must not mint a wire to nowhere.
+            if (d.find_node(c.pin) == nullptr ||
+                d.find_node(c.other) == nullptr) {
+                continue;
+            }
             Step s;
             s.kind = Step::Kind::PinPin;
             s.pin = c.pin;
@@ -314,9 +331,7 @@ bool commit_move(Doc& d, UndoStack& undo, const Overlay& overlay,
     // Push (dropping any redo tail). The entry carries the overlay and
     // the landed steps for REDO.
     e.overlay = overlay;
-    undo.list_.resize(undo.at_);
-    undo.list_.push_back(std::move(e));
-    undo.at_ = undo.list_.size();
+    undo.push_entry(std::move(e));
     return true;
 }
 
@@ -335,7 +350,7 @@ bool UndoStack::undo(Doc& d) {
     }
     // Restore every touched wire in place. A split keeps the original
     // wire's id, so the wire is still there and the restore overwrites it
-    // (the push_back is only a defensive fallback).
+    // (the restore_wire is only a defensive fallback).
     for (const auto& [id, w] : e.wire_before) {
         if (Wire* live = d.find_wire(id)) {
             *live = w;

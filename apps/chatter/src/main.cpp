@@ -353,65 +353,6 @@ std::uint32_t name_color(std::string_view name) {
   return ws::ui::r2d::load_default_font(pixel_height, options);
 }
 
-// One chat's startup ask, desktop edition: what the flag parser hands
-// the app. Kept beside the app (not in chat_core.hpp) because it is an
-// argv concern; ChatCore::Options is the transport concern.
-struct LaunchRequest {
-  chatter::ChatCore::Options core;
-  bool valid = true;  // false: usage error already logged; run anyway
-                      // as a plain offline LAN chatter, never crash on bad flags
-};
-
-LaunchRequest parse_args(int argc, char* argv[]) {
-  LaunchRequest out;
-  for (int i = 1; i < argc; ++i) {
-    const std::string_view arg = argv[i];
-    if (arg == "--serve") {
-      int port = kDefaultRelayPort;
-      if (i + 1 < argc) {
-        char* end = nullptr;
-        const long parsed = std::strtol(argv[i + 1], &end, 10);
-        if (end != nullptr && *end == '\0' && parsed > 0 &&
-            parsed < 65536) {
-          port = static_cast<int>(parsed);
-          ++i;  // consumed the port token
-        }
-      }
-      if (out.core.serve_port == 0) {
-        out.core.serve_port = port;
-      }
-    } else if (arg == "--relay") {
-      if (i + 1 >= argc) {
-        ws::core::error("chatter: --relay needs host:port");
-        out.valid = false;
-        continue;
-      }
-      const auto addr =
-          ws::net::Address::parse(argv[++i]);
-      if (addr) {
-        out.core.relays.push_back(*addr);
-      } else {
-        ws::core::log_error(addr.error());
-        out.valid = false;
-      }
-    } else if (arg == "--name") {
-      if (i + 1 >= argc) {
-        ws::core::error("chatter: --name needs a value");
-        out.valid = false;
-        continue;
-      }
-      out.core.name = argv[++i];
-    } else if (!arg.empty()) {
-      out.core.name = std::string{arg};  // v1's positional form
-    }
-  }
-  if (out.core.serve_port > 0 && !out.core.relays.empty()) {
-    ws::core::error("chatter: --serve ignores --relay (a host does not guest elsewhere); relays dropped");
-    out.core.relays.clear();
-  }
-  return out;
-}
-
 // The gui: a status line, the feed (newest at the bottom, auto-trimmed to
 // what fits - no scroll), and the palette. All input flows through the
 // gui widgets, all drawing through r2d; chatter draws no ImGui windows.
@@ -583,6 +524,69 @@ class ChatterApp final : public ws::ui::App {
 };
 
 }  // namespace
+
+#ifndef __ANDROID__
+
+// One chat's startup ask, desktop edition: what the flag parser hands
+// the app. Kept beside the app (not in chat_core.hpp) because it is an
+// argv concern; ChatCore::Options is the transport concern.
+struct LaunchRequest {
+  chatter::ChatCore::Options core;
+  bool valid = true;  // false: usage error already logged; run anyway
+                      // as a plain offline LAN chatter, never crash on bad flags
+};
+
+LaunchRequest parse_args(int argc, char* argv[]) {
+  LaunchRequest out;
+  for (int i = 1; i < argc; ++i) {
+    const std::string_view arg = argv[i];
+    if (arg == "--serve") {
+      int port = kDefaultRelayPort;
+      if (i + 1 < argc) {
+        char* end = nullptr;
+        const long parsed = std::strtol(argv[i + 1], &end, 10);
+        if (end != nullptr && *end == '\0' && parsed > 0 &&
+            parsed < 65536) {
+          port = static_cast<int>(parsed);
+          ++i;  // consumed the port token
+        }
+      }
+      if (out.core.serve_port == 0) {
+        out.core.serve_port = port;
+      }
+    } else if (arg == "--relay") {
+      if (i + 1 >= argc) {
+        ws::core::error("chatter: --relay needs host:port");
+        out.valid = false;
+        continue;
+      }
+      const auto addr =
+          ws::net::Address::parse(argv[++i]);
+      if (addr) {
+        out.core.relays.push_back(*addr);
+      } else {
+        ws::core::log_error(addr.error());
+        out.valid = false;
+      }
+    } else if (arg == "--name") {
+      if (i + 1 >= argc) {
+        ws::core::error("chatter: --name needs a value");
+        out.valid = false;
+        continue;
+      }
+      out.core.name = argv[++i];
+    } else if (!arg.empty()) {
+      out.core.name = std::string{arg};  // v1's positional form
+    }
+  }
+  if (out.core.serve_port > 0 && !out.core.relays.empty()) {
+    ws::core::error("chatter: --serve ignores --relay (a host does not guest elsewhere); relays dropped");
+    out.core.relays.clear();
+  }
+  return out;
+}
+
+#endif
 
 #ifdef __ANDROID__
 // Android entry: the glue calls android_main on the app's own thread and
