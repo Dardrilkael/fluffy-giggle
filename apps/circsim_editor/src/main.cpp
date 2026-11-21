@@ -47,6 +47,7 @@
 #include <ws/ui/gui/layout_cursor.hpp>
 #include <ws/ui/gui/theme.hpp>
 
+#include "ui_painters.hpp"
 #include "ui_style.hpp"
 #include <ws/ui/gui/widgets.hpp>
 #include <ws/ui/renderer2d.hpp>
@@ -555,7 +556,15 @@ class CircsimApp final : public ws::ui::App {
         // editor swaps the stock gray chrome for its own palette.
         gui::ChromeTheme theme =
             editor::style::chrome_for(shell_->theme()).scaled(scale_);
+        // The primary action (Simulate) wears the accent face.
+        theme.painters = &editor::style::painters();
         const bool dark = gui::is_dark(theme);
+        // The OS title bar follows the chrome (it was a white strip over
+        // a dark app): pushed once, then again only when the theme flips.
+        if (title_bar_dark_ != (dark ? 1 : 0)) {
+            title_bar_dark_ = dark ? 1 : 0;
+            set_title_bar_theme(dark, theme.bar_bg >> 8, theme.text >> 8);
+        }
         if (dark != font_dark_) {
             font_dark_ = dark;
             rebuild_fonts();
@@ -694,7 +703,7 @@ class CircsimApp final : public ws::ui::App {
         problems.title = "Problems";
         problems.placement.area = shell::DockPlacement::Area::bottom;
         problems.placement.at_root = true;  // full width under all columns
-        problems.placement.weight = 0.26f;
+        problems.placement.weight = 0.18f;  // a drawer, not a second canvas
         problems.draw = [this](GuiContext& g, LayoutCursor& l,
                                const gui::ChromeTheme& t,
                                const shell::PanelInstance&) {
@@ -1823,6 +1832,7 @@ class CircsimApp final : public ws::ui::App {
     ws::ui::r2d::Font font_;
     ws::ui::r2d::Font font_strong_;  // the semibold sibling (headings)
     ws::ui::r2d::Font font_mono_;
+    int title_bar_dark_ = -1;  // -1 = not pushed to the OS yet
     bool font_dark_ = true;  // the brightness the fonts are baked for
                              // (the stock default; a persisted light
                              // shell theme flips it on the first frame)

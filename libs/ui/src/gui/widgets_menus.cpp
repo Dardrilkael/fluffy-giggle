@@ -813,7 +813,11 @@ void menu_title_draw(const Rect& rect, const MenuTitlePaint& paint,
     const Mnemonic m = parse_mnemonic(title, strip, sizeof strip);
     char fit_scratch[128];
     const LabelFit fit =
-        fit_text(m.text, std::max(0.0f, rect.width - 2.0f * theme.padding),
+        fit_text(m.text,
+                 // +1px: the strip sizes a title to advance + 2*padding, and
+                 // the layout's rounding can leave this budget a hair short
+                 // of the advance - which ellipsized "View" to "Vi...".
+                 std::max(0.0f, rect.width - 2.0f * theme.padding + 1.0f),
                  theme, fit_scratch, sizeof fit_scratch);
     const float label_x = rect.x + (rect.width - fit.advance) * 0.5f;
     draw_label(label_x, rect.y, rect.height, fit, dim(theme.text, dim_by),

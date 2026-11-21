@@ -38,6 +38,11 @@
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#ifdef _WIN32
+// glfwGetWin32Window, for the title-bar tint (set_title_bar_theme).
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#endif
 
 #include <array>
 #include <cstddef>
@@ -460,6 +465,57 @@ public:
         if (window_ != nullptr) {
             glfwSetWindowTitle(window_, std::string{title}.c_str());
         }
+    }
+
+    // The OS title bar, tinted to the app's chrome. Windows only: the
+    // DWM attributes are looked up at run time (dwmapi.dll is always
+    // present on a desktop Windows, and the lookup keeps the link line
+    // untouched); each call is best effort, an older build that does not
+    // know an attribute just answers an error and keeps its stock frame.
+    void set_title_bar_theme(bool dark, std::uint32_t caption_rgb,
+                             std::uint32_t text_rgb) override {
+#ifdef _WIN32
+        if (window_ == nullptr) {
+            return;
+        }
+        HWND hwnd = glfwGetWin32Window(window_);
+        if (hwnd == nullptr) {
+            return;
+        }
+        using DwmSetWindowAttributeFn =
+            HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+        static const DwmSetWindowAttributeFn dwm_set = []() {
+            DwmSetWindowAttributeFn fn = nullptr;
+            if (HMODULE dll = LoadLibraryA("dwmapi.dll")) {
+                fn = reinterpret_cast<DwmSetWindowAttributeFn>(
+                    reinterpret_cast<void*>(
+                        GetProcAddress(dll, "DwmSetWindowAttribute")));
+            }
+            return fn;
+        }();
+        if (dwm_set == nullptr) {
+            return;
+        }
+        const BOOL use_dark = dark ? TRUE : FALSE;
+        // 20 = DWMWA_USE_IMMERSIVE_DARK_MODE (Windows 10 20H1+ / 11);
+        // 19 is the same switch on the earlier 1809/1903 builds.
+        if (FAILED(dwm_set(hwnd, 20, &use_dark, sizeof use_dark))) {
+            (void)dwm_set(hwnd, 19, &use_dark, sizeof use_dark);
+        }
+        const auto to_colorref = [](std::uint32_t rgb) {
+            return static_cast<COLORREF>(RGB((rgb >> 16) & 0xFFu,
+                                             (rgb >> 8) & 0xFFu,
+                                             rgb & 0xFFu));
+        };
+        const COLORREF caption = to_colorref(caption_rgb);
+        const COLORREF text = to_colorref(text_rgb);
+        (void)dwm_set(hwnd, 35, &caption, sizeof caption);  // CAPTION_COLOR
+        (void)dwm_set(hwnd, 36, &text, sizeof text);        // TEXT_COLOR
+#else
+        (void)dark;
+        (void)caption_rgb;
+        (void)text_rgb;
+#endif
     }
 
     void set_cursor(CursorShape shape) override {

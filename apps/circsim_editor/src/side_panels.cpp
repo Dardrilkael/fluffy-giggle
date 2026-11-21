@@ -1433,7 +1433,7 @@ constexpr std::size_t kRecentMax = 6;
 // The search field's label doubles as its placeholder text and (whole,
 // "##" suffix included) its id - one constant so the field and the
 // focus check below can never disagree.
-constexpr const char* kSearchLabel = "Search - Enter places first##palette.search";
+constexpr const char* kSearchLabel = "Search parts##palette.search";
 
 // The note itself: a key already in the history moves to the front
 // (re-arming is the strongest recency signal there is), a new one

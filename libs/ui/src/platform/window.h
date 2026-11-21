@@ -6,6 +6,7 @@
 // AInputEvent/lifecycle translation both live behind it.
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -169,6 +170,18 @@ public:
     // the system pointer.
     virtual void set_title(std::string_view title) { (void)title; }
     virtual void set_cursor(CursorShape shape) { (void)shape; }
+
+    // The OS-drawn title bar's look: `dark` picks the dark or light
+    // frame, `caption_rgb` / `text_rgb` (0xRRGGBB) tint the caption and
+    // its text where the OS can (Windows 11). Best effort and idempotent:
+    // a host with no such seam (Android, Linux today) no-ops, and an OS
+    // that lacks the attribute leaves the stock frame.
+    virtual void set_title_bar_theme(bool dark, std::uint32_t caption_rgb,
+                                     std::uint32_t text_rgb) {
+        (void)dark;
+        (void)caption_rgb;
+        (void)text_rgb;
+    }
 };
 
 // The platform host for this build: window_glfw.cpp on desktop,

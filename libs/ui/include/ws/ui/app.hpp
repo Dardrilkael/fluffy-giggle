@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -137,6 +138,13 @@ public:
     // window ui owns. No-op before run() and on a host whose platform
     // owns the label (Android: the activity's label is manifest-bound).
     void set_title(std::string_view title);
+
+    // Tints the OS title bar to match the app's chrome: `dark` selects
+    // the dark frame; the colors (0xRRGGBB) paint the caption and its
+    // text where the OS supports it (Windows 11; Windows 10 honors only
+    // `dark`). No-op before run() and on a host without the seam.
+    void set_title_bar_theme(bool dark, std::uint32_t caption_rgb,
+                             std::uint32_t text_rgb);
 
     // One of the standard system pointers over this window (see
     // CursorShape). No-op before run() and on a host without a cursor

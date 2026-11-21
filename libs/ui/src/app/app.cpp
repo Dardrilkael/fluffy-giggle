@@ -1141,6 +1141,15 @@ void App::set_title(std::string_view title) {
     }
 }
 
+void App::set_title_bar_theme(bool dark, std::uint32_t caption_rgb,
+                              std::uint32_t text_rgb) {
+    // Same seam story as set_title: no window before run(), and a host
+    // without a title-bar API no-ops inside the seam.
+    if (impl_->host_) {
+        impl_->host_->set_title_bar_theme(dark, caption_rgb, text_rgb);
+    }
+}
+
 void App::set_cursor(CursorShape shape) {
     // Same seam story as set_title: no window before run(), and a host
     // without a cursor API (Android's glue) no-ops inside the seam.

@@ -2206,6 +2206,24 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     // accent's fill and border; the rest stay quiet outlines.
     {
         const ModeToggleLayout modes = mode_toggle_layout(body);
+        {
+            // A floating pill behind the three buttons: they stay legible
+            // over wires and parts that drift under the corner.
+            const gui::Rect& first = modes.buttons[0];
+            const gui::Rect& last = modes.buttons[2];
+            const float px = first.x - 4.0f;
+            const float py = first.y - 4.0f;
+            const float pw = last.x + last.width - first.x + 8.0f;
+            const float ph = first.height + 8.0f;
+            const float pr = theme.control_radius() + 3.0f;
+            rc.fill_rounded_rect(px, py, pw, ph, pr,
+                                 gui::dim(theme.panel_bg, 0.92f));
+            Paint rim;
+            rim.width = 1.0f;
+            rim.color = theme.border_strong;
+            rc.stroke_rounded_rect(px + 0.5f, py + 0.5f, pw - 1.0f,
+                                   ph - 1.0f, pr, rim);
+        }
         for (std::size_t i = 0; i < 3; ++i) {
             const gui::Rect& r = modes.buttons[i];
             const bool active =
@@ -2269,7 +2287,11 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     // explaining the current mode. Rides the theme's secondary text.
     if (theme.font != nullptr) {
         const ModeToggleLayout modes = mode_toggle_layout(body);
-        const gui::Rect& r = modes.buttons[static_cast<int>(ed.wire_colors)];
+        // Right-aligned to the toggle's edge (it used to center on the
+        // ACTIVE button and ran off the canvas: "...each net its own").
+        const float right_edge = modes.buttons[2].x + modes.buttons[2].width;
+        const float pill_bottom =
+            modes.buttons[2].y + modes.buttons[2].height + 4.0f;
         const char* caption = "";
         switch (ed.wire_colors) {
             case WireColorMode::Plain:
@@ -2283,10 +2305,10 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                 break;
         }
         const float cw = rc.measure_text(caption, *theme.font);
-        const float cx = r.x + (r.width - cw) * 0.5f;
-        const float cy = r.y + r.height + 4.0f;
+        const float cx = std::max(body.x + 8.0f, right_edge + 4.0f - cw);
+        const float cy = pill_bottom + 4.0f;
         (void)rc.draw_text(cx, cy, caption, *theme.font,
-                           gui::dim(theme.text, 0.55f));
+                           gui::dim(theme.text_secondary, 0.95f));
     }
 
     // The transport: the play/pause button, the scrub track with the

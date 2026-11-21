@@ -389,7 +389,11 @@ void stroke_polyline(const Point* pts, int count, const Paint& paint,
     const float alpha_in = hairline
                                ? std::min(paint.width, 1.0f)
                                : 1.0f;  // the fringe's inner alpha
-    const Vec4 c_in{col.x, col.y, col.z, alpha_in};
+    // The paint color's own alpha rides every band (c_solid already did):
+    // a translucent stroke - a dimmed outline, a hairline card edge -
+    // used to come out fully opaque here because the band's inner alpha
+    // was the coverage term alone.
+    const Vec4 c_in{col.x, col.y, col.z, alpha_in * col.w};
     const Vec4 c_out{col.x, col.y, col.z, 0.0f};
     const Vec4 c_solid = col;
 

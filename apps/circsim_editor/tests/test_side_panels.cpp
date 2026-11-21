@@ -161,7 +161,7 @@ struct Bench {
     // press Enter.
     void arm_first(const char* filter) {
         constexpr const char* kSearchLabel =
-            "Search - Enter places first##palette.search";
+            "Search parts##palette.search";
         draw_palette(ws::input::InputFrame{},
                      [&] { gui.set_focus(gui.ids().id(kSearchLabel)); });
         std::snprintf(ed.palette_filter, sizeof ed.palette_filter, "%s",
@@ -1298,7 +1298,7 @@ TEST_CASE("Esc in the search box clears the filter") {
     // ("r" - the resistor, whose zigzag is a stroke, so one tile face
     // is the whole canvas fill story).
     constexpr const char* kSearchLabel =
-        "Search - Enter places first##palette.search";
+        "Search parts##palette.search";
     b.draw_palette(ws::input::InputFrame{}, [&] {
         b.gui.set_focus(b.gui.ids().id(kSearchLabel));
     });

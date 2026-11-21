@@ -199,6 +199,34 @@ TEST_CASE("stroke: bevel join, round join, round caps - the counts") {
     }
 }
 
+TEST_CASE("stroke: the paint color's own alpha rides every vertex") {
+    // A translucent stroke (a dimmed outline, a hairline card edge) must
+    // come out translucent: the AA bands' inner alpha is coverage TIMES
+    // the color's alpha. It used to be coverage alone, so every
+    // gui::dim()'d stroke rendered fully opaque.
+    constexpr std::uint32_t kHalfAlpha = 0x336699'80u;  // a = 128/255
+    constexpr float kA = 128.0f / 255.0f;
+    const Point line[] = {{0.0f, 0.0f}, {10.0f, 0.0f}};
+    for (const float width : {0.5f, 1.0f, 2.0f, 6.0f}) {
+        Paint paint;
+        paint.width = width;
+        paint.cap = StrokeCap::butt;
+        paint.color = kHalfAlpha;
+        TessBuffer buf;
+        stroke_polyline(line, 2, paint, buf);
+        REQUIRE(!buf.quads.empty());
+        float peak = 0.0f;
+        for (const TessVertex& v : buf.quads) {
+            CHECK(v.a <= kA + 1e-4f);  // never above the color's own alpha
+            peak = std::max(peak, v.a);
+        }
+        // ...and the opaque core of a solid stroke still reaches it.
+        if (width >= 1.0f) {
+            CHECK(peak == doctest::Approx(kA));
+        }
+    }
+}
+
 TEST_CASE("stroke: hairlines, degenerates and the miter limit") {
     SUBCASE("a hairline is two alpha-ramped bands, no core") {
         Paint paint;
