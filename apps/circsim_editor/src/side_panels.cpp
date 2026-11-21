@@ -13,6 +13,7 @@
 // back-map seam - and the jump selects and zooms in one act.
 
 #include "side_panels.hpp"
+#include "ui_style.hpp"
 
 // The Palette's grouping policy lives in the lib (stage 11 - the lib
 // extraction); the panel is the app's drawing over it.
@@ -157,7 +158,11 @@ void hint_line(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
 void panel_section(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
                    const char* title) {
     gui::separator(layout, theme);
-    gui::text_wrapped(layout, theme, title);
+    // The title wears the accent: sections read as landmarks, not as
+    // more body text (control_on clears 4.5:1 on both app chromes).
+    gui::ChromeTheme accented = theme;
+    accented.text = theme.control_on;
+    gui::text_wrapped(layout, accented, title);
 }
 
 // D1's persistent label: a text row ABOVE the field, spelling what the
@@ -1462,8 +1467,16 @@ void note_recent_symbol(Editor& ed, const std::string& key) {
     } else if (res.hit.hovered) {
         face = theme.control_hovered;
     }
-    rc.fill_rounded_rect(r.x, r.y, r.width, r.height, theme.corner_radius,
+    rc.fill_rounded_rect(r.x, r.y, r.width, r.height, theme.control_radius(),
                          face);
+    if (!armed) {
+        // A hairline card edge so tiles read as buttons, not floating art.
+        canvas::Paint edge;
+        edge.width = 1.0f;
+        edge.color = res.hit.hovered ? theme.border_strong : theme.border;
+        rc.stroke_rounded_rect(r.x + 0.5f, r.y + 0.5f, r.width - 1.0f,
+                               r.height - 1.0f, theme.control_radius(), edge);
+    }
     if (armed) {
         // The armed tile: an accent wash and outline (a selectable's
         // accent bar, grown to fit a tile).
@@ -1494,7 +1507,10 @@ void note_recent_symbol(Editor& ed, const std::string& key) {
                        static_cast<double>(r.height - 2.0f * kTilePad) / bh));
     canvas::Paint paint;
     paint.width = 1.5f;
-    paint.color = armed ? theme.control_on : gui::dim(theme.text, 0.85f);
+    paint.color = armed ? theme.control_on
+                        : style::device_color(sym.spice_letter,
+                                              gui::is_dark(theme),
+                                              gui::dim(theme.text, 0.85f));
     rc.push_transform();
     rc.translate(r.x + r.width * 0.5f, r.y + r.height * 0.5f);
     rc.scale(static_cast<float>(fit), -static_cast<float>(fit));

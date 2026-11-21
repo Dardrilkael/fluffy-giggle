@@ -1634,13 +1634,17 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             bx = std::max(bx, fx);
             float by = fy + 6.0f;
             by = std::max(fy, std::min(by, fy + ih - bh));
-            rc.fill_rounded_rect(bx, by, bw, bh, 4.0f,
-                                 ws::ui::r2d::rgba(18, 20, 26, 232));
+            // Theme-aware (it used to be a hardcoded dark box, wrong on
+            // the light chrome): a soft drop shadow, then the popup face.
+            rc.fill_rounded_rect(bx, by + 3.0f, bw, bh, theme.control_radius(),
+                                 gui::dim(theme.shadow, 0.6f));
+            rc.fill_rounded_rect(bx, by, bw, bh, theme.control_radius(),
+                                 gui::dim(theme.panel_bg, 0.96f));
             const Point tip[4] = {{bx, by}, {bx + bw, by},
                                   {bx + bw, by + bh}, {bx, by + bh}};
             Paint tip_border;
             tip_border.width = 1.0f;
-            tip_border.color = ws::ui::r2d::rgba(255, 255, 255, 40);
+            tip_border.color = theme.border_strong;
             rc.stroke_polyline(tip, 4, tip_border, true);
             for (std::size_t r = 0; r < rows.size(); ++r) {
                 const float ty = by + 5.0f + lh * static_cast<float>(r);
@@ -1650,9 +1654,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                 }
                 (void)rc.draw_text(
                     bx + 18.0f, ty, rows[r].text.c_str(), *font,
-                    rows[r].color != 0u
-                        ? ws::ui::r2d::rgba(236, 239, 246)
-                        : ws::ui::r2d::rgba(160, 166, 180));
+                    rows[r].color != 0u ? theme.text : theme.text_secondary);
             }
         }
     }

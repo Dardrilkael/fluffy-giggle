@@ -163,3 +163,11 @@ ws_add_test(circsim_editor_document
           src/document.cpp
   LINK ws::circsim
   DEPENDS ws::ui_gui ws::app ws::settings ws::schematic)
+
+# The visual identity's gate: both app chromes pass the library's WCAG
+# pair checks and every device ink stays legible on its canvas. Pure
+# data - only the gui archive's theme_color math is linked.
+ws_add_test(circsim_editor_style
+  SOURCES tests/test_ui_style.cpp
+  LINK ws::ui_gui
+  DEPENDS ws::ui_gui)

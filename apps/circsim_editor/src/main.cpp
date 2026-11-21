@@ -46,6 +46,8 @@
 #include <ws/ui/gui/job_progress.hpp>
 #include <ws/ui/gui/layout_cursor.hpp>
 #include <ws/ui/gui/theme.hpp>
+
+#include "ui_style.hpp"
 #include <ws/ui/gui/widgets.hpp>
 #include <ws/ui/renderer2d.hpp>
 #include <ws/ui/shell/errors.hpp>
@@ -549,7 +551,10 @@ class CircsimApp final : public ws::ui::App {
         r2d::begin();
         const r2d::FrameSize frame = r2d::frame_size();
         gui_.begin_layer(gui::Layer::base);
-        gui::ChromeTheme theme = shell_->theme().scaled(scale_);
+        // The shell still owns dark-vs-light (the shell.theme setting); the
+        // editor swaps the stock gray chrome for its own palette.
+        gui::ChromeTheme theme =
+            editor::style::chrome_for(shell_->theme()).scaled(scale_);
         const bool dark = gui::is_dark(theme);
         if (dark != font_dark_) {
             font_dark_ = dark;

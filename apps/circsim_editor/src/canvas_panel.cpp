@@ -39,6 +39,7 @@
 // any pan/zoom.
 
 #include "canvas_panel.hpp"
+#include "ui_style.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -1882,6 +1883,7 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     body_paint.color = theme.text;
     Paint ghost_paint = body_paint;
     ghost_paint.color = gui::dim(theme.text, 0.45f);
+    const bool dark_canvas = gui::is_dark(theme);
 
     for (const ws::circsim::Part& p : s.parts()) {
         const bool selected =
@@ -1902,6 +1904,9 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                 const Point c{static_cast<float>(b->max_x),
                               static_cast<float>(b->max_y)};
                 const Point quad[4] = {a, {c.x, a.y}, c, {a.x, c.y}};
+                // A soft accent wash under the outline: selection reads
+                // as a lit region, not just a dashed box.
+                rc.fill_polygon(quad, 4, gui::dim(theme.control_on, 0.10f));
                 rc.stroke_polyline(quad, 4, sel_paint, true);
             }
         }
@@ -1962,8 +1967,18 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                 static_cast<float>(target),
                 theme.anim_enabled ? 0.12f : 0.0f));
         }
+        // Device-family ink: resistors amber, capacitors blue, sources
+        // rose... (ui_style.hpp). Power/ground keep the neutral body ink.
+        Paint part_paint = body_paint;
+        std::uint32_t label_ink = gui::dim(theme.text, 0.75f);
         if (sym != nullptr) {
-            draw_symbol(rc, *sym, p.pos, p.rot, p.mirror, body_paint,
+            part_paint.color = style::device_color(
+                sym->spice_letter, dark_canvas, body_paint.color);
+            label_ink = style::device_color(
+                sym->spice_letter, dark_canvas, label_ink);
+        }
+        if (sym != nullptr) {
+            draw_symbol(rc, *sym, p.pos, p.rot, p.mirror, part_paint,
                         theme.text, theme.font, blade_closed);
         } else {
             // An unknown symbol: the origin cross, so the object is
@@ -2003,8 +2018,7 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                     (void)rc.draw_text(placed->screen_rect.x,
                                        placed->screen_rect.y,
                                        placed->refdes.c_str(),
-                                       *theme.font,
-                                       gui::dim(theme.text, 0.75f));
+                                       *theme.font, label_ink);
                 }
                 if (!placed->value.empty()) {
                     const float ref_w = rc.measure_text(placed->refdes.c_str(),
