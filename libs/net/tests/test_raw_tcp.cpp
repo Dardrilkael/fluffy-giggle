@@ -53,6 +53,7 @@ TEST_CASE("raw TCP transfers exact unframed bytes and closes gracefully") {
   RawTcpConnection::Ptr client;
   bool received_exact_payload = false;
   bool callback_replaced_itself = false;
+  std::vector<std::byte> received;
   int server_closed = 0;
   int client_closed = 0;
   bool server_close_reason_ok = false;
@@ -65,7 +66,9 @@ TEST_CASE("raw TCP transfers exact unframed bytes and closes gracefully") {
       callback_replaced_itself = true;
       // Replacing a callback from inside itself must not destroy the
       // std::function currently executing.
-      server->set_on_bytes([](std::span<const std::byte>) {});
+      server->set_on_bytes([&](std::span<const std::byte> next) {
+        (void)server->send(next);
+      });
       (void)server->send(bytes);
     });
     server->set_on_closed([&](NetError why) {
@@ -84,10 +87,14 @@ TEST_CASE("raw TCP transfers exact unframed bytes and closes gracefully") {
     send_succeeded = sent.has_value();
   });
   client->set_on_bytes([&](std::span<const std::byte> bytes) {
-    received_exact_payload =
-        bytes.size() == payload.size() &&
-        std::equal(bytes.begin(), bytes.end(), payload.begin(), payload.end());
-    (void)client->close();
+    received.insert(received.end(), bytes.begin(), bytes.end());
+    if (received.size() >= payload.size()) {
+      received_exact_payload =
+          received.size() == payload.size() &&
+          std::equal(received.begin(), received.end(), payload.begin(),
+                     payload.end());
+      (void)client->close();
+    }
   });
   client->set_on_closed([&](NetError why) {
     client_close_reason_ok = why == NetError::connection_closed;
