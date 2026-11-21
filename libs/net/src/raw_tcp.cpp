@@ -16,6 +16,7 @@ struct RawTcpConnection::Impl final
     : detail::IStreamSink, std::enable_shared_from_this<Impl> {
   std::unique_ptr<detail::IStreamPeer> peer_stream;
   Address peer_address;
+  std::function<void()> connected_callback;
   std::function<void(std::span<const std::byte>)> bytes_callback;
   std::function<void(NetError)> closed_callback;
   bool dead = false;
@@ -27,7 +28,10 @@ struct RawTcpConnection::Impl final
   }
   void arm() { peer_stream->set_keepalive(shared_from_this()); }
   void start() { peer_stream->start(); }
-  void on_connected() override {}
+  void on_connected() override {
+    auto callback = connected_callback;
+    if (!dead && callback) callback();
+  }
   void on_bytes(std::span<const std::byte> bytes) override {
     // Copy before invocation: callbacks may replace themselves (or clear
     // the callback slot) while they are running.
@@ -45,6 +49,27 @@ struct RawTcpConnection::Impl final
 RawTcpConnection::RawTcpConnection(std::shared_ptr<Impl> impl)
     : impl_(std::move(impl)) {}
 RawTcpConnection::~RawTcpConnection() = default;
+
+ws::core::Result<RawTcpConnection::Ptr> RawTcpConnection::connect(
+    EventLoop& loop, const Address& peer) {
+  if (!peer.valid()) {
+    return fail(NetError::invalid_argument, "connect: empty address");
+  }
+  auto stream = detail::make_stream_peer_connect(*loop.backend(), peer);
+  if (!stream) {
+    return fail(NetError::connect_failed,
+                "connect: the backend cannot use this address");
+  }
+  auto impl = std::make_shared<Impl>(std::move(stream), peer);
+  impl->arm();
+  Ptr conn{new RawTcpConnection(std::move(impl))};
+  conn->impl_->start();
+  return conn;
+}
+
+void RawTcpConnection::set_on_connected(std::function<void()> callback) {
+  impl_->connected_callback = std::move(callback);
+}
 
 void RawTcpConnection::set_on_bytes(
     std::function<void(std::span<const std::byte>)> callback) {
