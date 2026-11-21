@@ -94,7 +94,8 @@ ws::core::Status RawTcpConnection::send(std::span<const std::byte> bytes) {
     return fail(NetError::already_closed, "raw TCP connection is closed");
   }
   if (!impl_->connected) {
-    return fail(NetError::connect_failed, "raw TCP connection is not connected");
+    return fail(NetError::connect_failed,
+                "raw TCP connection is not connected");
   }
   if (bytes.empty()) return {};
   impl_->peer_stream->write(std::vector<std::byte>(bytes.begin(), bytes.end()));
@@ -129,8 +130,12 @@ RawTcpListener::~RawTcpListener() = default;
 
 ws::core::Result<RawTcpListener::Ptr> RawTcpListener::listen(
     EventLoop& loop, const Address& local, int backlog) {
-  if (!local.valid()) return fail(NetError::invalid_argument, "listen: empty address");
-  if (backlog <= 0) return fail(NetError::invalid_argument, "listen: backlog must be positive");
+  if (!local.valid()) {
+    return fail(NetError::invalid_argument, "listen: empty address");
+  }
+  if (backlog <= 0) {
+    return fail(NetError::invalid_argument, "listen: backlog must be positive");
+  }
   auto impl = std::make_shared<Impl>();
   Impl* const raw = impl.get();
   detail::StreamAcceptFn accept =
@@ -149,7 +154,9 @@ ws::core::Result<RawTcpListener::Ptr> RawTcpListener::listen(
       };
   impl->acceptor = detail::make_stream_acceptor(
       *loop.backend(), local, backlog, std::move(accept));
-  if (!impl->acceptor) return fail(NetError::bind_failed, "listen: bind or listen failed");
+  if (!impl->acceptor) {
+    return fail(NetError::bind_failed, "listen: bind or listen failed");
+  }
   impl->arm();
   return Ptr{new RawTcpListener(std::move(impl))};
 }
