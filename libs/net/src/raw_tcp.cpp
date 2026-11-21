@@ -80,13 +80,17 @@ void RawTcpConnection::set_on_closed(
   impl_->closed_callback = std::move(callback);
 }
 ws::core::Status RawTcpConnection::send(std::span<const std::byte> bytes) {
-  if (impl_->dead || impl_->closing) return fail(NetError::already_closed, "raw TCP connection is closed");
+  if (impl_->dead || impl_->closing) {
+    return fail(NetError::already_closed, "raw TCP connection is closed");
+  }
   if (bytes.empty()) return {};
   impl_->peer_stream->write(std::vector<std::byte>(bytes.begin(), bytes.end()));
   return {};
 }
 ws::core::Status RawTcpConnection::close() {
-  if (impl_->dead || impl_->closing) return fail(NetError::already_closed, "raw TCP connection is closed");
+  if (impl_->dead || impl_->closing) {
+    return fail(NetError::already_closed, "raw TCP connection is closed");
+  }
   impl_->closing = true;
   impl_->peer_stream->finish_and_close();
   return {};
@@ -118,8 +122,12 @@ ws::core::Result<RawTcpListener::Ptr> RawTcpListener::listen(
         conn_impl->arm();
         auto conn = RawTcpConnection::Ptr(new RawTcpConnection(conn_impl));
         (void)loop.post([conn_impl] { conn_impl->start(); });
-        if (raw->on_connection) raw->on_connection(std::move(conn));
-        else conn->abort();
+        auto callback = raw->on_connection;
+        if (callback) {
+          callback(std::move(conn));
+        } else {
+          conn->abort();
+        }
       };
   impl->acceptor = detail::make_stream_acceptor(
       *loop.backend(), local, backlog, std::move(accept));
