@@ -23,6 +23,9 @@ class WS_NET_API RawTcpConnection {
   RawTcpConnection(const RawTcpConnection&) = delete;
   RawTcpConnection& operator=(const RawTcpConnection&) = delete;
 
+  [[nodiscard]] static ws::core::Result<Ptr> connect(EventLoop& loop,
+                                                       const Address& peer);
+  void set_on_connected(std::function<void()> callback);
   void set_on_bytes(std::function<void(std::span<const std::byte>)> callback);
   void set_on_closed(std::function<void(NetError)> callback);
   // Copies and queues exactly these bytes; no framing or transformation.
