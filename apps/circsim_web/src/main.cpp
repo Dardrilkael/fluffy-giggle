@@ -3,6 +3,7 @@
 #include <iostream>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -110,8 +111,11 @@ int main(int argc, char** argv) {
   listener->set_on_connection([&](ws::net::RawTcpConnection::Ptr client) {
     auto* raw = client.get();
     auto pending = std::make_shared<std::string>();
-    client->set_on_bytes([raw, pending](std::span<const std::byte> bytes) {
+    auto responded = std::make_shared<bool>(false);
+    client->set_on_bytes([raw, pending, responded](std::span<const std::byte> bytes) {
+      if (*responded) return;
       if (pending->size() + bytes.size() > kMaxHeaderBytes) {
+        *responded = true;
         const auto r = response(413, "Content Too Large", "Request headers too large\n");
         (void)raw->send(std::as_bytes(std::span{r.data(), r.size()}));
         (void)raw->close();
