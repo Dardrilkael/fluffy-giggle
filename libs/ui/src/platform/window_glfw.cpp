@@ -511,6 +511,13 @@ public:
         const COLORREF text = to_colorref(text_rgb);
         (void)dwm_set(hwnd, 35, &caption, sizeof caption);  // CAPTION_COLOR
         (void)dwm_set(hwnd, 36, &text, sizeof text);        // TEXT_COLOR
+        // The attributes land, but DWM repaints only the caption TEXT's
+        // rectangle on its own (the bar stayed white around a black text
+        // box). A frame-changed no-op SetWindowPos invalidates the whole
+        // non-client area so the new look paints end to end.
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                         SWP_NOACTIVATE | SWP_FRAMECHANGED);
 #else
         (void)dark;
         (void)caption_rgb;

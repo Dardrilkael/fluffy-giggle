@@ -3430,4 +3430,71 @@ TEST_CASE("a slop-crossing drag drags the junction (the deferred press replayed)
     CHECK(j1.x > j0.x);  // it moved toward the finger
 }
 
+// --- the overlays: HUD, empty-state card --------------------------------
+//
+// The bench theme has no face, and the overlays (like every label the
+// panel paints) need one to measure and draw - so these cases hand the
+// theme a synthetic font: every printable glyph 7 px wide, 18 px lines.
+// No TTF, no renderer; the command list records the text it was asked to
+// draw and that is what is checked.
+
+ws::ui::r2d::Font overlay_test_font() {
+    std::vector<ws::ui::r2d::Font::Glyph> glyphs(96);
+    for (ws::ui::r2d::Font::Glyph& g : glyphs) {
+        g.advance = 7.0f;
+    }
+    return ws::ui::r2d::Font(14.0f, 18.0f, glyphs.data(),
+                             static_cast<std::uint32_t>(glyphs.size()));
+}
+
+bool drew_text_containing(const Bench& b, const char* needle) {
+    for (const canvas::CanvasCmd& c : b.clc.cmds) {
+        if (c.kind == canvas::CanvasCmdKind::draw_text &&
+            c.text.find(needle) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+TEST_CASE("overlays: an empty sheet draws the start card, a populated one "
+          "does not") {
+    const ws::ui::r2d::Font font = overlay_test_font();
+    {
+        Bench b;
+        b.theme.font = &font;
+        b.draw();
+        CHECK(drew_text_containing(b, "Start a circuit"));
+        CHECK(drew_text_containing(b, "Palette"));
+    }
+    {
+        Bench b;
+        b.theme.font = &font;
+        b.place_wire();
+        b.draw();
+        CHECK_FALSE(drew_text_containing(b, "Start a circuit"));
+    }
+}
+
+TEST_CASE("overlays: the HUD reports the zoom and the sheet's size") {
+    const ws::ui::r2d::Font font = overlay_test_font();
+    Bench b;
+    b.theme.font = &font;
+    b.place_wire();
+    b.draw();
+    // One wire, no parts; the default zoom reads 100%.
+    CHECK(drew_text_containing(b, "0 parts"));
+    CHECK(drew_text_containing(b, "1 wires"));
+    CHECK(drew_text_containing(b, "100%"));
+    // The bench parks the mouse off-panel: no cursor readout.
+    CHECK_FALSE(drew_text_containing(b, "x "));
+}
+
+TEST_CASE("overlays: no face, no overlays (nothing draws, nothing crashes)") {
+    Bench b;  // the stock bench theme carries no font
+    b.draw();
+    CHECK_FALSE(drew_text_containing(b, "Start a circuit"));
+    CHECK_FALSE(drew_text_containing(b, "parts"));
+}
+
 }  // namespace

@@ -48,6 +48,33 @@ TEST_CASE("the daylight chrome passes the library's contrast checks") {
     CHECK_MESSAGE(failures.empty(), describe(failures));
 }
 
+TEST_CASE("every accent preset passes the contrast checks on both chromes") {
+    for (const editor::style::AccentPreset& preset :
+         editor::style::kAccentPresets) {
+        const auto night = contrast_failures(editor::style::accent_chrome(
+            ws::ui::gui::kDefaultChrome, preset.key));
+        CHECK_MESSAGE(night.empty(),
+                      preset.key << " on night: " << describe(night));
+        const auto day = contrast_failures(editor::style::accent_chrome(
+            ws::ui::gui::kLightChrome, preset.key));
+        CHECK_MESSAGE(day.empty(),
+                      preset.key << " on day: " << describe(day));
+    }
+}
+
+TEST_CASE("accent_preset: unknown keys fall back to the default") {
+    CHECK(&editor::style::accent_preset("") ==
+          &editor::style::kAccentPresets.front());
+    CHECK(&editor::style::accent_preset("chartreuse") ==
+          &editor::style::kAccentPresets.front());
+    CHECK(editor::style::accent_preset("teal").key == "teal");
+    // The default preset leaves the tuned chrome byte-for-byte alone.
+    const ws::ui::gui::ChromeTheme def = editor::style::accent_chrome(
+        ws::ui::gui::kDefaultChrome, "indigo");
+    CHECK(def.control_on == kNightChrome.control_on);
+    CHECK(def.control_pressed == kNightChrome.control_pressed);
+}
+
 TEST_CASE("chrome_for follows the stock theme's brightness") {
     CHECK(&editor::style::chrome_for(ws::ui::gui::kDefaultChrome) ==
           &kNightChrome);

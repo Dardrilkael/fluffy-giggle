@@ -25,9 +25,12 @@
 // floor is enforced for you.
 
 #include <ws/ui/gui/theme.hpp>
+#include <ws/ui/gui/theme_color.hpp>
 #include <ws/ui/renderer2d.hpp>
 
+#include <array>
 #include <cstdint>
+#include <string_view>
 
 namespace editor::style {
 
@@ -125,6 +128,59 @@ inline constexpr ChromeTheme kDaylightChrome{
 [[nodiscard]] constexpr const ChromeTheme& chrome_for(
     const ChromeTheme& stock) noexcept {
     return ws::ui::gui::is_dark(stock) ? kNightChrome : kDaylightChrome;
+}
+
+// --- accent presets ---------------------------------------------------------
+//
+// The View menu's "Accent Color" picker. Each preset is ONE hue in a
+// dark-chrome and a light-chrome variant (the light one walked darker so
+// white-on-accent labels keep their contrast). The default, indigo, is
+// the palette the two chromes above were tuned around, so choosing it
+// changes nothing; every other preset is derived onto the chrome through
+// the library's apply_accent, which re-derives the hover/pressed rungs
+// and the on-accent label color and keeps the pairs above their floors.
+// The style suite sweeps every preset on both chromes through
+// contrast_failures - a new preset cannot ship unreadable.
+struct AccentPreset {
+    std::string_view key;    // the "editor.accent" setting's value
+    std::string_view label;  // the menu text
+    std::uint32_t dark;      // the accent on the night chrome
+    std::uint32_t light;     // the accent on the daylight chrome
+};
+
+inline constexpr std::array<AccentPreset, 7> kAccentPresets{{
+    {"indigo", "Indigo", rgba(118, 126, 255), rgba(79, 70, 229)},
+    {"violet", "Violet", rgba(167, 139, 250), rgba(124, 58, 237)},
+    {"sky", "Sky", rgba(56, 189, 248), rgba(2, 132, 199)},
+    {"teal", "Teal", rgba(45, 212, 191), rgba(13, 148, 136)},
+    {"emerald", "Emerald", rgba(52, 211, 153), rgba(5, 150, 105)},
+    {"amber", "Amber", rgba(251, 191, 36), rgba(217, 119, 6)},
+    {"rose", "Rose", rgba(251, 113, 133), rgba(225, 29, 72)},
+}};
+
+// The preset a setting value names; an unknown or empty value is the
+// default (indigo) - a hand-edited settings.json never breaks the chrome.
+[[nodiscard]] constexpr const AccentPreset& accent_preset(
+    std::string_view key) noexcept {
+    for (const AccentPreset& p : kAccentPresets) {
+        if (p.key == key) {
+            return p;
+        }
+    }
+    return kAccentPresets.front();
+}
+
+// The app chrome for a stock theme and an accent key: the dark/light
+// palette, re-accented unless the key is the default.
+[[nodiscard]] inline ChromeTheme accent_chrome(const ChromeTheme& stock,
+                                               std::string_view key) {
+    const bool dark = ws::ui::gui::is_dark(stock);
+    ChromeTheme theme = dark ? kNightChrome : kDaylightChrome;
+    const AccentPreset& preset = accent_preset(key);
+    if (&preset != &kAccentPresets.front()) {
+        ws::ui::gui::apply_accent(theme, dark ? preset.dark : preset.light);
+    }
+    return theme;
 }
 
 // --- device-family ink ------------------------------------------------------

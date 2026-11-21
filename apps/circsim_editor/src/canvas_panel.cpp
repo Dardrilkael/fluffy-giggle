@@ -43,6 +43,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <cstdio>
 #include <span>
 #include <string>
@@ -1484,6 +1485,184 @@ void handle_pointer(Editor& ed, gui::GuiContext& gui,
     }
 }
 
+// --- the canvas overlays: HUD, hover card, empty-state card ----------------
+//
+// Three small things that make the editor feel alive rather than inert:
+//
+//   * the HUD (top-left pill): the cursor in grid units, the zoom, and
+//     the sheet's size at a glance - what a status bar would say, where
+//     the eyes already are;
+//   * the hover card: rest the pointer on a part (Select tool, nothing
+//     held) and a card names it - refdes, symbol, value - without
+//     opening the Properties panel;
+//   * the empty-state card: a blank sheet says how to start instead of
+//     staring back.
+//
+// All three are screen-space paint over the finished drawing; none
+// changes what the sheet means or what any input does.
+
+// A rounded floating surface: the shared look of every overlay above.
+void overlay_surface(canvas::Canvas2D& rc, const gui::ChromeTheme& theme,
+                     float x, float y, float w, float h) {
+    const float r = theme.control_radius() + 3.0f;
+    rc.fill_rounded_rect(x, y + 2.0f, w, h, r, gui::dim(theme.shadow, 0.5f));
+    rc.fill_rounded_rect(x, y, w, h, r, gui::dim(theme.panel_bg, 0.94f));
+    Paint rim;
+    rim.width = 1.0f;
+    rim.color = theme.border_strong;
+    rc.stroke_rounded_rect(x + 0.5f, y + 0.5f, w - 1.0f, h - 1.0f, r, rim);
+}
+
+// Formats "12.5" / "-3" for the HUD: one decimal at most, no trailing zero.
+[[nodiscard]] std::string hud_number(double v) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.1f", v);
+    std::string out = buf;
+    if (out.size() > 2 && out.compare(out.size() - 2, 2, ".0") == 0) {
+        out.resize(out.size() - 2);
+    }
+    if (out == "-0") {
+        out = "0";
+    }
+    return out;
+}
+
+void draw_canvas_overlays(Editor& ed, const gui::ChromeTheme& theme,
+                          canvas::Canvas2D& rc, const gui::Rect& body,
+                          const ws::input::InputFrame& in, bool inside,
+                          Pos world) {
+    if (theme.font == nullptr) {
+        return;
+    }
+    const ws::circsim::Schematic* sch = ed.schem();
+    if (sch == nullptr) {
+        return;
+    }
+    const ws::ui::r2d::Font& font = *theme.font;
+    const float lh = font.line_height();
+
+    // --- the HUD ------------------------------------------------------
+    {
+        std::string text;
+        if (inside) {
+            text += "x " + hud_number(world.x) + "   y " +
+                    hud_number(world.y) + "   |   ";
+        }
+        const int pct = static_cast<int>(
+            std::lround(ed.view.zoom / EditorView::kDefaultZoom * 100.0));
+        text += std::to_string(pct) + "%   |   " +
+                std::to_string(sch->parts().size()) + " parts   " +
+                std::to_string(sch->wires().size()) + " wires";
+        const float tw = rc.measure_text(text.c_str(), font);
+        const float w = tw + 20.0f;
+        const float h = lh + 10.0f;
+        const float x = body.x + 10.0f;
+        const float y = body.y + 8.0f;
+        overlay_surface(rc, theme, x, y, w, h);
+        (void)rc.draw_text(x + 10.0f, y + 5.0f, text.c_str(), font,
+                           theme.text_secondary);
+    }
+
+    // --- the empty-state card -------------------------------------------
+    if (sch->parts().empty() && sch->wires().empty() &&
+        sch->labels().empty()) {
+        static constexpr const char* kTitle = "Start a circuit";
+        static constexpr const char* kLines[] = {
+            "Pick a part in the Palette, then click the sheet to place it",
+            "W  draws a wire between pins     L  drops a net label",
+            "Scroll to zoom, middle-drag to pan",
+        };
+        float w = rc.measure_text(kTitle, font);
+        for (const char* line : kLines) {
+            w = std::max(w, rc.measure_text(line, font));
+        }
+        w += 44.0f;
+        const float h =
+            lh * (2.0f + static_cast<float>(std::size(kLines))) + 44.0f;
+        const float x = body.x + (body.width - w) * 0.5f;
+        const float y = body.y + (body.height - h) * 0.5f;
+        overlay_surface(rc, theme, x, y, w, h);
+        // An accent bar on the card's left edge: the one colorful note.
+        rc.fill_rounded_rect(x + 14.0f, y + 18.0f, 4.0f, lh + 6.0f, 2.0f,
+                             theme.control_on);
+        (void)rc.draw_text(x + 28.0f, y + 21.0f, kTitle,
+                           theme.font_strong != nullptr ? *theme.font_strong
+                                                        : font,
+                           theme.text);
+        float ty = y + 21.0f + lh + 16.0f;
+        for (const char* line : kLines) {
+            (void)rc.draw_text(x + 28.0f, ty, line, font,
+                               theme.text_secondary);
+            ty += lh + 4.0f;
+        }
+    }
+
+    // --- the hover card ---------------------------------------------------
+    // A rest, not a pass-through: the pointer must hold still ~0.4 s so a
+    // sweep across the sheet never flashes a card at every part.
+    static float last_mx = -1.0f;
+    static float last_my = -1.0f;
+    static int still_frames = 0;
+    if (std::abs(in.mouse_x - last_mx) > 1.5f ||
+        std::abs(in.mouse_y - last_my) > 1.5f) {
+        last_mx = in.mouse_x;
+        last_my = in.mouse_y;
+        still_frames = 0;
+    } else if (still_frames < 1000) {
+        ++still_frames;
+    }
+    const bool held = in.mouse_down[0] || in.mouse_down[1] || in.mouse_down[2];
+    if (!inside || held || still_frames < 24 || ed.tool != Tool::Select ||
+        !ed.view.valid()) {
+        return;
+    }
+    const Selection hit = ed.hit_any(world, pick_world(ed.view));
+    if (hit.kind != Selection::Kind::Part) {
+        return;
+    }
+    const ws::circsim::Part* part = sch->find_part(hit.id);
+    if (part == nullptr) {
+        return;
+    }
+    const ws::circsim::SymbolDef* sym = ed.sym_of(*part);
+    std::string line1 =
+        part->ref.empty() ? std::string("(no refdes)") : part->ref;
+    if (sym != nullptr && !sym->name.empty()) {
+        line1 += "  -  " + sym->name;
+    }
+    std::string line2;
+    for (const char* key : {"value", "model"}) {
+        const auto it = part->params.find(key);
+        if (it != part->params.end() && !it->second.empty()) {
+            line2 = std::string(key) + ": " + it->second;
+            break;
+        }
+    }
+    float w = rc.measure_text(line1.c_str(), font);
+    if (!line2.empty()) {
+        w = std::max(w, rc.measure_text(line2.c_str(), font));
+    }
+    w += 24.0f;
+    const float h = lh * (line2.empty() ? 1.0f : 2.0f) + 16.0f +
+                    (line2.empty() ? 0.0f : 2.0f);
+    float x = in.mouse_x + 16.0f;
+    float y = in.mouse_y + 18.0f;
+    x = std::min(x, body.x + body.width - w - 6.0f);
+    y = std::min(y, body.y + body.height - h - 6.0f);
+    x = std::max(x, body.x + 6.0f);
+    y = std::max(y, body.y + 6.0f);
+    overlay_surface(rc, theme, x, y, w, h);
+    const std::uint32_t ink =
+        sym != nullptr ? style::device_color(sym->spice_letter,
+                                             gui::is_dark(theme), theme.text)
+                       : theme.text;
+    (void)rc.draw_text(x + 12.0f, y + 8.0f, line1.c_str(), font, ink);
+    if (!line2.empty()) {
+        (void)rc.draw_text(x + 12.0f, y + 10.0f + lh, line2.c_str(), font,
+                           theme.text_secondary);
+    }
+}
+
 }  // namespace
 
 // --- the render ---------------------------------------------------------------
@@ -2310,6 +2489,10 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         (void)rc.draw_text(cx, cy, caption, *theme.font,
                            gui::dim(theme.text_secondary, 0.95f));
     }
+
+    // C3: Canvas overlays - HUD, hover card, empty-state card.
+    // Drawn on top of the schematic, using the same viewport transform.
+    draw_canvas_overlays(ed, theme, rc, body, in, inside, world);
 
     // The transport: the play/pause button, the scrub track with the
     // playhead knob, and the axis readout ("1.2ms" for a .tran,

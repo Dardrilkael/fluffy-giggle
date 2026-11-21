@@ -555,12 +555,16 @@ class CircsimApp final : public ws::ui::App {
         // The shell still owns dark-vs-light (the shell.theme setting); the
         // editor swaps the stock gray chrome for its own palette.
         gui::ChromeTheme theme =
-            editor::style::chrome_for(shell_->theme()).scaled(scale_);
+            editor::style::accent_chrome(shell_->theme(), accent_key())
+                .scaled(scale_);
         // The primary action (Simulate) wears the accent face.
         theme.painters = &editor::style::painters();
         const bool dark = gui::is_dark(theme);
         // The OS title bar follows the chrome (it was a white strip over
         // a dark app): pushed once, then again only when the theme flips.
+        if (++title_bar_frames_ == 30) {
+            title_bar_dark_ = -1;  // one re-push after the window has settled
+        }
         if (title_bar_dark_ != (dark ? 1 : 0)) {
             title_bar_dark_ = dark ? 1 : 0;
             set_title_bar_theme(dark, theme.bar_bg >> 8, theme.text >> 8);
@@ -653,7 +657,24 @@ class CircsimApp final : public ws::ui::App {
                           SettingValue::text("dark"), {},
                           "the chrome: dark or light", "shell"};
         (void)schema_.declare(std::move(theme));
+        SettingDesc accent{"editor.accent", SettingType::text,
+                           SettingValue::text("indigo"), {},
+                           "the chrome's accent color: indigo, violet, sky, "
+                           "teal, emerald, amber or rose",
+                           "editor"};
+        (void)schema_.declare(std::move(accent));
         settings_ = std::make_unique<ws::settings::SettingsStore>(schema_);
+    }
+
+    // The accent the View menu's picker last chose (the user layer, so it
+    // persists with the rest of settings.json); an unreadable value reads
+    // as the default and ui_style's accent_preset() maps the unknown ones.
+    [[nodiscard]] std::string accent_key() const {
+        if (settings_ == nullptr) {
+            return "indigo";
+        }
+        const auto read = settings_->get<std::string>("editor.accent");
+        return read ? read->value : std::string{"indigo"};
     }
 
     void register_panels() {
@@ -981,6 +1002,40 @@ class CircsimApp final : public ws::ui::App {
             editor_.show_part_values = !editor_.show_part_values;
         };
         add(std::move(show_part_values_cmd));
+
+        // The look: the accent picker (a checked row per preset) and the
+        // dark/light flip. Both write the USER settings layer, so the
+        // choice survives a restart - until now the theme could only be
+        // changed by hand-editing settings.json.
+        for (const editor::style::AccentPreset& preset :
+             editor::style::kAccentPresets) {
+            Command accent_cmd;
+            accent_cmd.id = "view.accent." + std::string(preset.key);
+            accent_cmd.label = "Accent: " + std::string(preset.label);
+            accent_cmd.category = "View";
+            accent_cmd.checked = [this, key = std::string(preset.key)] {
+                return editor::style::accent_preset(accent_key()).key == key;
+            };
+            accent_cmd.execute = [this,
+                                  key = std::string(preset.key)](
+                                     std::string_view) {
+                (void)settings_->set(ws::settings::Layer::user,
+                                     "editor.accent", key);
+            };
+            add(std::move(accent_cmd));
+        }
+
+        Command theme_cmd;
+        theme_cmd.id = "view.toggle_theme";
+        theme_cmd.label = "Toggle Light / Dark Theme";
+        theme_cmd.category = "View";
+        theme_cmd.execute = [this](std::string_view) {
+            const auto read = settings_->get<std::string>("shell.theme");
+            const bool light = read && read->value == "light";
+            (void)settings_->set(ws::settings::Layer::user, "shell.theme",
+                                 std::string{light ? "dark" : "light"});
+        };
+        add(std::move(theme_cmd));
 
         Command erc_cmd;
         erc_cmd.id = "circuit.erc";
@@ -1833,6 +1888,7 @@ class CircsimApp final : public ws::ui::App {
     ws::ui::r2d::Font font_strong_;  // the semibold sibling (headings)
     ws::ui::r2d::Font font_mono_;
     int title_bar_dark_ = -1;  // -1 = not pushed to the OS yet
+    int title_bar_frames_ = 0;
     bool font_dark_ = true;  // the brightness the fonts are baked for
                              // (the stock default; a persisted light
                              // shell theme flips it on the first frame)
