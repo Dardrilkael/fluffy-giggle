@@ -48,6 +48,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -85,10 +86,15 @@ inline std::string_view as_text(std::span<const std::byte> data) {
 // One chat line as the gui sees it. `name` is the sender ("you" for own
 // sends, the attributed name for relayed FROMs); system lines (joins,
 // leaves, the banner, SYS events) render dim and never show a name.
+// `sent` is the wall clock the line landed (HH:MM in local time - the
+// bubble's timestamp corner); it stamps at push_line so every transport
+// shares one clock (the wire carries none).
 struct ChatLine {
   std::string name;
   std::string text;
   bool system = false;
+  int sent_hh = 0;
+  int sent_mm = 0;
 };
 
 // What a connection is to this copy. The kind picks the parser and the
@@ -647,8 +653,17 @@ class ChatCore {
     }
   }
 
-  // Queue one line for the gui (called on the net thread).
+  // Queue one line for the gui (called on the net thread), stamping the
+  // bubble clock: local HH:MM at arrival - the relay carries no times,
+  // so every copy stamps its own (the delivery moment, the only one it
+  // knows).
   void push_line(ChatLine line) {
+    const std::time_t now = std::time(nullptr);
+    const std::tm* local = std::localtime(&now);
+    if (local != nullptr) {
+      line.sent_hh = local->tm_hour;
+      line.sent_mm = local->tm_min;
+    }
     const std::lock_guard<std::mutex> lock{mtx_};
     pending_.push_back(std::move(line));
     if (pending_.size() > kQueuedLines) {

@@ -17,7 +17,13 @@ CMakeLists only wire ws libraries together.
   print in all the others.
 - `apps/chatter` - netchat's protocol behind a gui (built for Android,
   runs on desktop too): the same discovery beats and HELLO/SAY frames, so
-  phones and terminals share one chat; input is a tap-phrase palette.
+  phones and terminals share one chat; the face is the WhatsApp look
+  (teal header, warm paper feed, bubble rows with tails, timestamps and
+  delivery ticks, a TODAY chip, a scrolling feed that pins to the newest
+  line and a "new messages" chip when lifted) and input is a real text
+  field + round send button - the ui lib's ime-rect seam opens the soft
+  keyboard on Android (v1's tap-phrase palette existed because that seam
+  did not).
 - `apps/bench_physics` - headless ws::physics throughput bench (desktop
   console app): steps a falling-boxes scene and prints per-tick wall-clock
   cost while awake and after sleep, per dimension and thread config.
