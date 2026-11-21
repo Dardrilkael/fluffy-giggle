@@ -21,6 +21,7 @@ namespace ws::net {
 
 class TcpConnection;
 class TcpListener;
+class RawTcpListener;
 class UdpSocket;
 class DiscoveryAnnouncer;
 class DiscoveryBrowser;
@@ -83,6 +84,7 @@ class WS_NET_API EventLoop {
 
   friend class TcpConnection;
   friend class TcpListener;
+  friend class RawTcpListener;
   friend class UdpSocket;
   friend class DiscoveryAnnouncer;
   friend class DiscoveryBrowser;
