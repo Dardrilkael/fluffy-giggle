@@ -22,6 +22,7 @@ namespace ws::net {
 class TcpConnection;
 class TcpListener;
 class RawTcpListener;
+class RawTcpConnection;
 class UdpSocket;
 class DiscoveryAnnouncer;
 class DiscoveryBrowser;
