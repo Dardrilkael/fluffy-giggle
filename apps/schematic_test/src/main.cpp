@@ -222,7 +222,7 @@ struct SchematicDoc {
             // This should not happen in valid test code, but we need a valid
             // return. Create a dummy component that will fail fast if used.
             static Component dummy;
-            dummy.id = -1;
+            dummy.id = UINT32_MAX;
             return dummy;
         }
 
