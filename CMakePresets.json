@@ -70,7 +70,7 @@
       "binaryDir": "${sourceDir}/build/linux",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "WS_BUILD_LIBS": "core;math;spice;jobs;settings;net;physics;circsim;ui",
+        "WS_BUILD_LIBS": "core;math;plotmath;spice;jobs;settings;net;physics;circsim;ui",
         "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-linux"
       }
     },
@@ -92,7 +92,7 @@
       "inherits": "_base-msvc",
       "binaryDir": "${sourceDir}/build/spice-debug",
       "cacheVariables": {
-        "WS_BUILD_LIBS": "core;math;spice",
+        "WS_BUILD_LIBS": "core;math;plotmath;spice",
         "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-msvc-debug"
       }
     },
@@ -103,7 +103,7 @@
       "binaryDir": "${sourceDir}/build/spice-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "WS_BUILD_LIBS": "core;math;spice",
+        "WS_BUILD_LIBS": "core;math;plotmath;spice",
         "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-msvc-release"
       }
     },
@@ -121,7 +121,7 @@
         "WS_BUILD_TESTS": "OFF",
         "WS_BUILD_APPS": "ON",
         "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-android-arm64",
-        "WS_BUILD_LIBS": "ui;circsim;jobs;platform;app;settings;audio;net;physics;gestures;schematic"
+        "WS_BUILD_LIBS": "ui;circsim;jobs;platform;app;settings;audio;net;physics;gestures;schematic;plotmath"
       }
     },
     {

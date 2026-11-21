@@ -44,6 +44,15 @@ endif()
 # applies the answered zoom/pan/tap actions; the editor canvas is the
 # first consumer (the ui CanvasView policy and the playground demo still
 # carry their own private pinch math - retirement candidates).
+if(ws_want_plotmath)
+  # ws::plotmath is the shared plotting math core (the unify-plotting
+  # merge): the one authoritative implementation of the axis ladder,
+  # the engineering-notation label, the range/view invariants, the
+  # hover lookup, the min/max decimation and the monotone-run family
+  # split - shared by the ui widget and the circsim panel below it.
+  # Pure std + core; both tiers link it, neither reaches the other.
+  add_subdirectory(plotmath)
+endif()
 if(ws_want_gestures)
   add_subdirectory(gestures)
 endif()

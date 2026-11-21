@@ -12,6 +12,18 @@
 // font, a canvas, or ws::spice - the functions answer doubles and
 // strings, so any plot surface (the panel today, a raster exporter
 // later) shares one set of axis decisions.
+//
+// The unify-plotting merge: the math below now LIVES in ws::plotmath,
+// the workspace's dedicated shared core (below both ui and circsim),
+// and this header is the circsim FACADE over it - the same public
+// types and signatures, every function a field-converting forward
+// (src/plot.cpp), so every existing caller and test keeps compiling
+// and answering exactly what it always did. The generic gui plot
+// widget calls the same core through its own ws::ui::gui spelling
+// (widgets.hpp), and the parity suite (apps/circsim_editor/tests/
+// test_plot_parity.cpp) pins the two spellings' answers identical.
+// What remains circsim's own here: the two-axis classifier
+// (signal_y_axis - SPICE save-name knowledge) and these contracts.
 
 #include <cstddef>
 #include <cstdint>

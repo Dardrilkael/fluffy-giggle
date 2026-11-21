@@ -1,13 +1,19 @@
 // ws::ui::gui widget functions, one family per file (src/gui/CLAUDE.md):
-// the plot - the waveform widget: the axis math, the fit, the scope
-// gestures and the series stroking. The behavior half owns geometry
-// and interaction (handle_plot's whole job, lifted from the editor's
-// hand-rolled Results panel); the draw half owns the pixels (draw_plot's
-// whole job). The axis math is PUBLIC pure functions - the popup_placement
-// precedent - so the headless suite gates the ladder, the labels and the
-// view invariants the same way circsim's suite gates its copy.
+// the plot - the waveform widget: the fit, the scope gestures and the
+// series stroking. The behavior half owns geometry and interaction
+// (handle_plot's whole job, lifted from the editor's hand-rolled
+// Results panel); the draw half owns the pixels (draw_plot's whole
+// job). The axis math itself lives in ws::plotmath (the unify-plotting
+// merge: one authoritative core shared with circsim's panel) - the
+// public pure functions below are thin forwards of it, kept public so
+// the headless suite gates the ladder, the labels and the view
+// invariants exactly as before.
 
 #include "widgets_detail.hpp"
+
+#include <ws/plotmath/plotmath.hpp>
+
+#include <span>
 
 #include <algorithm>
 #include <cmath>
@@ -25,15 +31,18 @@ namespace ws::ui::gui {
 // labels (the x strip), the top a breath, the right either a breath
 // or - when a visible series rides the right spine - the second label
 // strip (and the right spine's drag handle). The guards: a frame that
-// cannot hold at least 40x30 of plot is not worth drawing.
+// cannot hold at least 40x30 of plot is not worth drawing. These and
+// the gesture factors below are ws::plotmath's shared constants now
+// (the unify-plotting merge): the same numbers the circsim panel
+// rides, one spelling - the file-local names keep the body readable.
 namespace {
-constexpr float kPlotMarginLeft = 46.0f;
-constexpr float kPlotMarginBottom = 17.0f;
-constexpr float kPlotMarginTop = 6.0f;
-constexpr float kPlotMarginRight = 10.0f;
-constexpr float kPlotMarginRightAxis = 46.0f;
-constexpr float kPlotMinInnerW = 40.0f;
-constexpr float kPlotMinInnerH = 30.0f;
+constexpr float kPlotMarginLeft = ws::plotmath::kMarginLeft;
+constexpr float kPlotMarginBottom = ws::plotmath::kMarginBottom;
+constexpr float kPlotMarginTop = ws::plotmath::kMarginTop;
+constexpr float kPlotMarginRight = ws::plotmath::kMarginRight;
+constexpr float kPlotMarginRightAxis = ws::plotmath::kMarginRightAxis;
+constexpr float kPlotMinInnerW = ws::plotmath::kMinInnerW;
+constexpr float kPlotMinInnerH = ws::plotmath::kMinInnerH;
 
 // The stock series wheel (color 0 rides it): the same 8 hues the
 // editor's hand-rolled panel spun, re-homed so the widget's default
@@ -60,23 +69,19 @@ constexpr std::size_t kPlotSeriesColorCount =
     return (color & 0xFFFFFF00u) | static_cast<std::uint32_t>(a);
 }
 
-// The scope's zoom factors: one wheel notch is 15%, and an axis strip
-// drag compounds exp(0.005) per pixel - pulling the strip its own
-// height open doubles the zoom, a resistance that reads like a real
-// axis under the finger.
-constexpr double kPlotWheelFactor = 1.15;
-constexpr double kPlotStripExp = 0.005;
-
-// The double-click pair: two presses, the same 5-px spot, within 0.35
-// s. Headless the frame clock reads 0 (dt_seconds), so the clock never
-// advances and every same-spot press pair reads as a pair - the honest
-// answer without time, and the seam the suite drives the reset through.
-constexpr float kPlotDoubleClickSecs = 0.35f;
-constexpr float kPlotDoubleClickPx = 5.0f;
-
-// A band smaller than 4 px on either axis is a click, not a zoom - it
-// falls through so the second press of a double-click still lands.
-constexpr float kPlotBandMinPx = 4.0f;
+// The scope's zoom factors and the double-click window: ws::plotmath's
+// shared constants (the unify-plotting merge) - the same wheel, strip
+// and pair the circsim panel rides, one spelling of each. The
+// double-click's headless note: the frame clock reads 0 (dt_seconds),
+// so the clock never advances and every same-spot press pair reads as
+// a pair - the honest answer without time, and the seam the suite
+// drives the reset through.
+constexpr double kPlotWheelFactor = ws::plotmath::kWheelFactor;
+constexpr double kPlotStripExp = ws::plotmath::kStripExp;
+constexpr float kPlotDoubleClickSecs =
+    static_cast<float>(ws::plotmath::kDoubleClickSecs);
+constexpr float kPlotDoubleClickPx = ws::plotmath::kDoubleClickPx;
+constexpr float kPlotBandMinPx = ws::plotmath::kBandMinPx;
 
 // The series stroke and the grid/frame ink, hardcoded pixels like the
 // separator's 2 (a plot's ink is data density, not chrome).
@@ -87,360 +92,70 @@ constexpr float kPlotHairWidth = 1.0f;
 // window taller than the frame; the overflow rides one "+N more" row.
 constexpr std::size_t kPlotTooltipMaxRows = 8;
 
-[[nodiscard]] bool strictly_increasing(const double* xs, int n) {
-    for (int i = 1; i < n; ++i) {
-        if (!(xs[i - 1] < xs[i])) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// The hover sample: the index whose x is nearest the cursor. A sorted
-// axis binary-searches; anything else scans (the only unsorted cases
-// are a wrapped .dc axis or a hand-built test axis).
-[[nodiscard]] int nearest_sample(const double* xs, double x, bool sorted,
-                                 int n) {
-    if (n <= 0) {
-        return -1;
-    }
-    if (sorted && n >= 2) {
-        int lo = 0;
-        int hi = n - 1;
-        while (hi - lo > 1) {
-            const int mid = lo + (hi - lo) / 2;
-            if (xs[mid] <= x) {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        return std::fabs(xs[lo] - x) <= std::fabs(xs[hi] - x) ? lo : hi;
-    }
-    int best = 0;
-    double best_d = std::numeric_limits<double>::infinity();
-    for (int i = 0; i < n; ++i) {
-        const double d = std::fabs(xs[i] - x);
-        if (d < best_d) {
-            best_d = d;
-            best = i;
-        }
-    }
-    return best;
-}
 }  // namespace
 
 // --- the pure axis math (public - the header carries the contracts) -----------
+//
+// Every one of these is a thin forward into ws::plotmath now (the
+// unify-plotting merge): the same implementation the circsim panel's
+// Results plot rides, one authoritative spelling of the ladder, the
+// label, the padding and the view invariants. The guards are the union
+// of the two historical spellings (plotmath's own header carries the
+// contracts; the suite below gates the answers as it always did).
+//
+// The two range spellings convert field-by-field below: PlotAxisRange
+// (this header's public type, the gui's own API) and ws::plotmath::
+// PlotRange (the core's) are the same two doubles, named differently
+// so a TU holding both reads unambiguously - the forward's whole
+// body is the pair of shims.
 
 PlotTicks plot_ticks(double lo, double hi, unsigned target) {
+    // The core answers a vector; the widget's public fixed-32-slot
+    // spelling stays (the caller-scratch discipline, no allocation
+    // mid-frame) - the copy is the cap itself.
     PlotTicks out;
-    if (std::isnan(lo) || std::isnan(hi) || lo > hi) {
-        return out;
-    }
-    if (!(lo < hi)) {
-        // Degenerate: one honest tick (the !(<) spelling also catches
-        // the -inf == -inf corner after the isnan guard).
-        out.ticks[0] = lo;
-        out.count = 1;
-        return out;
-    }
-    if (target == 0) {
-        target = 1;
-    }
-    const double span = hi - lo;
-    if (std::isinf(span)) {
-        return out;  // an infinite span cannot walk a ladder
-    }
-
-    // The 1/2/5 ladder: the raw step normalized to its decade, snapped
-    // down to the nice rung at or under it.
-    const double raw = span / static_cast<double>(target);
-    const double mag = std::pow(10.0, std::floor(std::log10(raw)));
-    const double norm = raw / mag;
-    double step = 10.0;
-    if (norm < 1.5) {
-        step = 1.0;
-    } else if (norm < 3.0) {
-        step = 2.0;
-    } else if (norm < 7.0) {
-        step = 5.0;
-    }
-    step *= mag;
-
-    // First tick at or above lo (ceil on the grid), then every step
-    // until past hi; k*step from a fixed k0 keeps the ticks exact
-    // multiples of the step, no accumulation, and the epsilon guard
-    // keeps a tick that IS an endpoint from falling to representable
-    // noise. The fixed 32-slot budget bounds the walk by construction
-    // (span/step is at most ~1.4 x target), and the guard makes a
-    // pathological target the caller's bug, not an overflow.
-    const double eps = step * 1e-9;
-    const double k0 = std::ceil((lo - eps) / step);
-    const double k1 = std::floor((hi + eps) / step);
-    if (k1 < k0) {
-        return out;
-    }
-    for (double k = k0; k <= k1; ++k) {
+    for (double t : ws::plotmath::nice_ticks(lo, hi, target)) {
         if (out.count >= out.ticks.size()) {
             break;
-        }
-        double t = k * step;
-        if (t == 0.0) {
-            t = 0.0;  // normalize -0.0 so labels print "0", not "-0"
         }
         out.ticks[out.count++] = t;
     }
     return out;
 }
 
-namespace {
-
-// 10^e without std::pow's round-trip surprises on exact decades: the
-// table covers every exponent the prefix walk visits, so the multiply
-// stays a single rounding (the circsim spelling, kept byte-for-byte -
-// the two libraries' answers must agree while both exist).
-[[nodiscard]] double pow10(int e) {
-    static constexpr double kTable[] = {
-        1e-15, 1e-12, 1e-9, 1e-6, 1e-3, 1e0,  1e3, 1e6,
-        1e9,   1e12,  1e15,
-    };
-    constexpr int kBase = -15;
-    constexpr int kStep = 3;
-    const int at = e - kBase;
-    if (at < 0 || at % kStep != 0) {
-        return std::pow(10.0, static_cast<double>(e));
-    }
-    const int slot = at / kStep;
-    if (slot < 0 || slot >= static_cast<int>(sizeof kTable /
-                                              sizeof kTable[0])) {
-        return std::pow(10.0, static_cast<double>(e));
-    }
-    return kTable[static_cast<std::size_t>(slot)];
-}
-
-// Parse the ASCII decimal emitted by fmt_g. Floating-point
-// std::from_chars is not implemented by every supported libc++ (notably
-// the Android NDK toolchain), so keep this tiny locale-independent parser
-// for the mantissa round-trip check.
-[[nodiscard]] bool parse_g_ascii(const char* text, double& out) {
-    const char* p = text;
-    bool negative = false;
-    if (*p == '-' || *p == '+') {
-        negative = *p == '-';
-        ++p;
-    }
-    double value = 0.0;
-    int digits = 0;
-    int fractional_digits = 0;
-    bool fractional = false;
-    while (*p != '\0') {
-        if (*p == '.' && !fractional) {
-            fractional = true;
-            ++p;
-            continue;
-        }
-        if (*p < '0' || *p > '9') break;
-        value = value * 10.0 + static_cast<double>(*p - '0');
-        ++digits;
-        if (fractional) ++fractional_digits;
-        ++p;
-    }
-    if (digits == 0) return false;
-
-    int exponent = -fractional_digits;
-    if (*p == 'e' || *p == 'E') {
-        ++p;
-        bool exponent_negative = false;
-        if (*p == '-' || *p == '+') {
-            exponent_negative = *p == '-';
-            ++p;
-        }
-        if (*p < '0' || *p > '9') return false;
-        int parsed_exponent = 0;
-        while (*p >= '0' && *p <= '9') {
-            parsed_exponent = parsed_exponent * 10 + (*p - '0');
-            ++p;
-        }
-        exponent += exponent_negative ? -parsed_exponent : parsed_exponent;
-    }
-    if (*p != '\0') return false;
-    out = (negative ? -value : value) *
-          std::pow(10.0, static_cast<double>(exponent));
-    return std::isfinite(out);
-}
-
-// The mantissa spelling: plain %g at the digit budget, into the
-// caller's buffer. The parser above reads its ASCII decimal without
-// depending on the process locale.
-void fmt_g(char* buf, std::size_t cap, double v, int digits) {
-    std::snprintf(buf, cap, "%.*g", digits, v);
-}
-
-}  // namespace
-
 const char* plot_format_eng(char* buf, std::size_t cap, double v,
                             int digits) {
-    if (cap == 0u) {
-        return buf;
-    }
-    if (std::isnan(v)) {
-        const char* s = "nan";
-        std::size_t n = std::min(cap - 1, std::char_traits<char>::length(s));
-        std::copy_n(s, n, buf);
-        buf[n] = '\0';
-        return buf;
-    }
-    if (std::isinf(v)) {
-        const char* s = v > 0.0 ? "inf" : "-inf";
-        std::size_t n = std::min(cap - 1, std::char_traits<char>::length(s));
-        std::copy_n(s, n, buf);
-        buf[n] = '\0';
-        return buf;
-    }
-    if (v == 0.0) {
-        const char* s = "0";
-        std::size_t n = std::min(cap - 1, std::char_traits<char>::length(s));
-        std::copy_n(s, n, buf);
-        buf[n] = '\0';
-        return buf;
-    }
-    digits = std::clamp(digits, 1, 6);
-
-    // The prefix table: femto through tera, three decades per rung,
-    // 0 = no prefix (the unit rung). Beyond the table both ways, plain
-    // %g keeps the magnitude honest ("1e+18") where a clamped prefix
-    // ("1000T") would already be a rounding story.
-    static constexpr char kPrefixes[] = {'f', 'p', 'n', 'u',
-                                         'm', 0,   'k', 'M', 'G', 'T'};
-    constexpr int kFirstExp = -15;  // femto
-    constexpr int kLastExp = 12;    // tera
-    constexpr int kStep = 3;
-
-    const bool neg = v < 0.0;
-    double av = neg ? -v : v;
-    if (!(av >= 1e-15) || !(av < 1e15)) {
-        fmt_g(buf, cap, v, digits);
-        return buf;
-    }
-
-    // The initial bucket, clamped to the table before any
-    // renormalization walks it upward.
-    int e = static_cast<int>(std::floor(std::log10(av) / kStep) * kStep);
-    e = std::clamp(e, kFirstExp, kLastExp);
-    for (int pass = 0; pass < 2; ++pass) {
-        char mant[32];
-        fmt_g(mant, sizeof mant, av / pow10(e), digits);
-        // The round-trip check: a mantissa that printed at 1000 or
-        // beyond ("999.9" at 4 digits) rounds up through its decade,
-        // so the BUCKET renormalizes (e += 3) rather than the label
-        // printing 1000m. from_chars is the locale-deaf parse.
-        double printed = 1000.0;
-        if (!parse_g_ascii(mant, printed)) printed = 1000.0;
-        if (printed < 1000.0) {
-            const int slot = (e - kFirstExp) / kStep;
-            const char prefix = kPrefixes[static_cast<std::size_t>(slot)];
-            const char* sign = (neg && printed != 0.0) ? "-" : "";
-            if (prefix == 0) {
-                std::snprintf(buf, cap, "%s%s", sign, mant);
-            } else {
-                std::snprintf(buf, cap, "%s%s%c", sign, mant, prefix);
-            }
-            return buf;
-        }
-        e += kStep;
-        if (e > kLastExp) {
-            fmt_g(buf, cap, v, digits);  // rounded up past tera
-            return buf;
-        }
-    }
-    // Unreachable for in-table inputs (the renormalized value
-    // re-buckets strictly below the ladder top); the honest raw tail.
-    fmt_g(buf, cap, v, digits);
-    return buf;
+    return ws::plotmath::format_eng_buf(buf, cap, v, digits);
 }
 
+namespace {
+// The two-doubles pair, each way - the forward bodies below ride them.
+[[nodiscard]] ws::plotmath::PlotRange to_core(PlotAxisRange r) {
+    return {r.lo, r.hi};
+}
+[[nodiscard]] PlotAxisRange to_gui(ws::plotmath::PlotRange r) {
+    return {r.lo, r.hi};
+}
+}  // namespace
+
 PlotAxisRange plot_expand_range(double lo, double hi, double frac) {
-    if (std::isnan(lo) || std::isnan(hi) || std::isinf(lo) ||
-        std::isinf(hi)) {
-        return {0.0, 1.0};
-    }
-    if (frac < 0.0 || std::isnan(frac)) {
-        frac = 0.0;
-    }
-    if (!(lo < hi)) {
-        // Degenerate: pad by frac of the magnitude floor so a constant
-        // line still gets a visible axis.
-        const double d = std::max(std::fabs(lo), 1.0) * frac;
-        return {lo - d, lo + d};
-    }
-    const double pad = (hi - lo) * frac;
-    return {lo - pad, hi + pad};
+    return to_gui(ws::plotmath::expand_range(lo, hi, frac));
 }
 
 PlotAxisRange plot_clamp_view(PlotAxisRange view, PlotAxisRange home) {
-    if (std::isnan(home.lo) || std::isnan(home.hi) || std::isinf(home.lo) ||
-        std::isinf(home.hi) || !(home.lo < home.hi)) {
-        return home;  // nothing sane to clamp against
-    }
-    if (std::isnan(view.lo) || std::isnan(view.hi) || std::isinf(view.lo) ||
-        std::isinf(view.hi)) {
-        return home;
-    }
-    // Degenerate, or a window at or past home's span (it cannot slide
-    // inside; spilling both ways is the same case): the home fit wins.
-    if (!(view.lo < view.hi) ||
-        (view.hi - view.lo) >= (home.hi - home.lo)) {
-        return home;
-    }
-    // Both ends inside and narrower than home: slide the minimal
-    // distance. At most one shift fires (the span fits), but run both
-    // so an already-clamped caller stays clamped.
-    if (view.lo < home.lo) {
-        const double d = home.lo - view.lo;
-        view.lo += d;
-        view.hi += d;
-    }
-    if (view.hi > home.hi) {
-        const double d = view.hi - home.hi;
-        view.lo -= d;
-        view.hi -= d;
-    }
-    return view;
+    return to_gui(ws::plotmath::clamp_view(to_core(view), to_core(home)));
 }
 
 PlotAxisRange plot_zoom_range(PlotAxisRange view, PlotAxisRange home,
                               double anchor, double factor) {
-    if (!(factor > 0.0) || std::isnan(factor) || factor == 1.0) {
-        return view;
-    }
-    if (std::isnan(view.lo) || std::isnan(view.hi) || std::isinf(view.lo) ||
-        std::isinf(view.hi) || !(view.lo < view.hi)) {
-        return view;  // degenerate/non-finite: no direction to grow in
-    }
-    if (std::isnan(anchor)) {
-        anchor = view.lo;
-    }
-    anchor = std::clamp(anchor, view.lo, view.hi);
-    const double k = 1.0 / factor;
-    PlotAxisRange out{anchor + (view.lo - anchor) * k,
-                      anchor + (view.hi - anchor) * k};
-    // The float-mush floor: a window narrower than 1e-6 of home's span
-    // prints degenerate tick ladders and loses the data to rounding.
-    if (std::isnan(out.lo) || std::isnan(out.hi) || std::isinf(out.lo) ||
-        std::isinf(out.hi) || !(out.lo < out.hi) ||
-        (out.hi - out.lo) < (home.hi - home.lo) * 1e-6) {
-        const double span = (home.hi - home.lo) * 1e-6;
-        out = {anchor - span * 0.5, anchor + span * 0.5};
-    }
-    return plot_clamp_view(out, home);
+    return to_gui(ws::plotmath::zoom_range(to_core(view), to_core(home),
+                                         anchor, factor));
 }
 
 PlotAxisRange plot_pan_range(PlotAxisRange view, PlotAxisRange home,
                              double delta) {
-    if (std::isnan(delta) || std::isinf(delta)) {
-        return view;
-    }
-    return plot_clamp_view({view.lo + delta, view.hi + delta}, home);
+    return to_gui(ws::plotmath::pan_range(to_core(view), to_core(home),
+                                         delta));
 }
 
 // --- the behavior half ---------------------------------------------------------
@@ -494,7 +209,11 @@ PlotResult plot_behavior(GuiContext& gui, const Rect& rect,
     // same O(n) anyway, so the check rides along; a NaN anywhere in
     // the axis fails the chain and lands in the scan paths, which are
     // the honest fallbacks.
-    frame.x_sorted = frame.by_index || strictly_increasing(xs, n);
+    frame.x_sorted =
+        frame.by_index ||
+        (xs != nullptr &&
+         ws::plotmath::strictly_increasing(
+             std::span<const double>(xs, static_cast<std::size_t>(n))));
 
     // The y fits, one per spine over its OWN visible company (the
     // two-axis split: the volts left, the amps right, never one
@@ -843,7 +562,9 @@ PlotResult plot_behavior(GuiContext& gui, const Rect& rect,
                 std::llround(wxa), 0, static_cast<long long>(n) - 1));
             result.hover_x = static_cast<double>(result.hover);
         } else {
-            result.hover = nearest_sample(xs, wxa, frame.x_sorted, n);
+            result.hover = ws::plotmath::nearest_sample(
+                std::span<const double>(xs, static_cast<std::size_t>(n)),
+                wxa, frame.x_sorted, static_cast<std::size_t>(n));
             result.hover_x =
                 result.hover >= 0 ? xs[result.hover] : 0.0;
         }
@@ -960,48 +681,39 @@ private:
     // for a waveform). The bucket boundaries are exact cuts of the
     // span, so a sample ON a boundary belongs to the earlier bucket
     // (the < below) and the tail rides the last bucket whole.
+    // The decimated walk: the shared core's keep list (ws::plotmath::
+    // decimate_minmax - each bucket's y-min and y-max SAMPLE in
+    // occurrence order, the window's first and last forced in), streamed
+    // through the same emit the raw path rides. One implementation of
+    // the envelope contract now - the old inline bucket walk was this
+    // core's private rehearsal, and the by-index window carries a
+    // synthetic ramp axis so the same bucket arithmetic answers it.
     void decimated(int i0, int i1, std::size_t budget) {
-        emit(i0);
-        const std::size_t buckets = std::max<std::size_t>(1, budget / 2u);
-        const double x_lo = x_at(i0);
-        const double x_hi = x_at(i1 - 1);
-        const double bw = (x_hi - x_lo) / static_cast<double>(buckets);
-        int k = i0 + 1;
-        for (std::size_t b = 0; b < buckets && k < i1 - 1; ++b) {
-            const double b_hi =
-                (b + 1u == buckets) ? x_hi : x_lo + static_cast<double>(b + 1u) * bw;
-            int min_k = -1;
-            int max_k = -1;
-            double min_v = 0.0;
-            double max_v = 0.0;
-            while (k < i1 - 1 && x_at(k) < b_hi) {
-                const double v = ys_[k];
-                if (std::isfinite(v)) {
-                    if (min_k < 0 || v < min_v) {
-                        min_k = k;
-                        min_v = v;
-                    }
-                    if (max_k < 0 || v > max_v) {
-                        max_k = k;
-                        max_v = v;
-                    }
-                }
-                ++k;
-            }
-            if (min_k < 0) {
-                continue;  // a bucket of non-finite samples only
-            }
-            if (min_k == max_k) {
-                emit(min_k);
-            } else if (min_k < max_k) {
-                emit(min_k);
-                emit(max_k);
-            } else {
-                emit(max_k);
-                emit(min_k);
-            }
+        const std::size_t m = static_cast<std::size_t>(i1 - i0);
+        if (m < 2u) {
+            return;
         }
-        emit(i1 - 1);
+        if (f_.by_index) {
+            std::vector<double> idx_xs;
+            idx_xs.reserve(m);
+            for (int k = i0; k < i1; ++k) {
+                idx_xs.push_back(static_cast<double>(k));
+            }
+            decimated_window(idx_xs.data(), i0, m, budget);
+        } else {
+            decimated_window(xs_ + i0, i0, m, budget);
+        }
+    }
+
+    void decimated_window(const double* window_xs, int i0,
+                           std::size_t m, std::size_t budget) {
+        const std::span<const double> window_x(window_xs, m);
+        const std::span<const double> window_y(ys_ + i0, m);
+        const std::vector<std::size_t> keep =
+            ws::plotmath::decimate_minmax(window_x, window_y, budget);
+        for (std::size_t k : keep) {
+            emit(i0 + static_cast<int>(k));
+        }
     }
 
     const PlotFrame& f_;

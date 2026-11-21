@@ -7,7 +7,7 @@
 # archive folded into ws_ui) links them PUBLIC - see the link line below.
 # The registry in cmake/WsHelpers.cmake must match this list verbatim;
 # ws_add_library fails configure on a mismatch.
-ws_add_library(ui DEPENDS ws::core ws::math ws::input ws::gfx ws::jobs ws::settings ws::app ws::platform)
+ws_add_library(ui DEPENDS ws::core ws::math ws::input ws::gfx ws::jobs ws::settings ws::app ws::platform ws::plotmath)
 
 # The gui subset as its own archive - the stage-2 acceptance cut. It links
 # ws::core + ws::input (the frame snapshot it reads; itself core-only,
@@ -36,7 +36,7 @@ target_include_directories(ws_ui_gui
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_features(ws_ui_gui PUBLIC cxx_std_20)
 ws_set_warnings(ws_ui_gui)
-target_link_libraries(ws_ui_gui PUBLIC ws::core ws::math ws::input ws::jobs ws::settings ws::app ws::platform)
+target_link_libraries(ws_ui_gui PUBLIC ws::core ws::math ws::input ws::jobs ws::settings ws::app ws::platform ws::plotmath)
 target_link_libraries(ws_ui PRIVATE ws_ui_gui)
 
 # Platform + gui sources: exactly one windowing TU builds (the WindowHost

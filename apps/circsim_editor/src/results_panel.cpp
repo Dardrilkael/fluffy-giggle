@@ -87,6 +87,7 @@
 
 #include <ws/core/log.hpp>
 #include <ws/input/input.hpp>
+#include <ws/plotmath/plotmath.hpp>
 #include <ws/spice/results.hpp>
 #include <ws/circsim/overlay.hpp>
 #include <ws/circsim/png.hpp>
@@ -241,49 +242,13 @@ void ensure_series_stats(Editor& ed, const ws::spice::Table& t) {
     cache.stats_run = cache.run_id;
 }
 
-[[nodiscard]] bool strictly_increasing(std::span<const double> xs) {
-    for (std::size_t i = 1; i < xs.size(); ++i) {
-        if (!(xs[i - 1] < xs[i])) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// The hover sample: the index whose x is nearest the cursor. A sorted
-// axis binary-searches; anything else scans (the .dc wrap and short
-// tables are the only non-sorted cases).
-[[nodiscard]] int nearest_sample(std::span<const double> xs, double x,
-                                 bool sorted, std::size_t n) {
-    if (n == 0) {
-        return -1;
-    }
-    if (sorted && xs.size() == n && n >= 2u) {
-        std::size_t lo = 0;
-        std::size_t hi = n - 1;
-        while (hi - lo > 1u) {
-            const std::size_t mid = lo + (hi - lo) / 2u;
-            if (xs[mid] <= x) {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        const double dlo = std::fabs(xs[lo] - x);
-        const double dhi = std::fabs(xs[hi] - x);
-        return static_cast<int>(dlo <= dhi ? lo : hi);
-    }
-    std::size_t best = 0;
-    double best_d = std::numeric_limits<double>::infinity();
-    for (std::size_t i = 0; i < n && i < xs.size(); ++i) {
-        const double d = std::fabs(xs[i] - x);
-        if (d < best_d) {
-            best_d = d;
-            best = i;
-        }
-    }
-    return static_cast<int>(best);
-}
+// The plot's axis math, hover lookup and gesture factors ride
+// ws::plotmath now (the unify-plotting merge): the same shared core
+// the generic gui plot widget calls, one authoritative spelling of
+// the ladder, the view invariants, the nearest-sample walk and the
+// navigation constants. The local strictly_increasing/nearest_sample
+// copies are gone; ws::circsim::plot's own functions (this file's
+// other seam) are the same core through the circsim facade.
 
 // --- waveform render experiments (opt-in; see the env vars below) -------------
 //
@@ -566,11 +531,14 @@ void tessellate_series(const std::vector<Point>& pts,
 // strip is the right spine's drag handle. The no-axis margin is the
 // stage-5 shape exactly.
 constexpr float kPlotHeight = 220.0f;
-constexpr float kMarginLeft = 46.0f;
-constexpr float kMarginBottom = 17.0f;
-constexpr float kMarginTop = 6.0f;
-constexpr float kMarginRight = 10.0f;
-constexpr float kMarginRightAxis = 46.0f;
+// The frame's margins and the 40x30 guard: the shared core's
+// constants (the widget's frame draws the identical ones - one
+// spelling, the unify-plotting merge).
+constexpr float kMarginLeft = ws::plotmath::kMarginLeft;
+constexpr float kMarginBottom = ws::plotmath::kMarginBottom;
+constexpr float kMarginTop = ws::plotmath::kMarginTop;
+constexpr float kMarginRight = ws::plotmath::kMarginRight;
+constexpr float kMarginRightAxis = ws::plotmath::kMarginRightAxis;
 
 // The band's fill/outline: the theme's accent, alpha-split (a wash
 // under the series, a line around the box). r2d packs 0xRRGGBBAA, so
@@ -778,7 +746,10 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
         const double wx = pf.wx(in.mouse_x);
         const double wy = pf.wy(in.mouse_y);
         const double wy1 = pf.wy1(in.mouse_y);
-        const double f = in.scroll_dy > 0.0f ? 1.15 : 1.0 / 1.15;
+        const double f =
+            in.scroll_dy > 0.0f
+                ? ws::plotmath::kWheelFactor
+                : 1.0 / ws::plotmath::kWheelFactor;
         const ws::circsim::PlotRange nx =
             zoom_range({cache.view.x_lo, cache.view.x_hi}, pf.xr, wx, f);
         const ws::circsim::PlotRange ny =
@@ -866,8 +837,11 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
         if (in.mouse_down[ws::input::mouse::kLeft] == 0) {
             const bool was_band = g.kind == PlotGesture::Kind::Band;
             bool committed = false;
-            if (was_band && std::fabs(in.mouse_x - g.from_x) >= 4.0f &&
-                std::fabs(in.mouse_y - g.from_y) >= 4.0f) {
+            if (was_band &&
+                std::fabs(in.mouse_x - g.from_x) >=
+                    ws::plotmath::kBandMinPx &&
+                std::fabs(in.mouse_y - g.from_y) >=
+                    ws::plotmath::kBandMinPx) {
                 // The box's corners map through each spine's OWN
                 // transform (stage 6): one screen band, three windows
                 // - x, the left spine's volts, the right spine's amps
@@ -907,7 +881,7 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
                 // Dragging right stretches the axis: zoom in.
                 const double f =
                     std::exp((static_cast<double>(in.mouse_x) - g.from_x) *
-                             0.005);
+                             ws::plotmath::kStripExp);
                 const ws::circsim::PlotRange nx =
                     zoom_range({g.x_lo, g.x_hi}, pf.xr, g.anchor_x, f);
                 cache.view.active = true;
@@ -921,7 +895,7 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
                 // axis up).
                 const double f =
                     std::exp((g.from_y - static_cast<double>(in.mouse_y)) *
-                             0.005);
+                             ws::plotmath::kStripExp);
                 const ws::circsim::PlotRange ny =
                     zoom_range({g.y_lo, g.y_hi}, pf.yr, g.anchor_y, f);
                 cache.view.active = true;
@@ -933,7 +907,7 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
                 // own zoom, same gesture language, its own anchor.
                 const double f =
                     std::exp((g.from_y - static_cast<double>(in.mouse_y)) *
-                             0.005);
+                             ws::plotmath::kStripExp);
                 const ws::circsim::PlotRange ny1 =
                     zoom_range({g.y1_lo, g.y1_hi}, pf.yr1, g.anchor_y1,
                                f);
@@ -953,9 +927,12 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
     // (strips - the left one owns the volt window, the right one the
     // amp window, stage 6).
     if (in.mouse_pressed[ws::input::mouse::kLeft] != 0 && over) {
-        if (in_frame && g.click_clock < 0.35f &&
-            std::fabs(in.mouse_x - g.click_x) < 5.0f &&
-            std::fabs(in.mouse_y - g.click_y) < 5.0f) {
+        if (in_frame &&
+            g.click_clock < ws::plotmath::kDoubleClickSecs &&
+            std::fabs(in.mouse_x - g.click_x) <
+                ws::plotmath::kDoubleClickPx &&
+            std::fabs(in.mouse_y - g.click_y) <
+                ws::plotmath::kDoubleClickPx) {
             cache.view = PlotView{};
             pf.vxr = pf.xr;
             pf.vyr = pf.yr;
@@ -1036,7 +1013,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     const float mr = has_right ? kMarginRightAxis : kMarginRight;
     const float iw = plot.width - kMarginLeft - mr;
     const float ih = plot.height - kMarginTop - kMarginBottom;
-    if (iw < 40.0f || ih < 30.0f) {
+    if (iw < ws::plotmath::kMinInnerW || ih < ws::plotmath::kMinInnerH) {
         return;  // too narrow to be worth a frame
     }
     const float fx = plot.x + kMarginLeft;
@@ -1062,7 +1039,8 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     // (main.cpp's block beside visible_for): a same-indexed table of
     // a new run is a different axis.
     if (ed.results.x_sorted_for != ed.results.table) {
-        ed.results.x_sorted = !by_index && strictly_increasing(xs);
+        ed.results.x_sorted =
+            !by_index && ws::plotmath::strictly_increasing(xs);
         ed.results.x_sorted_for = ed.results.table;
     }
     // Stage 9: the axis's monotone runs, the same per-table constant
@@ -1273,7 +1251,8 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             ed.results.hover = static_cast<int>(std::clamp<long long>(
                 std::llround(wx), 0, static_cast<long long>(n) - 1));
         } else {
-            ed.results.hover = nearest_sample(xs, wx, x_sorted, n);
+            ed.results.hover =
+                ws::plotmath::nearest_sample(xs, wx, x_sorted, n);
         }
     } else {
         ed.results.hover = -1;

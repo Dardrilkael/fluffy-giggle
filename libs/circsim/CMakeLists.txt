@@ -6,7 +6,7 @@
 # insertion-order, unknown-field-preserving JSON (the .csim carrier) and
 # ws::settings::FileSystem is the atomic-write seam every persistence user
 # rides. ws::math rides PUBLIC for ws::math::DVec2 (model.hpp positions).
-ws_add_library(circsim DEPENDS ws::core ws::math ws::spice ws::settings)
+ws_add_library(circsim DEPENDS ws::core ws::math ws::spice ws::settings ws::plotmath)
 
 ws_add_test(circsim SOURCES tests/test_format.cpp tests/test_nets.cpp
                               tests/test_erc.cpp tests/test_export.cpp

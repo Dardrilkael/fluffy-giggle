@@ -186,9 +186,16 @@ fetched privately, which would duplicate a first-party capability.
   a wire's polyline, a label's anchor grown one unit; the caller's
   NetList saves a build for the Net case.
 
-## Plot (plot.hpp, stage 4-5)
+## Plot (plot.hpp, stage 4-5; the math now in ws::plotmath)
 - The axis math every plot surface shares (the editor's Results
-  panel today; a raster exporter later): `nice_ticks` (the 1/2/5 x 10^k
+  panel today; a raster exporter later). The unify-plotting merge
+  moved the bodies to ws::plotmath (the workspace's shared core below
+  both ui and circsim, also called by the generic gui plot widget);
+  plot.hpp/plot.cpp is the circsim facade - same public API, every
+  function a field-converting forward, the parity suite pins the two
+  spellings byte-identical. signal_y_axis stays circsim's own (SPICE
+  save-name knowledge, not plotting math).
+- The facade's contracts (one set, answered by the core): `nice_ticks` (the 1/2/5 x 10^k
   ladder, endpoints never forced), `format_eng` (SI engineering
   notation, ASCII "u" for micro, m/M case matters, renormalizes a
   mantissa that rounds up through its decade, plain %g outside f..T),

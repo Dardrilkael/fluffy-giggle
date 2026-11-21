@@ -1552,8 +1552,8 @@ void table_row_draw(const Rect& row_rect, const TableRowPaint& paint,
 // crosshair is solid, not dashed, for the same reason.
 
 // A closed interval with the endpoints in order - the plot's own range
-// spelling, named in full so a TU holding both this header and
-// ws::circsim's results math (the editor, today) reads unambiguously.
+// spelling (ws::plotmath::PlotRange is the shared core's; this one
+// keeps the gui's public API stable while forwarding into it).
 struct PlotAxisRange {
     double lo = 0.0;
     double hi = 0.0;
@@ -1585,11 +1585,12 @@ struct PlotSeries {
 
 // The pure axis math, public so the headless suite (and any caller
 // sizing its own readouts) gates the same decisions the plot renders -
-// the popup_placement precedent. These mirror ws::circsim's plot.hpp
-// contracts (the editor's hand-rolled Results panel rides those); they
-// are re-homed here rather than linked because a gui widget must not
-// reach into an app tier, and a future shared math tier could unify
-// the two spellings without touching either consumer's calls.
+// the popup_placement precedent. Each is a thin forward into
+// ws::plotmath, the shared plotting core BOTH this widget and the
+// circsim Results panel call (the unify-plotting merge: one
+// authoritative implementation; these spellings keep the gui's
+// call sites and suite stable). The contracts below carry the
+// merged guard sets; ws::plotmath/plotmath.hpp is their home.
 
 // Tick positions covering [lo, hi] at roughly `target` intervals,
 // snapped to the 1/2/5 x 10^k ladder every scope walks. Degenerate

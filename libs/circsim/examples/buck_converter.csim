@@ -1,0 +1,503 @@
+{
+    "format": "circsim",
+    "version": 1,
+    "grid": 1.0,
+    "next_id": 100,
+    "parts": [
+        {
+            "id": 1,
+            "symbol": "v",
+            "ref": "VIN",
+            "value": "",
+            "pos": [
+                -10.0,
+                -4.0
+            ],
+            "rot": 90,
+            "mirror": false,
+            "params": {
+                "wave": "DC 12"
+            }
+        },
+        {
+            "id": 2,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [
+                -10.0,
+                6.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 3,
+            "symbol": "s",
+            "ref": "S1",
+            "value": "",
+            "pos": [
+                -4.0,
+                -4.0
+            ],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "MYSW"
+            }
+        },
+        {
+            "id": 4,
+            "symbol": "d",
+            "ref": "D1",
+            "value": "",
+            "pos": [
+                -4.0,
+                -2.0
+            ],
+            "rot": 0,
+            "mirror": false,
+            "params": {
+                "model": "1N5819"
+            }
+        },
+        {
+            "id": 5,
+            "symbol": "l",
+            "ref": "L1",
+            "value": "47u",
+            "pos": [
+                2.0,
+                -4.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 6,
+            "symbol": "r",
+            "ref": "RL1",
+            "value": "0.1",
+            "pos": [
+                6.0,
+                -4.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 7,
+            "symbol": "r",
+            "ref": "RLOAD",
+            "value": "5",
+            "pos": [
+                12.0,
+                -4.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 8,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [
+                12.0,
+                6.0
+            ],
+            "rot": 0,
+            "mirror": false
+        },
+        {
+            "id": 9,
+            "symbol": "v",
+            "ref": "VPWM",
+            "value": "",
+            "pos": [
+                -4.0,
+                -10.0
+            ],
+            "rot": 90,
+            "mirror": false,
+            "params": {
+                "wave": "PULSE(0 5 0 10u 10u 10u 40u)"
+            }
+        },
+        {
+            "id": 10,
+            "symbol": "gnd",
+            "ref": "",
+            "value": "",
+            "pos": [
+                -4.0,
+                -12.0
+            ],
+            "rot": 0,
+            "mirror": false
+        }
+    ],
+    "junctions": [
+        {
+            "id": 11,
+            "pos": [
+                -4.0,
+                -2.0
+            ],
+            "taps": [
+                101,
+                102,
+                105
+            ]
+        },
+        {
+            "id": 12,
+            "pos": [
+                0.0,
+                -4.0
+            ],
+            "taps": [
+                103,
+                104
+            ]
+        },
+        {
+            "id": 13,
+            "pos": [
+                4.0,
+                -4.0
+            ],
+            "taps": [
+                106,
+                107
+            ]
+        },
+        {
+            "id": 14,
+            "pos": [
+                10.0,
+                -4.0
+            ],
+            "taps": [
+                108,
+                109
+            ]
+        },
+        {
+            "id": 15,
+            "pos": [
+                -4.0,
+                -4.0
+            ],
+            "taps": [
+                110,
+                111
+            ]
+        }
+    ],
+    "wires": [
+        {
+            "id": 101,
+            "a": {
+                "pin": {
+                    "part": 3,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "junction": {
+                    "id": 11
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 102,
+            "a": {
+                "pin": {
+                    "part": 4,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "junction": {
+                    "id": 11
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 103,
+            "a": {
+                "pin": {
+                    "part": 4,
+                    "pin": 0
+                }
+            },
+            "b": {
+                "junction": {
+                    "id": 12
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 104,
+            "a": {
+                "junction": {
+                    "id": 12
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 2,
+                    "pin": 0
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 105,
+            "a": {
+                "junction": {
+                    "id": 11
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 5,
+                    "pin": 0
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 106,
+            "a": {
+                "pin": {
+                    "part": 5,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "junction": {
+                    "id": 13
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 107,
+            "a": {
+                "junction": {
+                    "id": 13
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 6,
+                    "pin": 0
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 108,
+            "a": {
+                "pin": {
+                    "part": 6,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "junction": {
+                    "id": 14
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 109,
+            "a": {
+                "junction": {
+                    "id": 14
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 7,
+                    "pin": 0
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 110,
+            "a": {
+                "pin": {
+                    "part": 1,
+                    "pin": 0
+                }
+            },
+            "b": {
+                "junction": {
+                    "id": 15
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 111,
+            "a": {
+                "pin": {
+                    "part": 3,
+                    "pin": 0
+                }
+            },
+            "b": {
+                "junction": {
+                    "id": 15
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 112,
+            "a": {
+                "pin": {
+                    "part": 1,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 2,
+                    "pin": 0
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 113,
+            "a": {
+                "pin": {
+                    "part": 9,
+                    "pin": 0
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 3,
+                    "pin": 2
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 114,
+            "a": {
+                "pin": {
+                    "part": 9,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 3,
+                    "pin": 3
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 115,
+            "a": {
+                "pin": {
+                    "part": 9,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 10,
+                    "pin": 0
+                }
+            },
+            "ortho": true
+        },
+        {
+            "id": 116,
+            "a": {
+                "pin": {
+                    "part": 7,
+                    "pin": 1
+                }
+            },
+            "b": {
+                "pin": {
+                    "part": 8,
+                    "pin": 0
+                }
+            },
+            "ortho": true
+        }
+    ],
+    "labels": [
+        {
+            "id": 117,
+            "pos": [
+                -8.0,
+                -4.0
+            ],
+            "name": "VIN",
+            "wire": 110
+        },
+        {
+            "id": 118,
+            "pos": [
+                14.0,
+                -4.0
+            ],
+            "name": "VOUT",
+            "wire": 109
+        },
+        {
+            "id": 119,
+            "pos": [
+                -4.0,
+                -9.0
+            ],
+            "name": "PWM",
+            "wire": 113
+        },
+        {
+            "id": 120,
+            "pos": [
+                -4.0,
+                -2.0
+            ],
+            "name": "SW_NODE",
+            "wire": 101
+        }
+    ],
+    "analysis": {
+        "entries": [
+            {
+                "tran": {
+                    "tstep": 1e-07,
+                    "tstop": 0.002,
+                    "tmax": 1e-07,
+                    "uic": true
+                }
+            }
+        ]
+    },
+    "directives": "* Buck converter with ideal voltage-controlled switch (SW model)\n* NOTE: The ideal SW model has discontinuous resistance at Vt=2.5V which causes\n* convergence failures in transient simulation when combined with the freewheeling\n* diode's exponential I-V curve. This is a known SPICE limitation.\n* For a working simulation of the switch model, see pwm_rl_load.csim\n.model MYSW SW(Ron=0.1 Roff=1e6 Vt=2.5 Vh=0.5)\n.model 1N5819 D(IS=1e-9 N=1 RS=0.05 CJO=1e-10 M=0.5)",
+    "view": {
+        "zoom": 12.0,
+        "center": [
+            2.0,
+            -2.0
+        ]
+    }
+}

@@ -24,6 +24,30 @@ ws_add_app(circsim_editor DEPENDS ws::ui ws::circsim ws::jobs ws::platform
 # r2d stub and the real pure-CPU font bake the gui archive's undefined
 # r2d/font symbols resolve against. main.cpp/canvas_panel/side_panels
 # stay out - the app TU owns the App subclass and the window.
+# The parity suite (the unify-plotting merge's own gate): identical
+# data and viewport configurations fed through BOTH consumers' public
+# plotting APIs - the gui widget's (ws::ui::gui::plot_*) and the
+# Circsim panel's (ws::circsim::plot through its facade) - asserting
+# the answers agree. No production TU may hold both tiers (that is
+# the layering the merge keeps); a TEST is exactly where the two
+# spellings meet, and this one makes them stay one decision set.
+# Links the gui archive (the widget's pure math is public in
+# widgets.hpp) beside ws::circsim: no Editor, no canvas, no app TU -
+# the pure calls alone.
+ws_add_test(circsim_editor_plot_parity
+  SOURCES tests/test_plot_parity.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/tests/ui_gui_r2d_stub.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
+  LINK ws::circsim
+  DEPENDS ws::ui_gui ws::plotmath stb)
+if(TARGET test_circsim_editor_plot_parity)
+  target_include_directories(test_circsim_editor_plot_parity PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${PROJECT_SOURCE_DIR}/libs/ui/src"
+    "${PROJECT_SOURCE_DIR}/libs/ui/tests")
+endif()
+
 ws_add_test(circsim_editor_panel
   SOURCES tests/test_results_panel.cpp
           src/schematic_adapter.cpp
