@@ -1837,13 +1837,28 @@ void draw_transport_row(Editor& ed, gui::GuiContext& gui,
 
 // E3's plot image: the SHOWN table's visible series rendered headless
 // through RasterCanvas - the frame, the engineering-notation grid and
-// tick labels, one polyline per visible signal (full resolution, no
-// decimation - a PNG is written once, not drawn at 60 fps), the
-// markers, and a legend row per series. Pure over its inputs so the
-// headless suite can gate the bytes' shape (the RasterCanvas pixel
-// seam is the test's). `visible` parallels t.signals (nullptr = all
-// visible), `x_name` labels the axis. Public (results_panel.hpp) so
-// the app's export wiring and the tests reach it.
+// tick labels, one polyline per RUN per visible signal (full
+// resolution, no decimation - a PNG is written once, not drawn at
+// 60 fps), the markers, and a legend row per series. Pure over its
+// inputs so the headless suite can gate the bytes' shape (the
+// RasterCanvas pixel seam is the test's). `visible` parallels
+// t.signals (nullptr = all visible), `x_name` labels the axis.
+// Public (results_panel.hpp) so the app's export wiring and the tests
+// reach it.
+//
+// The one-shot LIVE HOME view (the PNG/live consistency contract):
+// this is draw_plot's automatic fit, not a re-derivation - the same
+// spine split (signal_y_axis over the visible columns), the same x
+// envelope (split_axis_runs' union over every pass, where a
+// front/back walk would clip any pass longer than the last), the
+// same per-spine expand_range, the same hidden-signal exclusion, the
+// same one-polyline-per-axis-run series shape with NaN break
+// vertices between runs. What stays PNG's own: the margins' pixel
+// sizes (a 1280x720 export has room the panel's flow rect does not),
+// the embedded bitmap font, and the backend's rasterization. The
+// export does NOT receive the interactive PlotView - the written
+// contract is the full-data HOME view (the panel's fit-view answer),
+// never the zoomed window; see results_panel.hpp's note.
 [[nodiscard]] std::string render_plot_png(const ws::spice::Table& t,
                                           const std::uint8_t* visible,
                                           const char* x_name,
@@ -1852,10 +1867,9 @@ void draw_transport_row(Editor& ed, gui::GuiContext& gui,
     using ws::circsim::RasterCanvas;
     constexpr int kW = 1280;
     constexpr int kH = 720;
-    constexpr double kML = 72.0, kMB = 48.0, kMT = 40.0, kMR = 24.0;
+    constexpr double kML = 72.0, kMB = 48.0, kMT = 40.0;
+    constexpr double kMR = 24.0, kMRAxis = 72.0;
     RasterCanvas rc(kW, kH, 0x1E2229u);
-    const double iw = kW - kML - kMR;
-    const double ih = kH - kMT - kMB;
 
     const std::size_t n = t.row_count();
     const bool by_index = t.sweep_axes.empty();
@@ -1867,60 +1881,110 @@ void draw_transport_row(Editor& ed, gui::GuiContext& gui,
                         : (k < xs.size() ? xs[k] : 0.0);
     };
 
-    // The visible set and the fit: x over the axis envelope, each y
-    // spine over its own visible company (the panel's own rule - a
-    // mixed V/I table splits its scales).
+    // The visible set (the live fit's gate: a hidden column never
+    // moves either spine) and the per-signal spine flags - the same
+    // classifier the live plot's SeriesStats cache carries
+    // (signal_y_axis over the signal's own name, computed once here
+    // instead of cached: a one-shot export has no frame budget).
     std::vector<std::uint8_t> vis;
+    std::vector<char> right;
     vis.reserve(t.signals.size());
+    right.reserve(t.signals.size());
+    bool has_right = false;
     for (std::size_t i = 0; i < t.signals.size(); ++i) {
-        vis.push_back(visible == nullptr || visible[i] != 0u ? 1u : 0u);
+        const bool shown =
+            visible == nullptr || visible[i] != 0u;
+        vis.push_back(shown ? 1u : 0u);
+        const bool is_right =
+            shown && ws::circsim::signal_y_axis(t.signals[i].name) ==
+                         ws::circsim::PlotYAxis::Right;
+        right.push_back(is_right ? 1 : 0);
+        has_right = has_right || is_right;
     }
-    double x_lo = 0.0, x_hi = static_cast<double>(n > 0u ? n - 1u : 1u);
-    if (!by_index && n > 0u) {
-        x_lo = x_at(0);
-        x_hi = x_at(0);
-        for (std::size_t k = 0; k < n; ++k) {
-            const double v = x_at(k);
-            if (std::isfinite(v)) {
-                x_lo = std::min(x_lo, v);
-                x_hi = std::max(x_hi, v);
-            }
-        }
+
+    // The x envelope: split_axis_runs' union over every monotone run
+    // - the live plot's own x home (stage 9's rule: a family whose
+    // passes differ in span fits its union, where a front/back walk
+    // would clip any pass longer than the last). An axisless table
+    // (or one with no finite x) falls back to the index run, exactly
+    // the live path's shape.
+    const ws::circsim::AxisRuns runs =
+        by_index ? ws::circsim::AxisRuns{}
+                 : ws::circsim::split_axis_runs(xs);
+    double x_lo = 0.0;
+    double x_hi = static_cast<double>(n > 0u ? n - 1u : 1u);
+    if (!by_index && runs.finite) {
+        x_lo = runs.lo;
+        x_hi = runs.hi;
     }
-    double y_lo = 0.0, y_hi = 1.0;
-    bool first = true;
+
+    // Each y spine fits ITS OWN visible company (the live plot's
+    // stage-6 rule): the left keeps the voltage columns, the right
+    // the current ones - a mixed V/I table on one scale would flatten
+    // itself into a lie. A spine with nothing finite keeps the
+    // sane-empty 0/1 window (the live path's own guard), which
+    // expand_range then opens around its magnitude.
+    double y_lo = std::numeric_limits<double>::infinity();
+    double y_hi = -std::numeric_limits<double>::infinity();
+    double y1_lo = std::numeric_limits<double>::infinity();
+    double y1_hi = -std::numeric_limits<double>::infinity();
     for (std::size_t i = 0; i < t.signals.size(); ++i) {
-        if (i >= vis.size() || !vis[i]) {
+        if (i >= vis.size() || !vis[i] ||
+            t.signals[i].data.size() != n) {
             continue;
         }
         for (double v : t.signals[i].data) {
             if (!std::isfinite(v)) {
                 continue;
             }
-            if (first) {
-                y_lo = v;
-                y_hi = v;
-                first = false;
+            if (right[i]) {
+                y1_lo = std::min(y1_lo, v);
+                y1_hi = std::max(y1_hi, v);
             } else {
                 y_lo = std::min(y_lo, v);
                 y_hi = std::max(y_hi, v);
             }
         }
     }
-    if (y_lo > y_hi || y_lo == y_hi) {
-        y_lo -= 1.0;
-        y_hi += 1.0;
+    if (y_lo > y_hi) {
+        y_lo = 0.0;  // nothing visible on the left: an empty-but-sane frame
+        y_hi = 1.0;
     }
-    // The padding the live plot's expand_range gives.
+    if (y1_lo > y1_hi) {
+        y1_lo = 0.0;  // same sane-empty answer for the right spine
+        y1_hi = 1.0;
+    }
+
+    // The padding the live plot's own expand_range gives, all three
+    // windows (a degenerate span opens around its magnitude - a
+    // constant line still gets an axis - and non-finite answers the
+    // sane-empty 0/1 frame).
     const ws::circsim::PlotRange px =
         ws::circsim::expand_range(x_lo, x_hi);
     const ws::circsim::PlotRange py =
         ws::circsim::expand_range(y_lo, y_hi);
+    const ws::circsim::PlotRange py1 =
+        ws::circsim::expand_range(y1_lo, y1_hi);
+
+    // The margins: the right one widens for the right spine's label
+    // strip exactly when a visible current column exists (the live
+    // frame's own has_right rule); a V-only table draws the same
+    // geometry it always did.
+    const double mr = has_right ? kMRAxis : kMR;
+    const double iw = kW - kML - mr;
+    const double ih = kH - kMT - kMB;
     const auto sx = [&](double v) {
         return kML + (v - px.lo) / (px.hi - px.lo) * iw;
     };
     const auto sy = [&](double v) {
         return kMT + (py.hi - v) / (py.hi - py.lo) * ih;
+    };
+    const auto sy1 = [&](double v) {
+        return kMT + (py1.hi - v) / (py1.hi - py1.lo) * ih;
+    };
+    // A series maps through its OWN spine (the live plot's sy_of):
+    const auto sy_of = [&](std::size_t i, double v) {
+        return right[i] ? sy1(v) : sy(v);
     };
 
     // The frame.
@@ -1928,8 +1992,12 @@ void draw_transport_row(Editor& ed, gui::GuiContext& gui,
                         {kML, kMT + ih}},
                        1.0, 0x60666Fu);
 
-    // The grid + tick labels (engineering notation, the panel's own
-    // ladder).
+    // The grid + tick labels (engineering notation, the shared
+    // ladder): x below the frame, the left spine's on the left, and
+    // - when the right spine exists - its own ladder's marks on the
+    // frame's right edge and labels in the widened margin (the live
+    // plot's own stage-6 shape: marks, not grid lines, so the two
+    // ladders never fight over the horizontal rails).
     const std::vector<double> x_ticks =
         ws::circsim::nice_ticks(px.lo, px.hi, 8u);
     const std::vector<double> y_ticks =
@@ -1956,25 +2024,78 @@ void draw_transport_row(Editor& ed, gui::GuiContext& gui,
                      RasterCanvas::HAlign::Right,
                      RasterCanvas::VAlign::Middle, 0xA8ADB8u);
     }
+    if (has_right) {
+        const std::vector<double> y1_ticks =
+            ws::circsim::nice_ticks(py1.lo, py1.hi, 6u);
+        for (double tick : y1_ticks) {
+            const double pys = sy1(tick);
+            if (pys < kMT || pys > kMT + ih) {
+                continue;
+            }
+            rc.stroke_polyline(
+                {{kML + iw, pys}, {kML + iw + 3.0, pys}}, 1.0,
+                0x2A2F38u);
+            rc.draw_text(ws::circsim::format_eng(tick, 4),
+                         kML + iw + 8.0, pys,
+                         RasterCanvas::HAlign::Left,
+                         RasterCanvas::VAlign::Middle, 0xA8ADB8u);
+        }
+    }
 
-    // The series: full resolution, each broken at non-finite samples
-    // (the live plot's own run rule).
+    // The series: full resolution, ONE POLYLINE PER AXIS RUN - the
+    // live plot's own series shape (stage 9). A run is a maximal
+    // strictly-monotone span of the axis; the break between two runs
+    // is a NaN vertex (the stroker's own line-break answer), so a
+    // .step family overlays its passes instead of chording the reset
+    // into an artificial diagonal, and a descending run (a .dc
+    // walking its source down) draws its span in its own direction -
+    // its x values still map through sx, so the pixels land where
+    // the data lives. An axisless table is one pseudo-run over the
+    // index. Non-finite Y values break the polyline inside a run
+    // exactly as they always did.
     for (std::size_t i = 0; i < t.signals.size(); ++i) {
         if (i >= vis.size() || !vis[i] ||
             t.signals[i].data.size() != n) {
             continue;
         }
         const std::uint32_t color = series_color(i) >> 8u;
+        const std::span<const double> ys = t.signals[i].data;
+        // The runs to draw: the axis's own, or the single pseudo-run
+        // of the index axis.
+        ws::circsim::AxisRun index_run;
+        index_run.begin = 0;
+        index_run.end = n;
+        index_run.rising = true;
+        const std::span<const ws::circsim::AxisRun> sig_runs =
+            by_index
+                ? std::span<const ws::circsim::AxisRun>(&index_run, 1u)
+                : std::span<const ws::circsim::AxisRun>(
+                      runs.runs.data(), runs.runs.size());
+        bool first_run = true;
         std::vector<std::pair<double, double>> run;
-        for (std::size_t k = 0; k < n; ++k) {
-            const double yv = t.signals[i].data[k];
-            if (std::isfinite(yv)) {
-                run.emplace_back(sx(x_at(k)), sy(yv));
-            } else if (run.size() >= 2u) {
+        for (const ws::circsim::AxisRun& r : sig_runs) {
+            const std::size_t r0 = std::min(r.begin, ys.size());
+            const std::size_t r1 = std::min(r.end, ys.size());
+            if (r1 <= r0) {
+                continue;
+            }
+            // The break between runs: a NaN vertex at the seam of
+            // every pair, the live draw's own shape.
+            if (!first_run && run.size() >= 2u) {
                 rc.stroke_polyline(run, 2.0, color);
             }
-            if (!std::isfinite(yv)) {
-                run.clear();
+            first_run = false;
+            run.clear();
+            for (std::size_t k = r0; k < r1; ++k) {
+                const double yv = ys[k];
+                if (std::isfinite(yv)) {
+                    run.emplace_back(sx(x_at(k)), sy_of(i, yv));
+                } else if (run.size() >= 2u) {
+                    rc.stroke_polyline(run, 2.0, color);
+                }
+                if (!std::isfinite(yv)) {
+                    run.clear();
+                }
             }
         }
         if (run.size() >= 2u) {

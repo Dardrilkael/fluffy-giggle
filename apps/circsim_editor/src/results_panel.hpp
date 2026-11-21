@@ -30,6 +30,19 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
 // headless suite can gate the bytes' shape (the RasterCanvas pixel
 // seam is the test's). `visible` parallels t.signals (nullptr = all
 // visible), `x_name` labels the axis.
+//
+// The PNG/live consistency contract: this is draw_plot's automatic
+// HOME view, one-shot - the same spine split (signal_y_axis: volts
+// left, amps right, independent ranges, hidden columns excluded), the
+// same x envelope (split_axis_runs' union over every pass), the same
+// expand_range padding, and the same one-polyline-per-run series
+// shape (NaN break vertices between runs, descending runs kept
+// descending). The EXPORT CONTRACT is deliberately the full-data HOME
+// view, never the interactive zoom/pan window: the call site passes
+// no PlotView, and that is the documented behavior (a PNG outlives
+// the view that produced it - the fit is what "the plot" means). The
+// interactive decimation and geometry caches are live-only concerns
+// and are not consulted here.
 [[nodiscard]] std::string render_plot_png(const ws::spice::Table& t,
                                           const std::uint8_t* visible,
                                           const char* x_name,

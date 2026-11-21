@@ -48,6 +48,32 @@ if(TARGET test_circsim_editor_plot_parity)
     "${PROJECT_SOURCE_DIR}/libs/ui/tests")
 endif()
 
+# The PNG/live consistency suite (the E3 export's own gate): the
+# render_plot_png path driven headless, asserted through a small PNG
+# decoder on the export's own deterministic bytes (the encoder's
+# filter-0/fixed-Huffman contract, parseable without linking the
+# canvas) - the spine split, the run segmentation, the envelope fit,
+# the markers, the hidden-signal exclusion, and the shared-math
+# parity with the live home fit.
+ws_add_test(circsim_editor_plot_png
+  SOURCES tests/test_plot_png.cpp
+          src/schematic_adapter.cpp
+          src/editor.cpp
+          src/document.cpp
+          src/results_panel.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/tests/ui_gui_r2d_stub.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
+  LINK ws::circsim
+  DEPENDS ws::ui_gui ws::plotmath stb ws::schematic
+          ws::gestures)
+if(TARGET test_circsim_editor_plot_png)
+  target_include_directories(test_circsim_editor_plot_png PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${PROJECT_SOURCE_DIR}/libs/ui/src"
+    "${PROJECT_SOURCE_DIR}/libs/ui/tests")
+endif()
+
 ws_add_test(circsim_editor_panel
   SOURCES tests/test_results_panel.cpp
           src/schematic_adapter.cpp
