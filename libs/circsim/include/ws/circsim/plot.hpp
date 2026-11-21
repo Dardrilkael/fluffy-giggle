@@ -154,6 +154,11 @@ enum class PlotYAxis : std::uint8_t { Left, Right };
 // never exceeds ~2 x budget entries and is strictly increasing in
 // index.
 //
+// The indices are RELATIVE TO THE SPANS PASSED (0 is xs[0] of the span
+// handed in, not of the table it was sliced from): a caller that hands
+// over a sub-span (xs.subspan(i0, n)) adds the slice start back before
+// using them as table positions.
+//
 // EMPTY means "decimation does not apply - draw every point": either
 // the input already fits the budget, the spans differ in length, or xs
 // is not strictly increasing (a nested .dc's repeating inner axis),

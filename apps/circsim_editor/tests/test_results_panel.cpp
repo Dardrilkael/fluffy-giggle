@@ -1420,6 +1420,158 @@ TEST_CASE("a step-family table overlays its passes, no chords") {
     CHECK(b.ed.results.x_runs.hi == doctest::Approx(0.1999));
 }
 
+// ---- decimation keeps are ABSOLUTE sample positions ------------------
+//
+// decimate_minmax answers positions relative to the span it is handed;
+// the panel hands it a SLICE (xs.subspan(i0, ...)) and the draw pushes
+// the answer as table positions. These pin the rebase: a window that
+// starts past sample 0, a falling run, and the later passes of a step
+// family - each case where the slice start is not 0, the only case the
+// older unzoomed tests could see.
+
+namespace {
+
+// Sets a manual x window (the y windows ride their homes) AFTER a first
+// draw has keyed view_for, so handle_plot_input keeps it.
+void zoom_x(Bench& b, double lo, double hi) {
+    b.ed.results.view = PlotView{true, lo, hi, kHomeYLo, kHomeYHi,
+                                 kHomeY1Lo, kHomeY1Hi};
+}
+
+}  // namespace
+
+TEST_CASE("a zoomed window's keeps are absolute sample positions") {
+    Bench b;
+    b.load(ramp_table(20000u));  // x = 0 .. 1.9999 s, 1e-4 apart
+    b.draw();                    // keys view_for
+    zoom_x(b, 0.8, 1.2);         // ~4000 samples: past the ~570 budget
+    b.draw();
+
+    const std::vector<double>& xs =
+        b.ed.results.run.results.tables[0].sweep_axes[0];
+    REQUIRE(b.ed.results.decim.size() == 2u);
+    REQUIRE(b.ed.results.decim[0].runs.size() == 1u);
+    const editor::ResultsCache::RunKeep& rk =
+        b.ed.results.decim[0].runs[0];
+    CHECK(rk.i0 > 0u);  // the case the unzoomed tests cannot reach
+    REQUIRE_FALSE(rk.idx.empty());
+    CHECK(rk.idx.front() == rk.i0);      // the forced first/last keeps
+    CHECK(rk.idx.back() == rk.i1 - 1u);  // sit at the slice's ends
+    std::size_t prev = rk.idx.front();
+    for (std::size_t k : rk.idx) {
+        CHECK(k >= prev);  // ascending
+        prev = k;
+        REQUIRE(k >= rk.i0);
+        REQUIRE(k < rk.i1);
+        // Every kept sample sits in the window (one sample of slack a
+        // side) - not in the head of the table.
+        CHECK(xs[k] >= 0.8 - 2.0e-4);
+        CHECK(xs[k] <= 1.2 + 2.0e-4);
+    }
+
+    // And the drawn strokes stay on the frame: the offset-less draw put
+    // them hundreds of px left of it (the head samples, mapped through
+    // the zoomed window).
+    const Bench::FrameBox f = b.frame_box(b.frame_cmd());
+    const std::vector<const canvas::CanvasCmd*> series = b.series_cmds();
+    REQUIRE(series.size() == 2u);
+    for (const canvas::CanvasCmd* s : series) {
+        for (const canvas::Point& p : s->points) {
+            CHECK(p.x >= f.fx - 2.0f);
+            CHECK(p.x <= f.fx2 + 2.0f);
+        }
+    }
+}
+
+TEST_CASE("a zoomed falling run's keeps are absolute sample positions") {
+    // A .dc walking its source DOWN: one falling run. The keeps are
+    // decimated over the reversed sub-span (starting at j0 there) and
+    // mapped home - the j0 has to ride the mapping.
+    Bench b;
+    ws::spice::Table t = ramp_table(20000u);
+    for (std::size_t i = 0; i < t.sweep_axes[0].size(); ++i) {
+        t.sweep_axes[0][i] = 1.0e-4 * static_cast<double>(19999u - i);
+    }
+    b.load(std::move(t));
+    b.draw();
+    REQUIRE(b.ed.results.x_runs.runs.size() == 1u);
+    REQUIRE_FALSE(b.ed.results.x_runs.runs[0].rising);
+    zoom_x(b, 0.8, 1.2);
+    b.draw();
+
+    const std::vector<double>& xs =
+        b.ed.results.run.results.tables[0].sweep_axes[0];
+    REQUIRE(b.ed.results.decim[0].runs.size() == 1u);
+    const editor::ResultsCache::RunKeep& rk =
+        b.ed.results.decim[0].runs[0];
+    REQUIRE_FALSE(rk.idx.empty());
+    CHECK(rk.idx.front() == rk.i0);
+    CHECK(rk.idx.back() == rk.i1 - 1u);
+    for (std::size_t k : rk.idx) {
+        REQUIRE(k >= rk.i0);
+        REQUIRE(k < rk.i1);
+        CHECK(xs[k] >= 0.8 - 2.0e-4);
+        CHECK(xs[k] <= 1.2 + 2.0e-4);
+    }
+
+    const Bench::FrameBox f = b.frame_box(b.frame_cmd());
+    for (const canvas::CanvasCmd* s : b.series_cmds()) {
+        for (const canvas::Point& p : s->points) {
+            CHECK(p.x >= f.fx - 2.0f);
+            CHECK(p.x <= f.fx2 + 2.0f);
+        }
+    }
+}
+
+TEST_CASE("every pass of a step family keeps its own samples") {
+    // 4 passes x 1500 rows over the same 0..0.15 s axis: each pass
+    // outruns its slice of the shared budget (~570 / 4), so each is
+    // decimated - and passes 1..3 start past sample 0. v(out) is a
+    // ramp over the WHOLE table, so a pass's level reads which
+    // samples it drew: pass p must sit above pass p-1.
+    constexpr std::size_t kPasses = 4u;
+    constexpr std::size_t kRows = 1500u;
+    Bench b;
+    ws::spice::Table t = ramp_table(kPasses * kRows);
+    for (std::size_t i = 0; i < t.sweep_axes[0].size(); ++i) {
+        t.sweep_axes[0][i] = 1.0e-4 * static_cast<double>(i % kRows);
+    }
+    b.load(std::move(t));
+    b.draw();
+
+    REQUIRE(b.ed.results.x_runs.runs.size() == kPasses);
+    REQUIRE(b.ed.results.decim[0].runs.size() == kPasses);
+    for (std::size_t p = 0; p < kPasses; ++p) {
+        const ws::circsim::AxisRun& run = b.ed.results.x_runs.runs[p];
+        const editor::ResultsCache::RunKeep& rk =
+            b.ed.results.decim[0].runs[p];
+        REQUIRE_FALSE(rk.idx.empty());  // the pass IS decimated
+        for (std::size_t k : rk.idx) {
+            CHECK(k >= run.begin);
+            CHECK(k < run.end);
+        }
+    }
+
+    // The drawn passes of v(out), in pass order: each one higher on
+    // the plot (smaller screen y) than the pass before it. The
+    // offset-less draw gave every pass the samples of pass 0.
+    std::vector<double> mean_y;
+    for (const canvas::CanvasCmd* s : b.series_cmds()) {
+        if (s->color != series_color(0)) {
+            continue;
+        }
+        double sum = 0.0;
+        for (const canvas::Point& p : s->points) {
+            sum += static_cast<double>(p.y);
+        }
+        mean_y.push_back(sum / static_cast<double>(s->points.size()));
+    }
+    REQUIRE(mean_y.size() == kPasses);
+    for (std::size_t p = 1; p < kPasses; ++p) {
+        CHECK(mean_y[p] < mean_y[p - 1u] - 1.0);
+    }
+}
+
 TEST_CASE("a many-signal table draws bounded series and sparklines") {
     // 48 signals x 20000 rows - the big-circuit shape the caches exist
     // for. Every series folds to the pixel budget; every legend row's

@@ -533,7 +533,9 @@ struct ResultsCache {
     // One RUN's cached decimation (stage 9's shape): `i0`/`i1` are the
     // run's visible slice in ABSOLUTE sample positions (the x window
     // the keeps were decimated over), `idx` the kept positions in
-    // ascending order - EMPTY separates "computed, and legitimately
+    // ascending order, likewise ABSOLUTE (positions into the table's
+    // columns, never offsets from `i0` - the draw pushes them as is) -
+    // EMPTY separates "computed, and legitimately
     // empty - the slice fits the budget, draw every sample in
     // [i0, i1)" from nothing (a run with no visible sample answers an
     // empty idx AND an empty slice, which draws nothing).

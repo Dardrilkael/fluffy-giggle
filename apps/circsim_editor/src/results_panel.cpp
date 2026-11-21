@@ -1435,6 +1435,14 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                                 rk.idx = ws::circsim::decimate_minmax(
                                     xs.subspan(i0, i1 - i0),
                                     ys.subspan(i0, i1 - i0), pass_budget);
+                                // decimate_minmax answers positions
+                                // RELATIVE to the span it was handed
+                                // (the slice, starting at i0); the
+                                // draw below pushes ABSOLUTE sample
+                                // positions, so rebase here.
+                                for (std::size_t& k : rk.idx) {
+                                    k += i0;
+                                }
                             }
                         } else {
                             // A falling run (a .dc walking its source
@@ -1461,9 +1469,12 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                                             rev_y.data() + j0,
                                             j1 - j0),
                                         pass_budget);
+                                // `rev` is relative to the sub-span that
+                                // starts at j0 in the reversed array,
+                                // so the reversed position is j0 + j.
                                 rk.idx.reserve(rev.size());
                                 for (std::size_t j : rev) {
-                                    rk.idx.push_back(r1 - 1u - j);
+                                    rk.idx.push_back(r1 - 1u - (j0 + j));
                                 }
                                 std::sort(rk.idx.begin(), rk.idx.end());
                             }
