@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Input to tools/package-android.ps1 (aapt2 link). NativeActivity +
-     hasCode=false: zero Java - the OS dlopens lib/arm64-v8a/libbounce.so
-     (android.app.lib_name below) and calls ANativeActivity_onCreate,
-     which native_app_glue owns. No permissions: the app touches no
+<!-- Input to tools/package-android.ps1 (aapt2 link). The shared ws::ui
+     Activity base supplies Android keyboard integration; the OS dlopens
+     lib/arm64-v8a/libbounce.so (android.app.lib_name below) and calls
+     ANativeActivity_onCreate, which native_app_glue owns. No permissions: the app touches no
      sockets (unlike chatter) and OpenSL/AAudio playback (via ws::audio's
      OpenAL Soft backend) needs none. Portrait-locked: the swapchain
      builds with preTransform = the surface's currentTransform, and a
@@ -20,16 +20,17 @@
     <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="35" />
 
     <application
-        android:hasCode="false"
+        android:hasCode="true"
         android:label="ws bounce"
         android:extractNativeLibs="true"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
         <activity
-            android:name="android.app.NativeActivity"
+            android:name="com.ws.ui.WsUiActivity"
             android:exported="true"
             android:label="ws bounce"
             android:screenOrientation="portrait"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density">
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
+            android:windowSoftInputMode="adjustResize">
             <!-- The module base name: libbounce.so, no prefix, no suffix. -->
             <meta-data android:name="android.app.lib_name"
                 android:value="bounce" />

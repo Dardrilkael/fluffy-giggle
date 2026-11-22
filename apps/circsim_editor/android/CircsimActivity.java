@@ -17,13 +17,12 @@
 // must still reach the same document next week.
 package com.ws.circsim_editor;
 
-import android.app.NativeActivity;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
 import android.provider.OpenableColumns;
 
-public class CircsimActivity extends NativeActivity {
+public class CircsimActivity extends com.ws.ui.WsUiActivity {
     // The request codes the native bridge's run_pick pairs with (the
     // native side spells the same pair - keep them in step).
     private static final int REQ_OPEN = 1;

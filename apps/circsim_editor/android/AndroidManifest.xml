@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Input to tools/package-android.ps1 (aapt2 link). The one Java class
-     the app ships is the SAF shim (CircsimActivity.java - the picker
-     intents and their onActivityResult hop, which pure native code can
-     never see), so hasCode="true" and the activity names the class;
+<!-- Input to tools/package-android.ps1 (aapt2 link). The app ships the
+     shared ws::ui Activity base plus its SAF subclass (CircsimActivity.java
+     owns picker intents and onActivityResult, which pure native code cannot
+     see), so hasCode="true" and the activity names the subclass;
      everything else still lives in libcircsim_editor.so through the
      android.app.lib_name meta-data below, which the activity hands to
      native_app_glue untouched.

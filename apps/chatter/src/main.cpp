@@ -94,34 +94,6 @@ bool jni_threw(JNIEnv* env, const char* what) {
   return true;
 }
 
-// ChatterActivity owns the UI-thread hand-off. NativeActivity's NDK
-// soft-input helper can be ignored by IMEs on devices whose native
-// window does not expose a focused Java view; this bridge calls the
-// Activity shim, which targets the focused content view on the UI thread.
-void request_chat_keyboard(bool show) {
-  if (g_activity == nullptr || g_activity->clazz == nullptr) {
-    return;
-  }
-  ScopedJavaThread jni{g_activity->vm};
-  if (!jni.ok()) {
-    return;
-  }
-  JNIEnv* e = jni.env;
-  const jclass cls = e->GetObjectClass(g_activity->clazz);
-  if (cls == nullptr) {
-    (void)jni_threw(e, "activity class lookup failed");
-    return;
-  }
-  const char* method_name = show ? "showChatKeyboard" : "hideChatKeyboard";
-  const jmethodID method = e->GetMethodID(cls, method_name, "()V");
-  e->DeleteLocalRef(cls);
-  if (method == nullptr || jni_threw(e, "chat keyboard method missing")) {
-    return;
-  }
-  e->CallVoidMethod(g_activity->clazz, method);
-  (void)jni_threw(e, "chat keyboard request failed");
-}
-
 // One poll: window -> decor view -> root insets -> the bottom inset, in
 // px. The method IDs resolve once (they are JVM-stable); every jobject
 // is a local reference and gets deleted before returning - a per-frame
@@ -342,7 +314,6 @@ constexpr int kDefaultRelayPort = 27475;
 // it is not a second, app-specific visual system.
 namespace gui = ws::ui::gui;
 
-using gui::Rect;
 using gui::WidgetId;
 
 [[nodiscard]] ws::ui::r2d::FontBakeOptions bake_options_for(bool dark) {
@@ -412,12 +383,8 @@ class ChatterApp final : public ws::ui::App {
         font_strong_.empty() ? nullptr : &font_strong_;
     install_clipboard(gui_);
 #ifdef __ANDROID__
-    // NativeActivity's private content view is not accepted by newer
-    // InputMethodManager implementations. ChatterActivity routes this
-    // focus transition through the served decor view on the UI thread.
-    gui_.set_ime_rect([](const Rect& rect) {
-      request_chat_keyboard(rect.width > 0.0f && rect.height > 0.0f);
-    });
+    // The shared ws::ui Android host owns keyboard visibility for every app.
+    install_ime_rect(gui_);
 #endif
 
     core_.start(options_);
