@@ -46,45 +46,43 @@ public class ChatterActivity extends NativeActivity {
     }
 
 
-    // NativeActivity's NDK showSoftInput call does not give Chatter a
-    // reliable UI-thread/focus hand-off on every device. Keep the IME
-    // request on Android's activity thread and target the currently
-    // focused NativeActivity content view (the view with the native
-    // input connection), not an unrelated overlay.
+    // On recent Android releases NativeActivity's private
+    // NativeContentView is not the view served by InputMethodManager.
+    // Passing it to showSoftInput is rejected ("view is not served").
+    // The decor view is the served view, so use it explicitly. Keep the
+    // call on the activity thread; IME transitions can also race animation.
     public void showChatKeyboard() {
         runOnUiThread(() -> {
-            View target = getWindow().getCurrentFocus();
-            if (target == null) {
-                target = getWindow().getDecorView().findFocus();
+            final View decor = getWindow().getDecorView();
+            decor.setFocusableInTouchMode(true);
+            decor.requestFocus();
+            final InputMethodManager imm = (InputMethodManager)
+                    getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                decor.post(() -> {
+                    try {
+                        imm.showSoftInput(decor,
+                                InputMethodManager.SHOW_IMPLICIT);
+                    } catch (RuntimeException ignored) {
+                        // IME can reject a request while its window animates.
+                    }
+                });
             }
-            if (target == null) {
-                target = getWindow().getDecorView();
-            }
-            target.setFocusableInTouchMode(true);
-            target.requestFocus();
-            final View inputTarget = target;
-            inputTarget.post(() -> {
-                InputMethodManager imm = (InputMethodManager)
-                        getSystemService(INPUT_METHOD_SERVICE);
-                if (imm != null) {
-                    imm.showSoftInput(inputTarget,
-                            InputMethodManager.SHOW_IMPLICIT);
-                }
-            });
         });
     }
 
     public void hideChatKeyboard() {
         runOnUiThread(() -> {
-            View target = getWindow().getCurrentFocus();
-            if (target == null) {
-                target = getWindow().getDecorView();
-            }
-            InputMethodManager imm = (InputMethodManager)
+            final View decor = getWindow().getDecorView();
+            final InputMethodManager imm = (InputMethodManager)
                     getSystemService(INPUT_METHOD_SERVICE);
-            if (imm != null && target.getWindowToken() != null) {
-                imm.hideSoftInputFromWindow(target.getWindowToken(),
-                        InputMethodManager.HIDE_NOT_ALWAYS);
+            if (imm != null && decor.getWindowToken() != null) {
+                try {
+                    imm.hideSoftInputFromWindow(decor.getWindowToken(),
+                            InputMethodManager.HIDE_NOT_ALWAYS);
+                } catch (RuntimeException ignored) {
+                    // Hiding during an IME transition is already satisfied.
+                }
             }
         });
     }
