@@ -52,35 +52,41 @@ public class ChatterActivity extends NativeActivity {
     // The decor view is the served view, so use it explicitly. Keep the
     // call on the activity thread; IME transitions can also race animation.
     public void showChatKeyboard() {
-        runOnUiThread(() -> {
-            final View decor = getWindow().getDecorView();
-            final InputMethodManager imm = (InputMethodManager)
-                    getSystemService(INPUT_METHOD_SERVICE);
-            if (imm != null) {
-                try {
-                    // The decor view is InputMethodManager's served view
-                    // for NativeActivity. Passing NativeContentView here
-                    // is rejected on recent Android releases.
-                    imm.showSoftInput(decor,
-                            InputMethodManager.SHOW_IMPLICIT);
-                } catch (RuntimeException ignored) {
-                    // IME can reject a request while its window animates.
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                final View decor = getWindow().getDecorView();
+                final InputMethodManager imm = (InputMethodManager)
+                        getSystemService(INPUT_METHOD_SERVICE);
+                if (imm != null) {
+                    try {
+                        // The decor view is InputMethodManager's served view
+                        // for NativeActivity. Passing NativeContentView here
+                        // is rejected on recent Android releases.
+                        imm.showSoftInput(decor,
+                                InputMethodManager.SHOW_IMPLICIT);
+                    } catch (RuntimeException ignored) {
+                        // IME can reject a request while its window animates.
+                    }
                 }
             }
         });
     }
 
     public void hideChatKeyboard() {
-        runOnUiThread(() -> {
-            final View decor = getWindow().getDecorView();
-            final InputMethodManager imm = (InputMethodManager)
-                    getSystemService(INPUT_METHOD_SERVICE);
-            if (imm != null && decor.getWindowToken() != null) {
-                try {
-                    imm.hideSoftInputFromWindow(decor.getWindowToken(),
-                            InputMethodManager.HIDE_NOT_ALWAYS);
-                } catch (RuntimeException ignored) {
-                    // Hiding during an IME transition is already satisfied.
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                final View decor = getWindow().getDecorView();
+                final InputMethodManager imm = (InputMethodManager)
+                        getSystemService(INPUT_METHOD_SERVICE);
+                if (imm != null && decor.getWindowToken() != null) {
+                    try {
+                        imm.hideSoftInputFromWindow(decor.getWindowToken(),
+                                InputMethodManager.HIDE_NOT_ALWAYS);
+                    } catch (RuntimeException ignored) {
+                        // Hiding during an IME transition is already satisfied.
+                    }
                 }
             }
         });
