@@ -43,6 +43,7 @@
 // display name tint the same and dedup as one - a toy-room tradeoff.
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <chrono>
