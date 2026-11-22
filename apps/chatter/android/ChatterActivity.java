@@ -8,6 +8,8 @@ import android.app.NativeActivity;
 import android.content.Context;
 import android.net.wifi.WifiManager;
 import android.os.Bundle;
+import android.view.View;
+import android.view.inputmethod.InputMethodManager;
 
 public class ChatterActivity extends NativeActivity {
     private WifiManager.MulticastLock multicastLock;
@@ -41,6 +43,50 @@ public class ChatterActivity extends NativeActivity {
     public void onDestroy() {
         releaseMulticastLock();
         super.onDestroy();
+    }
+
+
+    // NativeActivity's NDK showSoftInput call does not give Chatter a
+    // reliable UI-thread/focus hand-off on every device. Keep the IME
+    // request on Android's activity thread and target the currently
+    // focused NativeActivity content view (the view with the native
+    // input connection), not an unrelated overlay.
+    public void showChatKeyboard() {
+        runOnUiThread(() -> {
+            View target = getWindow().getCurrentFocus();
+            if (target == null) {
+                target = getWindow().getDecorView().findFocus();
+            }
+            if (target == null) {
+                target = getWindow().getDecorView();
+            }
+            target.setFocusableInTouchMode(true);
+            target.requestFocus();
+            final View inputTarget = target;
+            inputTarget.post(() -> {
+                InputMethodManager imm = (InputMethodManager)
+                        getSystemService(INPUT_METHOD_SERVICE);
+                if (imm != null) {
+                    imm.showSoftInput(inputTarget,
+                            InputMethodManager.SHOW_IMPLICIT);
+                }
+            });
+        });
+    }
+
+    public void hideChatKeyboard() {
+        runOnUiThread(() -> {
+            View target = getWindow().getCurrentFocus();
+            if (target == null) {
+                target = getWindow().getDecorView();
+            }
+            InputMethodManager imm = (InputMethodManager)
+                    getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null && target.getWindowToken() != null) {
+                imm.hideSoftInputFromWindow(target.getWindowToken(),
+                        InputMethodManager.HIDE_NOT_ALWAYS);
+            }
+        });
     }
 
     private void releaseMulticastLock() {
