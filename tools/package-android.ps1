@@ -149,6 +149,7 @@ if ($LASTEXITCODE -ne 0) { throw 'aapt2 link failed' }
 # -target 8 keeps the class file inside d8's comfort zone; --min-api tracks
 # the app's minSdkVersion (28).
 $sharedJavaFiles = @(Get-ChildItem (Join-Path $repo 'libs\ui\android') -Filter *.java -ErrorAction SilentlyContinue)
+if ($sharedJavaFiles.Count -eq 0) { throw 'shared ws::ui Android Activity source not found in libs/ui/android' }
 $appJavaFiles = @(Get-ChildItem (Join-Path $repo ("apps\$App\android")) -Filter *.java -ErrorAction SilentlyContinue)
 $javaFiles = @($sharedJavaFiles) + @($appJavaFiles)
 $dexPath = $null
