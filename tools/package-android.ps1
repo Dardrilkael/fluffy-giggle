@@ -1,11 +1,10 @@
 # Package an app into a signed, installable APK - no Gradle.
 # aapt2 links the manifest (+ assets/ when the app has any), the module
 # .so is zipped in as lib/arm64-v8a/, then zipalign + apksigner finish it.
-# An app may also keep Java shims in apps/<App>/android/*.java: they are
-# javac'd + d8'd into classes.dex and that app's manifest must set
-# hasCode="true" and point its activity at the class (chatter's
-# MulticastLock lives there). Apps with no .java stay pure NativeActivity +
-# hasCode=false - zero code besides lib<App>.so.
+# The shared ws::ui Activity base in libs/ui/android/*.java is always
+# compiled into classes.dex. App-specific shims in apps/<App>/android/*.java
+# are compiled alongside it; their Activity subclasses should extend
+# com.ws.ui.WsUiActivity. Manifests therefore use hasCode="true".
 #
 # Usage:
 #   tools/package-android.ps1                          playground (default)
@@ -141,13 +140,17 @@ if (Test-Path $assets) { $linkArgs += @('-A', $assets) }
 & $aapt2 @linkArgs
 if ($LASTEXITCODE -ne 0) { throw 'aapt2 link failed' }
 
-# --- 2.5. optional Java shim: apps/<App>/android/*.java -> classes.dex -------
-# Only apps that ship shims pay for this; the app's manifest must set
-# hasCode="true" and name the class as its activity. javac comes from the
-# same JVM apksigner uses (JAVA_HOME), d8 from build-tools. -target 8 keeps
-# the class file inside d8's comfort zone; --min-api tracks the app's
-# minSdkVersion (28).
-$javaFiles = @(Get-ChildItem (Join-Path $repo ("apps\$App\android")) -Filter *.java -ErrorAction SilentlyContinue)
+# --- 2.5. shared ws::ui + optional app Java -> classes.dex ------------------
+# Every Android app gets the shared Activity base (IME bridge). App-specific
+# subclasses/shims compile in the same javac invocation, so they can extend
+# com.ws.ui.WsUiActivity without duplicating keyboard code. The manifest must
+# set hasCode="true" and name either the shared base or an app subclass.
+# javac comes from the same JVM apksigner uses (JAVA_HOME), d8 from build-tools.
+# -target 8 keeps the class file inside d8's comfort zone; --min-api tracks
+# the app's minSdkVersion (28).
+$sharedJavaFiles = @(Get-ChildItem (Join-Path $repo 'libs\ui\android') -Filter *.java -ErrorAction SilentlyContinue)
+$appJavaFiles = @(Get-ChildItem (Join-Path $repo ("apps\$App\android")) -Filter *.java -ErrorAction SilentlyContinue)
+$javaFiles = @($sharedJavaFiles) + @($appJavaFiles)
 $dexPath = $null
 if ($javaFiles.Count -gt 0) {
     if (-not (Test-Path $javac)) { throw "javac not found in $javaHome (JAVA_HOME must point at a JDK, not a JRE)" }
