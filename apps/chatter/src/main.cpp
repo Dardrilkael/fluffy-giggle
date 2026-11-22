@@ -1,47 +1,16 @@
-// apps/chatter - the gui sibling of netchat, built for the phone (and the
-// desktop), v3. The wire side lives in chat_core.hpp (see its header for
-// the whole protocol story): Lan peers keep the v1 discovery beats and
-// the HELLO/SAY framed TCP, and a relay carries the chat across
-// networks that will never see a beat -
+// apps/chatter - a native ws::ui chat client for desktop and Android.
+// Transport/protocol code lives in chat_core.hpp; this file owns only
+// the app shell and its presentation. The UI deliberately uses the
+// monorepo's stock ThemeData, ChromeTheme, panels, scroll panel, text
+// input and button widgets instead of maintaining a parallel skin.
 //
-//   chatter --serve [port]        host a room (the "server")
-//   chatter --relay host:port     guest in a room, from a normal client
+// Desktop:
+//   chatter [name] [--name n] [--serve [port]] [--relay host:port]...
+// Android launch extras: name, serve and relay.
 //
-// so a phone on Wi-Fi and a PC on wired LAN still share one chat through
-// a host sitting anywhere on the internet, while everyone on the same
-// network keeps talking direct P2P with no server in the path.
-//
-// v3 display: the WhatsApp look. A teal header band carries the room
-// identity and a live member line; the feed rides a warm paper field and
-// draws every message as a rounded bubble - own sends right on green
-// with a tail, a timestamp and a delivery check, everyone else left on
-// white with a colored sender name (hidden mid-run, like the app it
-// echoes), system lines as small centered pills. Text wraps at the
-// bubble's max width. The feed scrolls - wheel and touch drag - and
-// sits pinned to the newest line until the reader lifts it, then a
-// tap on the floating "new messages" chip (or dragging to the floor)
-// returns it.
-//
-// v3 input: real text, the way the ui lib grew it. The ui lib's Android
-// window now owns an ime-rect seam (a focused field opens the soft
-// keyboard, and the visible keyboard's keycodes type straight into the
-// gui) - v1's tap-phrase palette existed because that seam did not; it
-// is gone. The bar is the WhatsApp row: a white rounded field holding
-// most of the width, a round green send button beside it. Enter sends
-// from the field, the button sends by tap, an empty buffer sends
-// nothing. The Android nav-bar inset poll survives (the bar lifts over
-// the 3-button strip the fullscreen theme keeps), and the relay/name/
-// serve launch extras are read the same way, once, from the intent:
-// `am start ... --es relay 203.0.113.7:27475 --es name alice`.
-//
-// v1's boundaries all hold: the net loop runs on its own thread; lines
-// arrive to the gui through a mutex-guarded queue drained once per
-// frame; sends cross back with post(); teardown posts the close-
-// everything shutdown and joins the thread before the core can
-// destruct. The protocol core itself is chat_core.hpp, header-only and
-// gui-free, so the same code runs under a headless harness. The app
-// still makes zero lib edits - every pixel here rides r2d's quads and
-// the stock widget seams.
+// The network loop remains separate from the frame loop. Incoming
+// messages are drained on the UI thread; outgoing messages are posted
+// to the core. The app does not modify ws::ui itself.
 #include "chat_core.hpp"
 
 #include <algorithm>
@@ -475,8 +444,33 @@ class ChatterApp final : public ws::ui::App {
 
     // Conversation content uses the library's scroll panel. The
     // panel owns wheel, touch-drag, clipping and scrollbar behavior.
+    // Keep following new messages until the reader intentionally scrolls
+    // away; the stock ScrollState remains the sole scroll implementation.
     (void)gui::begin_scroll_panel(gui_, layout_, chrome_, "conversation",
                                   feed);
+    const WidgetId scroll_id = gui_.ids().internal_id("scroll");
+    gui::ScrollState& conversation_scroll =
+        gui_.persistent_state<gui::ScrollState>(scroll_id);
+    bool reader_interacted = false;
+    if (input.mouse_present && input.scroll_dy != 0.0f &&
+        input.mouse_x >= feed.x && input.mouse_x < feed.x + feed.width &&
+        input.mouse_y >= feed.y && input.mouse_y < feed.y + feed.height) {
+      reader_interacted = true;
+      if (input.scroll_dy > 0.0f) {
+        follow_latest_ = false;
+      }
+    }
+    for (const ws::input::TouchPoint& touch : input.touches) {
+      if (touch.pressed && touch.x >= feed.x &&
+          touch.x < feed.x + feed.width && touch.y >= feed.y &&
+          touch.y < feed.y + feed.height) {
+        reader_interacted = true;
+        follow_latest_ = false;
+      }
+    }
+    if (follow_latest_ && !reader_interacted) {
+      conversation_scroll.offset = conversation_scroll.max_offset;
+    }
     if (lines_.empty()) {
       gui::heading(layout_, chrome_, "No messages yet");
       gui::text_wrapped(layout_, chrome_,
@@ -506,6 +500,13 @@ class ChatterApp final : public ws::ui::App {
       }
     }
     gui::end_scroll_panel(gui_, layout_, chrome_);
+    if (follow_latest_) {
+      conversation_scroll.offset = conversation_scroll.max_offset;
+    } else if (!reader_interacted &&
+               conversation_scroll.offset >=
+                   conversation_scroll.max_offset - 1.0f) {
+      follow_latest_ = true;
+    }
 
     // Stock text field + primary button. The field keeps the library's
     // selection, caret, keyboard and clipboard behavior on both targets.
@@ -551,6 +552,7 @@ class ChatterApp final : public ws::ui::App {
   ws::ui::r2d::Font font_strong_;
   float scale_ = 1.0f;
   bool theme_dark_ = false;
+  bool follow_latest_ = true;
   std::vector<ChatLine> lines_;
   char input_[kInputCapacity] = {};
   bool field_focus_ = false;
