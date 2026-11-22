@@ -44,6 +44,7 @@
 // the stock widget seams.
 #include "chat_core.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
