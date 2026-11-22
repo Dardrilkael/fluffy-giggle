@@ -210,7 +210,12 @@ int main() {
   carol_feed.drain();
   check(count_chat(carol_feed, "bob", "hello network") == 1,
         "carol saw bob's message EXACTLY ONCE (two transports, one line)");
-  relay_feed.drain();
+  const auto relay_got_hello = [](const Feed& f) {
+    return count_chat(f, "bob", "hello network") >= 1;
+  };
+  const bool relay_received_hello = wait_until(
+      relay_feed, "relay received bob's hello", relay_got_hello, 15000);
+  check(relay_received_hello, "relay received bob's message");
   check(count_chat(relay_feed, "bob", "hello network") == 1,
         "relay saw bob's message once, attributed");
 
