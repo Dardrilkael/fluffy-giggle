@@ -881,6 +881,28 @@ TEST_CASE("a table switch drops the manual view") {
     CHECK_FALSE(b.ed.results.view.active);
 }
 
+TEST_CASE("a round trip through a table without a plot drops the manual view") {
+    // The view belongs to the table it was made on. A table with no plot
+    // (.op: value rows) never reaches draw_plot, so a reset that lives
+    // there never saw the switch - the zoom came back after tran -> op
+    // -> tran, while the visible set (reset for every table) did not.
+    Bench b;
+    b.load(ramp_table(41u));
+    b.ed.results.run.results.tables.push_back(op_table());  // table 1
+    b.draw();
+    b.ed.results.view = PlotView{true,        0.001,      0.003,
+                                 kHomeYLo,    kHomeYHi,   kHomeY1Lo,
+                                 kHomeY1Hi};
+    b.draw();
+    REQUIRE(b.ed.results.view.active);  // a manual view on table 0
+
+    b.ed.results.table = 1;  // the .op table: no plot is drawn
+    b.draw();
+    b.ed.results.table = 0;  // and back
+    b.draw();
+    CHECK_FALSE(b.ed.results.view.active);
+}
+
 // --- stage 6: the second spine ---------------------------------------------------
 
 TEST_CASE("mixed V/I split the axes: the sine reads on the right spine") {

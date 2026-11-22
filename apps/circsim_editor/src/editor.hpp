@@ -468,7 +468,7 @@ struct ResultsCache {
     std::vector<std::uint8_t> visible;   // per-signal flags of that table
     int hover = -1;                      // sample index under the cursor
     PlotView view;                       // the manual zoom/pan window
-    std::size_t view_for = kNoTable;     // the table `view` belongs to
+    std::size_t view_for = kNoTable;     // the table `view` belongs to (synced every frame, plot or not)
     PlotGesture gesture;                 // the in-flight plot gesture
     // The shown table's x axis is strictly increasing - a per-table
     // constant of the run (the axis data is immutable once delivered),

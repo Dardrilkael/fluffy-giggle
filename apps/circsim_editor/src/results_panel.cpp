@@ -161,6 +161,18 @@ void sync_visibility(Editor& ed, const ws::spice::Table& t) {
     }
 }
 
+// The manual view belongs to the table it was made on: a switch (or a
+// fresh run, which resets view_for) drops back to the auto fit. Synced
+// for EVERY table, once a frame, like sync_visibility - a table with no
+// plot (.op: value rows) never reaches draw_plot, so a reset that lived
+// there missed tran -> op -> tran and the old zoom came back.
+void sync_view(ResultsCache& cache) {
+    if (cache.view_for != cache.table) {
+        cache.view = PlotView{};
+        cache.view_for = cache.table;
+    }
+}
+
 // The per-signal constants of the shown table (ResultsCache's
 // frame-budget block): every column's finite envelope (the y fit and
 // the sparkline scale both read it), the sparkline's 40-bucket
@@ -659,12 +671,8 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
     PlotGesture& g = cache.gesture;
     const ws::input::InputFrame& in = gui.input();
 
-    // The manual view is per-table: a combo switch (or the fresh run
-    // that reset view_for) drops back to the auto fit.
-    if (cache.view_for != cache.table) {
-        cache.view = PlotView{};
-        cache.view_for = cache.table;
-    }
+    // (The manual view is per table: sync_view dropped it on the switch,
+    // before any plot - or the lack of one - was drawn.)
 
     // The effective view: the manual windows clamped into their home,
     // or home itself - x and the left spine exactly as stage 5 left
@@ -2322,6 +2330,7 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
     }
     const ws::spice::Table& t = res.tables[ed.results.table];
     sync_visibility(ed, t);
+    sync_view(ed.results);
     // The per-signal constants of this table (the finite envelopes,
     // the sparkline envelopes, the spine flags): one walk per
     // (run, table) - the frame-budget caches' first member. Both the
