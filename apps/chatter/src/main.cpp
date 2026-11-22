@@ -411,6 +411,8 @@ class ChatterApp final : public ws::ui::App {
     chrome_.font = font_.empty() ? nullptr : &font_;
     chrome_.font_strong =
         font_strong_.empty() ? nullptr : &font_strong_;
+    install_clipboard(gui_);
+    install_ime_rect(gui_);
 
     core_.start(options_);
     if (std::getenv("CHATTER_SELFTEST") != nullptr) {
