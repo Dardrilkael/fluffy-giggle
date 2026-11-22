@@ -360,6 +360,10 @@ public:
     }
 
     void pump() override { glfwPollEvents(); }
+    bool wait_events(double seconds) override {
+        glfwWaitEventsTimeout(seconds);
+        return true;
+    }
 
     void wait_for_window() override {
         // Unreachable: window_ready() never goes false on desktop (the

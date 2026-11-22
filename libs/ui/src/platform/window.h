@@ -64,6 +64,15 @@ public:
     // round - present/acquire pacing throttles the render loop, not this.
     virtual void pump() = 0;
 
+    // Like pump(), but may BLOCK for up to `seconds` waiting for the next
+    // event - the idle-frame loop's alternative to spinning (events still
+    // fire through the sink during the call, exactly as in pump()).
+    // Returns true when the host waited (and pumped); the default returns
+    // false without doing either, and the loop then pumps as always: a
+    // host that cannot block keeps the render-every-iteration behavior.
+    // Desktop: glfwWaitEventsTimeout.
+    virtual bool wait_events(double /*seconds*/) { return false; }
+
     // Blocks until a window exists again or the platform asked to stop.
     // Desktop: unreachable (window_ready() never goes false after init);
     // Android: ALooper_pollOnce(-1) - surface-loss sleep, not a spin, so an

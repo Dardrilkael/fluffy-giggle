@@ -92,6 +92,13 @@ if(TARGET test_ui)
   target_link_libraries(test_ui PRIVATE volk stb)
 endif()
 
+# The idle-frame pacing policy (src/app/frame_pacer.hpp): header-only and
+# pure, so its suite links nothing of the app loop (no Vulkan, no window).
+ws_add_test(ui_frame_pacer SOURCES tests/test_frame_pacer.cpp LINK ws::core)
+if(TARGET test_ui_frame_pacer)
+  target_include_directories(test_ui_frame_pacer PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
 # The stage-2 acceptance test: gui + its tests with NO Vulkan or GLFW on
 # the link line. Links the gui archive (ws::ui_gui; its ws::input and
 # ws::jobs sides are core-only and pure CPU, so the cut stays

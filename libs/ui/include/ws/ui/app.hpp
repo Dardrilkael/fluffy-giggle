@@ -27,6 +27,17 @@ struct AppConfig {
     int width = 1280;   // initial window size in screen coordinates
     int height = 720;   // (ignored on Android - the OS owns the window)
     bool vsync = true;  // false: prefer mailbox/immediate present mode
+    // Idle-frame pacing (off by default: the loop renders every
+    // iteration, as it always has). On, an iteration with nothing to show
+    // - no event, no job delivery, no held input, App::wants_frame()
+    // false, settled - skips NewFrame/on_update/render/present and
+    // blocks in the platform's wait instead, still drawing a frame every
+    // `idle_heartbeat_seconds` so time-driven UI (tooltip delays, caret
+    // blink, toast timeouts) and worker results keep landing. Needs a
+    // host that can block (desktop); elsewhere, and with ImGui viewports
+    // enabled, it quietly stays off.
+    bool idle_frame_pacing = false;
+    double idle_heartbeat_seconds = 0.1;
 #ifdef __ANDROID__
     // The native_app_glue handle android_main() received; the shell renders
     // to its ANativeWindow and pumps its looper. Null = run() fails fast.
@@ -184,6 +195,13 @@ protected:
     // or the backend NewFrame functions - the shell handles the frame
     // lifecycle.
     virtual void on_update() {}
+
+    // Idle-frame pacing's only app-side input (AppConfig::idle_frame_pacing):
+    // true when the app is running something that needs a frame with no
+    // input to ask for it - a playback clock, an animation of its own.
+    // Called once per loop iteration, on the main thread, outside any gui
+    // frame; keep it a cheap read. Ignored with pacing off.
+    [[nodiscard]] virtual bool wants_frame() const { return false; }
 
     // The platform's ui scale, for touch-density: Android reports the
     // display density (160 dpi = 1.0), desktop the window content scale.

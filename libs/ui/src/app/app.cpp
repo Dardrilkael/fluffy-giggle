@@ -47,6 +47,7 @@
 #include "render/renderer2d.h"
 #include "render/shader_provider.h"
 #include "platform/window.h"
+#include "app/frame_pacer.hpp"
 
 #include <volk.h>  // meta-loader: every vk* symbol below is a volk global
 
@@ -260,6 +261,12 @@ struct App::Impl {
     // the run.
     ws::input::InputFrame gui_input_;
 
+    // Platform events seen since the loop started: bumped at the top of
+    // forward_event, the funnel every platform event passes through. The
+    // idle-frame pacing reads the delta across an iteration's pump as its
+    // "something arrived" signal.
+    std::uint64_t events_seen_ = 0;
+
     ~Impl() { shutdown(); }
 
     // Raw-handle views over gpu_ and swapchain_ - the shell's backend and
@@ -321,6 +328,7 @@ struct App::Impl {
     // the event); resize also flags the swapchain rebuild here, before the
     // app gets a chance to consume the event.
     void forward_event(ws::input::Event& event) {
+        ++events_seen_;
         if (imgui_wants(event)) {
             event.handled = true;
         }
@@ -644,12 +652,33 @@ struct App::Impl {
 
     // --- frame loop ---------------------------------------------------------
 
+    // True while any button, key or touch is down: held input is activity
+    // with no event to announce it (a drag, a held key) - the idle-frame
+    // pacing renders every iteration for as long as it lasts.
+    static bool any_input_held(const ws::input::InputFrame& in) {
+        if (in.touch_count > 0) {
+            return true;
+        }
+        return std::any_of(in.mouse_down.begin(), in.mouse_down.end(),
+                           [](bool down) { return down; }) ||
+               std::any_of(in.key_down.begin(), in.key_down.end(),
+                           [](bool down) { return down; });
+    }
+
     int main_loop(App& app) {
         // The frame clock's "previous": the pump's own start, so the
         // first frame's dt measures real time and not a default
         // epoch's.
         std::chrono::steady_clock::time_point previous =
             std::chrono::steady_clock::now();
+        // The idle-frame policy (AppConfig::idle_frame_pacing; disabled -
+        // the default - renders every iteration exactly as before).
+        FramePacer pacer(FramePacerConfig{config.idle_frame_pacing,
+                                          config.idle_heartbeat_seconds, 3});
+        const auto seconds = [](std::chrono::steady_clock::time_point t) {
+            return std::chrono::duration<double>(t.time_since_epoch())
+                .count();
+        };
         for (;;) {
             // The frame clock: seconds from the previous pump top -
             // steady_clock, immune to wall-clock moves. One write per
@@ -660,6 +689,12 @@ struct App::Impl {
             // animation snaps to its end state in one step on resume.
             constexpr float kMaxFrameDt = 0.25f;
             const auto now = std::chrono::steady_clock::now();
+            // Kept to hand back if this iteration is skipped (idle
+            // pacing): the dt a frame carries is the time since the last
+            // frame that RENDERED, or every clock that accumulates it
+            // (playback, the double-click detector, hover delays) would
+            // run slow by the skipped iterations.
+            const auto previous_before = previous;
             gui_input_.dt_seconds =
                 std::min(std::chrono::duration<float>(now - previous).count(),
                          kMaxFrameDt);
@@ -670,7 +705,15 @@ struct App::Impl {
             // on_update, so their edges drop here - drop, never defer,
             // like every queue.
             gui_input_.next_frame();
-            host_->pump();
+            const std::uint64_t events_before = events_seen_;
+            // An idle loop blocks here (until an event or its heartbeat
+            // is due) instead of polling and spinning; the wait pumps, so
+            // events land in the sink exactly as with pump(). A host that
+            // cannot block answers false and is polled as always.
+            if (!(pacer.idle() &&
+                  host_->wait_events(pacer.idle_wait(seconds(now))))) {
+                host_->pump();
+            }
 
             // Every queued event reaches on_event before this frame's
             // on_update() - including the ws::input::WindowCloseEvent of the closing
@@ -688,8 +731,9 @@ struct App::Impl {
             // before the loop exits; the hidden-window continue paths
             // below ride the same drain, so backgrounded completions
             // still land.
+            std::size_t jobs_delivered = 0;
             if (jobs_ != nullptr) {
-                jobs_->drain();
+                jobs_delivered = jobs_->drain();
             }
             if (host_->should_close()) {
                 break;
@@ -756,6 +800,22 @@ struct App::Impl {
                 }
             }
 #endif
+
+            // Idle-frame pacing: is this frame worth drawing? Platform
+            // windows (ImGui viewports) need their per-frame update, so
+            // pacing stays out of the way when they are enabled.
+            if ((ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) == 0) {
+                FrameActivity activity;
+                activity.events = events_seen_ != events_before;
+                activity.jobs = jobs_delivered > 0;
+                activity.input_held = any_input_held(gui_input_);
+                activity.app_wants = app.wants_frame();
+                activity.surface_dirty = rebuild_swapchain;
+                if (!pacer.should_render(activity, seconds(now))) {
+                    previous = previous_before;  // see above: dt carries on
+                    continue;
+                }
+            }
 
             // If the app enabled viewports in on_setup(), align platform-window
             // styling once (rounding/transparency artifacts otherwise).
