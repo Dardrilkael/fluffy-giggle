@@ -581,7 +581,6 @@ struct ResultsCache {
         float width = 0.0f;
         canvas::StrokeJoin join = canvas::StrokeJoin::round;
         std::uint32_t color = 0;
-        bool visible = false;
         bool operator==(const SeriesGeometryKey&) const = default;
     };
     struct SeriesGeometry {

@@ -542,6 +542,65 @@ TEST_CASE("a hidden plot skips its series and its caches survive") {
     CHECK(ws::ui::gui_test::stub.quads >= visible_quads / 2u);
 }
 
+// Hiding a signal used to mark its geometry unbuilt WITHOUT freeing the
+// buffer: unusable, yet still resident, and a re-show always
+// re-tessellated. The key is exact, so the hide leaves the entry alone.
+TEST_CASE("a hidden signal's geometry survives a hide and re-show") {
+    ProfBench b;
+    b.load(build_large_table(4, 2000));
+    b.draw();
+    constexpr std::size_t kHidden = 1u;
+    REQUIRE(b.ed.results.geometry.size() >= 4u);
+    REQUIRE(b.ed.results.geometry[kHidden].built);
+    // A poisoned sentinel tells a replayed buffer from a rebuilt one.
+    b.ed.results.geometry[kHidden].buffer.quads[0].x += 1.0e6f;
+    const float poisoned = b.ed.results.geometry[kHidden].buffer.quads[0].x;
+
+    REQUIRE(b.ed.results.visible.size() >= 4u);
+    b.ed.results.visible[kHidden] = 0u;
+    b.draw();
+    // Hidden: neither rebuilt, cleared nor unbuilt.
+    CHECK(b.ed.results.geometry[kHidden].built);
+    CHECK(b.ed.results.geometry[kHidden].buffer.quads[0].x == poisoned);
+
+    // Shown again with the same visible set (so the same y fit, the same
+    // everything): a hit - the poison survives the round trip.
+    b.ed.results.visible[kHidden] = 1u;
+    b.draw();
+    CHECK(b.ed.results.geometry[kHidden].built);
+    CHECK(b.ed.results.geometry[kHidden].buffer.quads[0].x == poisoned);
+}
+
+TEST_CASE("a signal hidden across a zoom is rebuilt, never replayed stale") {
+    // The other side of keeping the entry: a change while it was hidden
+    // must still mismatch its key. Hide, zoom x, re-show.
+    ProfBench b;
+    b.load(build_large_table(4, 2000));
+    b.draw();
+    constexpr std::size_t kHidden = 1u;
+    ResultsCache::SeriesGeometry& g = b.ed.results.geometry[kHidden];
+    REQUIRE(g.built);
+    g.buffer.quads[0].x += 1.0e6f;
+    const double old_x_lo = g.key.x_lo;
+
+    b.ed.results.visible[kHidden] = 0u;
+    const double span = g.key.x_hi - g.key.x_lo;
+    const double lo = g.key.x_lo + 0.25 * span;
+    const double hi = g.key.x_hi - 0.25 * span;
+    b.ed.results.view =
+        editor::PlotView{true, lo, hi, -1.0e9, 1.0e9, -1.0e9, 1.0e9};
+    b.draw();  // zoomed while hidden: its entry is now stale
+
+    b.ed.results.visible[kHidden] = 1u;
+    b.draw();
+    const ResultsCache::SeriesGeometry& after =
+        b.ed.results.geometry[kHidden];
+    CHECK(after.built);
+    CHECK(after.buffer.quads[0].x < 1.0e5f);  // rebuilt - poison gone
+    CHECK(after.key.x_lo == doctest::Approx(lo));
+    CHECK(after.key.x_lo != doctest::Approx(old_x_lo));
+}
+
 TEST_CASE("waveform tessellation cache is per series and delivery keyed") {
     ProfBench b;
     b.load(build_large_table(20, 10000));
@@ -550,7 +609,6 @@ TEST_CASE("waveform tessellation cache is per series and delivery keyed") {
     REQUIRE(b.ed.results.geometry.size() == 20u);
     for (const ResultsCache::SeriesGeometry& series : b.ed.results.geometry) {
         CHECK(series.built);
-        CHECK(series.key.visible);
         CHECK(series.key.run == b.ed.results.run_id);
         CHECK(series.key.table == b.ed.results.table);
         CHECK(series.buffer.quad_count() > 0u);

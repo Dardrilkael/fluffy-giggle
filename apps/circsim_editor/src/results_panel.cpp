@@ -1378,10 +1378,13 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     rc.push_clip(fx, fy, iw, ih);
     for (std::size_t i = 0; series_shown && i < t.signals.size(); ++i) {
         if (i >= ed.results.visible.size() || ed.results.visible[i] == 0u) {
-            if (renderer != nullptr && i < cache.geometry.size()) {
-                cache.geometry[i].key.visible = false;
-                cache.geometry[i].built = false;
-            }
+            // A hidden signal's retained geometry is left alone: it was
+            // not freed anyway (built = false kept the whole buffer
+            // allocated, unusable), and the key is exact, so a re-show
+            // with the view unchanged is a hit - while one after any
+            // change (a zoom, a resize, the y fit moving with the
+            // visible set) mismatches and rebuilds into the same
+            // storage. Nothing a hide could make stale needs a flag.
             continue;
         }
         const std::span<const double> ys = t.signals[i].data;
@@ -1410,7 +1413,6 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             geometry_key.width = kSeriesWidth;
             geometry_key.join = wave_env().join;
             geometry_key.color = color;
-            geometry_key.visible = true;
             if (cached_geometry->built && cached_geometry->key == geometry_key) {
                 const auto replay_t0 = wave_now();
                 if (wave_env().prof != 0) ++prof.cache_hits;
