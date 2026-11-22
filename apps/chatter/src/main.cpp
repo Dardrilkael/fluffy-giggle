@@ -172,7 +172,7 @@ void poll_nav_inset() {
   // Try getRootWindowInsets first (API 30+), fall back to getWindowInsets
   if (!tried_insets && get_insets == nullptr) {
     const jclass cls = e->GetObjectClass(decor);
-    get_insets = e->GetMethodID(cls, "getRootWindowInsets", "()Landroid/WindowInsets;");
+    get_insets = e->GetMethodID(cls, "getRootWindowInsets", "()Landroid/view/WindowInsets;");
     e->DeleteLocalRef(cls);
     if (get_insets == nullptr) {
       e->ExceptionClear(); // NoSuchMethodError is a linkage error, clear it
@@ -228,8 +228,13 @@ struct AndroidLaunch {
 jstring intent_extra(JNIEnv* e, jobject intent, const char* key) {
   static jmethodID get_extra = nullptr;
   if (get_extra == nullptr) {
-    get_extra = e->GetMethodID(e->GetObjectClass(intent), "getStringExtra",
+    const jclass cls = e->GetObjectClass(intent);
+    if (cls == nullptr) {
+      return nullptr;
+    }
+    get_extra = e->GetMethodID(cls, "getStringExtra",
                                "(Ljava/lang/String;)Ljava/lang/String;");
+    e->DeleteLocalRef(cls);
     if (get_extra == nullptr || jni_threw(e, "getStringExtra missing")) {
       return nullptr;
     }
@@ -268,8 +273,13 @@ AndroidLaunch read_launch(ANativeActivity* activity) {
     return out;
   }
   JNIEnv* e = jni.env;
+  const jclass activity_class = e->GetObjectClass(activity->clazz);
+  if (activity_class == nullptr) {
+    return out;
+  }
   const jmethodID get_intent = e->GetMethodID(
-      e->GetObjectClass(activity->clazz), "getIntent", "()Landroid/content/Intent;");
+      activity_class, "getIntent", "()Landroid/content/Intent;");
+  e->DeleteLocalRef(activity_class);
   if (get_intent == nullptr || jni_threw(e, "getIntent missing")) {
     return out;
   }
@@ -373,24 +383,68 @@ std::uint32_t name_color(std::string_view name) {
 // the room stays whole and clips, WhatsApp's own behavior on an
 // unbreakable word). The field wraps identically on desktop and phone
 // because it is the font's own measure.
-std::vector<std::string> wrap_text(std::string_view text, const ws::ui::r2d::Font& font,
+std::vector<std::string> wrap_text(std::string_view text,
+                                    const ws::ui::r2d::Font& font,
                                     float max_w) {
   std::vector<std::string> out;
   std::string line;
-  for (const char c : text) {
-    if (c == ' ' || c == '\t') {
-      if (!line.empty()) {
-        line.push_back(c == '\t' ? ' ' : c);
-      }
-      continue;
+  std::string word;
+  const auto flush_word = [&]() {
+    if (word.empty()) {
+      return;
     }
-    line.push_back(c);
-    if (font.measure_text(line.c_str()) > max_w && line.find(' ') != std::string::npos) {
-      const std::size_t cut = line.find_last_of(' ');
-      out.push_back(line.substr(0, cut));
-      line.erase(0, cut + 1);
+    const std::string candidate = line.empty() ? word : line + " " + word;
+    if (!line.empty() && font.measure_text(candidate.c_str()) > max_w) {
+      out.push_back(std::move(line));
+      line.clear();
+    }
+    // Split overlong words only at UTF-8 code-point boundaries. This
+    // prevents invalid byte fragments from reaching the font renderer.
+    if (font.measure_text(word.c_str()) > max_w) {
+      std::string piece;
+      for (std::size_t i = 0; i < word.size();) {
+        const unsigned char lead = static_cast<unsigned char>(word[i]);
+        std::size_t count = lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2
+                                     : (lead & 0xF0) == 0xE0 ? 3
+                                     : (lead & 0xF8) == 0xF0 ? 4 : 1;
+        count = std::min(count, word.size() - i);
+        const std::string_view cp{word.data() + i, count};
+        const std::string next = piece + std::string{cp};
+        if (!piece.empty() && font.measure_text(next.c_str()) > max_w) {
+          if (!line.empty()) {
+            out.push_back(std::move(line));
+            line.clear();
+          }
+          out.push_back(std::move(piece));
+          piece.clear();
+        }
+        piece.append(cp);
+        i += count;
+      }
+      if (!piece.empty()) {
+        if (!line.empty()) {
+          out.push_back(std::move(line));
+          line.clear();
+        }
+        line = std::move(piece);
+      }
+    } else {
+      line = line.empty() ? word : line + " " + word;
+    }
+    word.clear();
+  };
+  for (const char c : text) {
+    if (c == '\n' || c == '\r') {
+      flush_word();
+      out.push_back(std::move(line));
+      line.clear();
+    } else if (c == ' ' || c == '\t') {
+      flush_word();
+    } else {
+      word.push_back(c);
     }
   }
+  flush_word();
   if (!line.empty() || out.empty()) {
     out.push_back(std::move(line));
   }
@@ -712,7 +766,9 @@ class ChatterApp final : public ws::ui::App {
           const float vy = sy + small_h * 0.62f;
           const float t = 1.4f * scale_;   // stroke thickness
           const float arm = 4.5f * scale_;  // each arm's run
-          const int marks = core_.peers() > 0 ? 2 : 1;
+          // A peer being connected is not an acknowledgement. Keep the
+          // single "sent" tick until the protocol has message IDs + ACKs.
+          const int marks = 1;
           for (int m = 0; m < marks; ++m) {
             const float ox = vx + m * 4.5f * scale_;
             // Left arm: from up-left down to the meeting point.
