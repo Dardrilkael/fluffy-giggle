@@ -157,6 +157,10 @@ class ChatCore {
                 ? options.name
                 : (serving_ ? std::string{"relay-"} : std::string{"chatter-"}) +
                       std::to_string(port_);
+    if (!valid_peer_name(name_)) {
+      ws::core::error("chatter: invalid display name; using generated name");
+      name_ = (serving_ ? "relay-" : "chatter-") + std::to_string(port_);
+    }
 
     if (listener_) {
       listener_->set_on_connection([this](ws::net::TcpConnection::Ptr conn) {
@@ -285,11 +289,20 @@ class ChatCore {
   bool serving() const { return serving_; }
 
  private:
+  static bool valid_peer_name(std::string_view name) {
+    return !name.empty() && name.size() <= kMaxPeerName &&
+           name.find_first_of("\r\n") == std::string_view::npos;
+  }
+
   // Everything a fresh connection needs, every kind: HELLO on connect
   // (a room greets its members, a client greets the room, Lan pairs greet
   // each other), the kind's parser after, bookkeeping on close.
   void adopt(const ws::net::TcpConnection::Ptr& conn, Kind kind,
              std::string room_key) {
+    if (peers_.size() >= kMaxConnections) {
+      (void)conn->close();
+      return;
+    }
     const auto tag = std::make_shared<std::string>("?");
     ws::net::TcpConnection* self = conn.get();
     // The close callback's copy, taken before the Peer's move empties
@@ -400,6 +413,10 @@ class ChatCore {
     // SAY is this app's chat wrapper. Anything else still shows as-is.
     const std::string_view body =
         text.starts_with("SAY ") ? text.substr(4) : text;
+    if (body.size() > kMaxMessageBytes ||
+        body.find_first_of("\r\n") != std::string_view::npos) {
+      return;
+    }
     push_line({*tag, std::string{body}, false});
   }
 
@@ -435,13 +452,22 @@ class ChatCore {
         // pair, this relayed copy would be the second showing. Drop.
         return;
       }
-      push_line({sender, std::string{text.substr(space + 1)}, false});
+      const std::string_view body = text.substr(space + 1);
+      if (body.size() > kMaxMessageBytes ||
+          body.find_first_of("\r\n") != std::string_view::npos) {
+        return;
+      }
+      push_line({sender, std::string{body}, false});
       return;
     }
     // SAY straight from the room is the operator speaking (this link's
     // tag); anything else shows as-is, v1's lenient tail.
     const std::string_view body =
         text.starts_with("SAY ") ? text.substr(4) : text;
+    if (body.size() > kMaxMessageBytes ||
+        body.find_first_of("\r\n") != std::string_view::npos) {
+      return;
+    }
     push_line({*tag, std::string{body}, false});
   }
 
@@ -484,6 +510,10 @@ class ChatCore {
     // nobody.
     if (text.starts_with("SAY ")) {
       text.remove_prefix(4);
+      if (text.size() > kMaxMessageBytes ||
+          text.find_first_of("\r\n") != std::string_view::npos) {
+        return;
+      }
       if (*tag != "?") {
         room_broadcast("FROM " + *tag + " " + std::string{text}, self);
       }
@@ -713,6 +743,7 @@ class ChatCore {
   }
 
   static constexpr std::size_t kQueuedLines = 256;
+  static constexpr std::size_t kMaxConnections = 64;
   static constexpr std::size_t kMaxPeerName = 64;
   static constexpr std::size_t kMaxMessageBytes = 4096;
   static constexpr std::size_t kMaxFrameBytes = kMaxMessageBytes + 128;
