@@ -18,8 +18,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <ws/core/log.hpp>
@@ -440,10 +442,20 @@ class ChatterApp final : public ws::ui::App {
     const float pad = chrome_.padding;
     const float inset = static_cast<float>(bottom_inset());
     const float width = std::max(0.0f, frame.width - pad * 2.0f);
+    // The header's real content height: the heading row (the stock row
+    // math widgets_basic uses - max(control_height + 2, strong_line_h +
+    // 10)) plus a text row (control_height), plus the panel's own two
+    // paddings and the flow's item spacing between the rows. Measuring
+    // it here instead of guessing a constant is what keeps the panel
+    // from clipping the status line (the "half-cut glyphs" look).
+    const float heading_row_h =
+        std::max(chrome_.control_height + 2.0f,
+                 (font_strong_.empty() ? (font_.empty() ? 0.0f
+                                                        : font_.line_height())
+                                       : font_strong_.line_height()) +
+                     10.0f);
     const float header_h =
-        chrome_.control_height + (font_.empty() ? chrome_.control_height
-                                                : font_.line_height()) +
-        pad * 2.0f + chrome_.spacing;
+        heading_row_h + chrome_.control_height + pad * 2.0f + chrome_.spacing;
     const float composer_h = chrome_.control_height + pad * 2.0f;
     const float header_y = pad;
     const float composer_y =
@@ -451,9 +463,9 @@ class ChatterApp final : public ws::ui::App {
                  frame.height - inset - pad - composer_h);
     const Rect header{pad, header_y, width, header_h};
     const Rect feed{pad, header.y + header.height + chrome_.spacing, width,
-                    std::max(0.0f, composer_y -
-                                        (header.y + header.height +
-                                         chrome_.spacing * 2.0f))};
+                    std::max(0.0f, composer_y - chrome_.spacing -
+                                       (header.y + header.height +
+                                        chrome_.spacing))};
     const Rect composer{pad, composer_y, width, composer_h};
 
     const ws::input::InputFrame& input = ws::input::frame_input();
@@ -464,16 +476,19 @@ class ChatterApp final : public ws::ui::App {
     gui_.begin_layer(gui::Layer::base);
 
     // Standard application header: stock panel, heading and secondary
-    // metadata. Theme tokens provide all colors and typography.
+    // metadata. Theme tokens provide all colors and typography. The
+    // status line runs on plain ASCII separators - the bake's inline
+    // range is 32..126 and a middle dot lands as the synthesized
+    // fallback box (tofu) that reads as a broken row.
     (void)gui::begin_panel(gui_, layout_, chrome_, "header", header);
     gui::heading(layout_, chrome_, "Chatter");
     const int peers = core_.peers();
     const std::string status =
-        core_.name() + "  ·  " +
+        core_.name() + "  |  " +
         (core_.serving() ? "Room host" : "LAN participant") +
-        "  ·  " + std::to_string(peers) +
+        "  |  " + std::to_string(peers) +
         (peers == 1 ? " connection" : " connections") +
-        "  ·  port " + std::to_string(core_.port());
+        "  |  port " + std::to_string(core_.port());
     gui::text(layout_, chrome_, status.c_str());
     gui::end_panel(gui_, layout_);
 
@@ -495,12 +510,35 @@ class ChatterApp final : public ws::ui::App {
         follow_latest_ = false;
       }
     }
+    // A touch that merely PRESSES inside the feed is a tap in flight,
+    // not a scroll: every tap used to break the follow (a phone's
+    // first message tap froze the feed at the bottom forever). Only a
+    // touch that MOVES past the theme's drag threshold - the same line
+    // the scroll panel itself crosses to own the finger - is a scroll.
+    // TouchPoint carries no press origin and PointerId carries no
+    // ordering, so the press origins live in a tiny flat scan (the
+    // touch table itself is capped at kMaxTouches).
     for (const ws::input::TouchPoint& touch : input.touches) {
+      if (!touch.down && !touch.released) {
+        continue;  // an empty slot
+      }
       if (touch.pressed && touch.x >= feed.x &&
           touch.x < feed.x + feed.width && touch.y >= feed.y &&
           touch.y < feed.y + feed.height) {
+        touch_origin_[touch.id.value] = {touch.x, touch.y};
+      }
+      const auto origin = touch_origin_.find(touch.id.value);
+      if (touch.down && origin != touch_origin_.end() &&
+          (touch.x - origin->second.first) *
+                  (touch.x - origin->second.first) +
+              (touch.y - origin->second.second) *
+                  (touch.y - origin->second.second) >
+              chrome_.drag_threshold * chrome_.drag_threshold) {
         reader_interacted = true;
         follow_latest_ = false;
+      }
+      if (touch.released || touch.cancelled) {
+        touch_origin_.erase(touch.id.value);
       }
     }
     if (follow_latest_ && !reader_interacted) {
@@ -556,8 +594,16 @@ class ChatterApp final : public ws::ui::App {
     const bool send_clicked =
         gui::button(gui_, layout_, chrome_, "Send", kSendWidth * scale_, {},
                     false, gui::ButtonStyle::primary);
+    gui::end_panel(gui_, layout_);
 
+    // The field's id is the one INSIDE the composer's panel scope - the
+    // derivation the widget itself used. (begin_panel pushes its label
+    // onto the id stack; the same push here reproduces the id after the
+    // panel has popped it.) A root-scope lookalike never matches, and
+    // Enter silently did nothing - the keyboard send was broken.
+    gui_.ids().push("composer");
     const WidgetId field_id = gui_.ids().id("message");
+    gui_.ids().pop();
     field_focus_ = gui_.is_focused(field_id);
     const bool enter =
         gui_.input().key_pressed[ws::input::keys::kEnter] && field_focus_;
@@ -565,7 +611,6 @@ class ChatterApp final : public ws::ui::App {
       core_.send(input_);
       input_[0] = '\0';
     }
-    gui::end_panel(gui_, layout_);
 
     gui_.end_layer();
     ws::ui::r2d::end();
@@ -591,6 +636,10 @@ class ChatterApp final : public ws::ui::App {
   std::vector<ChatLine> lines_;
   char input_[kInputCapacity] = {};
   bool field_focus_ = false;
+  // The feed's tap-vs-scroll discrimination: each live contact's press
+  // origin keyed by the contact id's raw value (PointerId has equality,
+  // not ordering - a flat map over the uint32), dropped on the lift.
+  std::map<std::uint32_t, std::pair<float, float>> touch_origin_;
 };
 
 }  // namespace
