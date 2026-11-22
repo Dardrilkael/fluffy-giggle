@@ -214,6 +214,14 @@ ws_add_test(circsim_editor_document
   LINK ws::circsim
   DEPENDS ws::ui_gui ws::app ws::settings ws::schematic)
 
+# The adapter's lift/landing contract: several taps on one wire, a
+# dragged tap junction, and the pin exit directions the router honors.
+ws_add_test(circsim_editor_adapter
+  SOURCES tests/test_schematic_adapter.cpp
+          src/schematic_adapter.cpp
+  LINK ws::circsim
+  DEPENDS ws::schematic)
+
 # The visual identity's gate: both app chromes pass the library's WCAG
 # pair checks and every device ink stays legible on its canvas. Pure
 # data - only the gui archive's theme_color math is linked.

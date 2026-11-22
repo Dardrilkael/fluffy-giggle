@@ -114,21 +114,6 @@ struct BoundsBuilder {
 // through its part's placement, a junction through its position), then
 // the waypoints between. A dangling endpoint (the loader's tolerance)
 // answers EMPTY - there is nothing to draw or hit.
-// The live-drag PREVIEW route for one ortho wire whose `a_live`/`b_live`
-// endpoint references the entity being dragged (its position resolves
-// live; its waypoints are the author's stale ones). Answers the shape
-// the release's re-route lands: the fresh no-direction base, unless
-// that base leaves a pin backwards (then the direction-honoring route -
-// settle_route's own decision core), and for a waypoint-carrying wire
-// with one moving end the slid-waypoint corridor. Terminal avoidance
-// (route_around) stays a landing-only refinement: the preview keeps the
-// drag at one pass per affected wire. The editor draws THIS while the
-// button is held, so the hold frame and the release agree.
-[[nodiscard]] std::vector<Pos> live_wire_path(const Schematic& s,
-                                             const SymbolLibrary& lib,
-                                             const Wire& w, bool a_live,
-                                             bool b_live);
-
 [[nodiscard]] std::vector<Pos> wire_path(const Schematic& s,
                                          const SymbolLibrary& lib,
                                          const Wire& w);

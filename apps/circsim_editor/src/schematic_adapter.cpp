@@ -93,8 +93,25 @@ void SchematicAdapter::build(ws::circsim::Schematic& s,
                                 : junction_node.end();
             return it == junction_node.end() ? 0u : it->second;
         };
+        // A pin end carries its pin's world exit direction (the router's
+        // stored fact: "the wire leaves the pin east"). The .csim has no
+        // such field, so it is re-derived from the placement here; a
+        // junction end stays free. Without this every wire was routed
+        // free-ended and could run back through the part it leaves.
+        const auto dir_of = [&](const WireEndpoint& e) {
+            if (const PinRef* pr = std::get_if<PinRef>(&e)) {
+                const Part* part = s.find_part(pr->part);
+                const ws::circsim::SymbolDef* sym =
+                    part != nullptr ? library.find(part->symbol) : nullptr;
+                if (part != nullptr && sym != nullptr) {
+                    return pin_world_dir(*sym, *part, pr->pin);
+                }
+            }
+            return ws::sch::kDirFree;
+        };
         const ws::sch::WireId id =
-            doc.add_wire(node_of(w.a), node_of(w.b), w.waypoints);
+            doc.add_wire(node_of(w.a), node_of(w.b), w.waypoints,
+                         dir_of(w.a), dir_of(w.b));
         wire_ids[w.id] = id;
         wire_back[id] = w.id;
     }
@@ -109,16 +126,28 @@ void SchematicAdapter::build(ws::circsim::Schematic& s,
     // longer touches).
     for (const Junction& j : s.junctions()) {
         for (const std::uint32_t tapped : j.taps) {
-            const auto wit = wire_ids.find(tapped);
-            if (wit == wire_ids.end()) {
+            if (wire_ids.find(tapped) == wire_ids.end()) {
                 continue;  // the tapped wire is gone (a stale tap)
             }
             const auto jit = junction_node.find(j.id);
             if (jit == junction_node.end()) {
                 continue;
             }
-            const std::optional<ws::sch::Doc::Split> split =
-                doc.split_wire(wit->second, v(j.pos));
+            // A wire with several taps is already CUT into pieces by the
+            // earlier ones, so the point may lie on any piece, not just
+            // the one still carrying the original id: offer it to every
+            // piece descended from this persisted wire until one takes
+            // it (a tap on no piece is detached - nothing to split).
+            std::optional<ws::sch::Doc::Split> split;
+            for (const auto& [piece, owner] : wire_back) {
+                if (owner != tapped) {
+                    continue;
+                }
+                split = doc.split_wire(piece, v(j.pos));
+                if (split.has_value()) {
+                    break;
+                }
+            }
             if (!split.has_value()) {
                 continue;
             }
@@ -153,7 +182,6 @@ void SchematicAdapter::build(ws::circsim::Schematic& s,
             // the persisted wire).
             wire_back[split->first] = tapped;
             wire_back[split->second] = tapped;
-            (void)wit;
         }
     }
 }
@@ -308,51 +336,73 @@ SchematicAdapter::Landing SchematicAdapter::landing(
             }
             continue;
         }
-        // The split case: both halves are in sch_ids (from wire_back). Find
-        // the shared junction and order them: first half ends at the
-        // junction (b == jid), second half starts at it (a == jid).
-        std::vector<const ws::sch::Wire*> halves;
-        halves.reserve(sch_ids.size());
+        // The split case: the persisted wire was cut into a CHAIN of
+        // pieces (one cut per tap, any number of them). Every cut keeps
+        // the a->b orientation, so piece k ends on the junction piece
+        // k+1 starts on: the head is the piece whose `a` node no other
+        // piece ends on, and each next piece is the one starting where
+        // the last ended.
+        std::vector<const ws::sch::Wire*> pieces;
+        pieces.reserve(sch_ids.size());
         for (const ws::sch::WireId id : sch_ids) {
-            const ws::sch::Wire* w = doc.find_wire(id);
-            if (w != nullptr) {
-                halves.push_back(w);
+            if (const ws::sch::Wire* w = doc.find_wire(id)) {
+                pieces.push_back(w);
             }
         }
-        if (halves.size() != 2u) {
-            continue;  // not a pair (a stale half is gone): skip honestly
+        if (pieces.size() != sch_ids.size()) {
+            continue;  // a piece is gone: skip honestly
         }
-        // The shared junction is the node both halves connect to.
-        const NodeId jid =
-            (halves[0]->a == halves[1]->a) ? halves[0]->a
-            : (halves[0]->a == halves[1]->b) ? halves[0]->a
-            : (halves[0]->b == halves[1]->a) ? halves[0]->b
-            : halves[0]->b;
-        const ws::sch::Node* jn = doc.find_node(jid);
-        if (jn == nullptr) {
-            continue;
+        std::vector<const ws::sch::Wire*> chain;
+        const ws::sch::Wire* head = nullptr;
+        for (const ws::sch::Wire* cand : pieces) {
+            const bool fed = std::any_of(
+                pieces.begin(), pieces.end(),
+                [&](const ws::sch::Wire* o) { return o->b == cand->a; });
+            if (!fed) {
+                head = cand;
+                break;
+            }
         }
-        // First half: b == jid (ends at the junction). Second: a == jid.
-        const ws::sch::Wire* first = halves[0]->b == jid ? halves[0] : halves[1];
-        const ws::sch::Wire* second = first == halves[0] ? halves[1] : halves[0];
-        // Sanity: second must start at the junction.
-        if (second->a != jid) {
-            continue;
+        for (const ws::sch::Wire* cur = head;
+             cur != nullptr && chain.size() < pieces.size();) {
+            chain.push_back(cur);
+            const ws::sch::Wire* next = nullptr;
+            for (const ws::sch::Wire* cand : pieces) {
+                if (cand != cur && cand->a == cur->b) {
+                    next = cand;
+                    break;
+                }
+            }
+            cur = next;
+        }
+        if (chain.size() != pieces.size()) {
+            continue;  // not one clean a->b chain: skip honestly
         }
         const auto shape_of = [&](const ws::sch::Wire* w) {
             const auto it = ov.wirePath.find(w->id);
-            if (it != ov.wirePath.end()) {
+            return it != ov.wirePath.end() ? it->second : w->mid;
+        };
+        // A cut's junction stands between two pieces at its LANDING
+        // position: when the drag moved the junction (a tap dragged
+        // along), the overlay holds where it ends up; the press-time
+        // doc's position would write the OLD spot into the path and
+        // leave a diagonal leg with the dot off it.
+        const auto landed_pos = [&](NodeId n) {
+            const auto it = ov.nodePos.find(n);
+            if (it != ov.nodePos.end()) {
                 return it->second;
             }
-            return w->mid;
+            const ws::sch::Node* node = doc.find_node(n);
+            return node != nullptr ? node->pos : Vec2{0.0, 0.0};
         };
         std::vector<ws::circsim::Pos> mids;
-        for (const Vec2& m : shape_of(first)) {
-            mids.push_back(p(m));
-        }
-        mids.push_back(p(jn->pos));
-        for (const Vec2& m : shape_of(second)) {
-            mids.push_back(p(m));
+        for (std::size_t k = 0; k < chain.size(); ++k) {
+            if (k > 0) {
+                mids.push_back(p(landed_pos(chain[k]->a)));
+            }
+            for (const Vec2& m : shape_of(chain[k])) {
+                mids.push_back(p(m));
+            }
         }
         out.wires[cs_id] = std::move(mids);
     }

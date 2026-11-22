@@ -23,6 +23,7 @@
 
 #include <ws/core/log.hpp>
 
+#include <imgui.h>
 #include <imgui_impl_glfw.h>
 
 #ifdef _WIN32
