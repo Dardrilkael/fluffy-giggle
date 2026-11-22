@@ -312,7 +312,6 @@ constexpr int kDefaultRelayPort = 27475;
 // it is not a second, app-specific visual system.
 namespace gui = ws::ui::gui;
 
-using gui::Rect;
 using gui::WidgetId;
 
 [[nodiscard]] ws::ui::r2d::FontBakeOptions bake_options_for(bool dark) {
