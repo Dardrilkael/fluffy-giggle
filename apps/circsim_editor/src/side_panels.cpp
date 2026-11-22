@@ -2979,6 +2979,20 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
             line_at < ed.problems.lines.size()
                 ? ed.problems.lines[line_at]
                 : d.render();
+        // The row's text wears its severity - red errors, amber
+        // warnings, blue notes - so a list scans by color before it is
+        // read; a stale list drops back to the quiet ink (kept for
+        // reference, not for action).
+        gui::ChromeTheme severity_theme = rows_theme;
+        if (!stale) {
+            severity_theme.text = gui::dim(
+                d.severity == ws::circsim::Severity::Error
+                    ? theme.danger
+                    : (d.severity == ws::circsim::Severity::Warning
+                           ? theme.toast_warning
+                           : theme.toast_info),
+                0.95f);
+        }
         // The cursor's row wears the selected face - the keyboard's
         // landing, and the click's (both set the cursor through the
         // same goto_problem path).
@@ -2986,7 +3000,7 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
             // A plain row preserves the finding text without offering a
             // misleading click target backed by an obsolete export map.
             gui::text_wrapped(layout, rows_theme, (prefix + text).c_str());
-        } else if (gui::selectable(gui, layout, rows_theme,
+        } else if (gui::selectable(gui, layout, severity_theme,
                                    (prefix + text).c_str(),
                                    at == ed.problems_cursor)) {
             goto_problem(ed, line_at);
@@ -2994,7 +3008,13 @@ void draw_problems_panel(Editor& ed, gui::GuiContext& gui,
         gui.ids().pop();
     }
     if (ed.problems.diags.empty()) {
-        gui::text(layout, theme,
+        // Clean and current: the all-clear in green; a stale "clean" is
+        // only history, so it stays neutral.
+        gui::ChromeTheme clear_theme = theme;
+        if (!stale) {
+            clear_theme.text = style::success_color(gui::is_dark(theme));
+        }
+        gui::text(layout, clear_theme,
                   stale ? "No findings at the last check"
                         : "No findings - all clear");
     } else if (visible == 0) {

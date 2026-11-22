@@ -18,6 +18,7 @@
 
 #include "../src/editor.hpp"
 #include "../src/side_panels.hpp"
+#include "../src/ui_style.hpp"
 
 #include <array>
 #include <string>
@@ -2250,4 +2251,76 @@ TEST_CASE("F4: every palette group wears a collapsible header, search finds") {
         }
     }
     CHECK(found_v);
+}
+
+// --- the problems list wears its severity -------------------------------------
+
+namespace {
+
+// The Problems panel through a themed face: the fontless stock chrome
+// records no text at the stub, so the color cases hand the theme a
+// synthetic font and read what the panel last drew.
+void draw_problems_with_font(Bench& b, const ws::ui::r2d::Font& font) {
+    gui::ChromeTheme theme = gui::kDefaultChrome;
+    theme.font = &font;
+    b.gui.begin_frame(ws::input::InputFrame{});
+    gui::LayoutCursor layout;
+    (void)layout.begin_panel(gui::Rect{0.0f, 0.0f, 480.0f, 240.0f}, 12.0f,
+                             8.0f);
+    editor::draw_problems_panel(b.ed, b.gui, layout, theme);
+    layout.end_panel();
+    b.gui.end_frame();
+}
+
+}  // namespace
+
+TEST_CASE("problems: a finding row's text takes its severity's color") {
+    const gui::ChromeTheme& t = gui::kDefaultChrome;
+    const GlyphTable glyphs = glyph_table(8.0f);
+    const ws::ui::r2d::Font font(16.0f, 20.0f, glyphs.data(), 95);
+    const struct {
+        ws::circsim::Severity severity;
+        std::uint32_t color;
+    } cases[] = {
+        {ws::circsim::Severity::Error, gui::dim(t.danger, 0.95f)},
+        {ws::circsim::Severity::Warning, gui::dim(t.toast_warning, 0.95f)},
+        {ws::circsim::Severity::Note, gui::dim(t.toast_info, 0.95f)},
+    };
+    for (const auto& c : cases) {
+        Bench b;
+        (void)b.place_with_findings("R1", {diag_of(c.severity, "R1")});
+        REQUIRE(b.ed.problems.diags.size() == 1u);
+        ws::ui::gui_test::stub.reset();
+        draw_problems_with_font(b, font);
+        // The finding row is the last text the panel draws.
+        CHECK(ws::ui::gui_test::stub.last_text_color == c.color);
+    }
+}
+
+TEST_CASE("problems: a clean, current check says all clear in green") {
+    const GlyphTable glyphs = glyph_table(8.0f);
+    const ws::ui::r2d::Font font(16.0f, 20.0f, glyphs.data(), 95);
+    Bench b;
+    (void)b.place_with_findings("R1", {});
+    REQUIRE(b.ed.problems.has);
+    REQUIRE(b.ed.problems.diags.empty());
+    ws::ui::gui_test::stub.reset();
+    draw_problems_with_font(b, font);
+    CHECK(ws::ui::gui_test::stub.last_text == "No findings - all clear");
+    CHECK(ws::ui::gui_test::stub.last_text_color ==
+          editor::style::success_color(true));
+}
+
+TEST_CASE("problems: a stale check keeps the neutral ink") {
+    const GlyphTable glyphs = glyph_table(8.0f);
+    const ws::ui::r2d::Font font(16.0f, 20.0f, glyphs.data(), 95);
+    Bench b;
+    (void)b.place_with_findings("R1", {});
+    b.doc.schem.bump();  // the sheet changed after the check
+    ws::ui::gui_test::stub.reset();
+    draw_problems_with_font(b, font);
+    CHECK(ws::ui::gui_test::stub.last_text ==
+          "No findings at the last check");
+    CHECK(ws::ui::gui_test::stub.last_text_color !=
+          editor::style::success_color(true));
 }

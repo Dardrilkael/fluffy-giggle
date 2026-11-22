@@ -2173,3 +2173,145 @@ TEST_CASE("legend sparklines stroke with the series' join style") {
     }
     CHECK(sparklines == 2u);
 }
+
+// --- the visual pass: plot card, axis ink, spectrum, swatch -------------------
+//
+// These cases hand the panel a synthetic face (every glyph 7 px wide) so
+// the labels the canvas draws are present, then read the recorded command
+// list: colors and extents, not pixels.
+
+namespace {
+
+[[nodiscard]] ws::ui::r2d::Font visual_test_font(GlyphTable& storage) {
+    storage = glyph_table(7.0f);
+    return ws::ui::r2d::Font(14.0f, 18.0f, storage.data(), 95);
+}
+
+// The bounding box height of a filled polygon command.
+[[nodiscard]] float poly_height(const canvas::CanvasCmd& c) {
+    float lo = c.points.front().y;
+    float hi = lo;
+    for (const canvas::Point& p : c.points) {
+        lo = std::min(lo, p.y);
+        hi = std::max(hi, p.y);
+    }
+    return hi - lo;
+}
+
+[[nodiscard]] std::vector<const canvas::CanvasCmd*> fills_of(
+    const Bench& b, std::uint32_t color) {
+    std::vector<const canvas::CanvasCmd*> out;
+    for (const canvas::CanvasCmd& c : b.clc.cmds) {
+        if (c.kind == canvas::CanvasCmdKind::fill_polygon &&
+            c.color == color && !c.points.empty()) {
+            out.push_back(&c);
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("visual: the plot sits on a canvas-colored card") {
+    Bench b;
+    b.load(ramp_table(16u));
+    b.draw();
+    // One fill in the canvas color: the card under the frame.
+    CHECK(fills_of(b, gui::kDefaultChrome.canvas_bg).size() == 1u);
+}
+
+TEST_CASE("visual: with two spines each axis wears its series' color") {
+    GlyphTable storage;
+    ws::ui::r2d::Font font = visual_test_font(storage);
+    Bench b;
+    b.ed.font = &font;
+    b.load(ramp_table(16u));  // v(out) on the left, i(V1) on the right
+    b.draw();
+    const std::uint32_t left = gui::dim(series_color(0), 0.92f);
+    const std::uint32_t right = gui::dim(series_color(1), 0.92f);
+    int left_labels = 0;
+    int right_labels = 0;
+    for (const canvas::CanvasCmd& c : b.clc.cmds) {
+        if (c.kind != canvas::CanvasCmdKind::draw_text) {
+            continue;
+        }
+        left_labels += c.color == left ? 1 : 0;
+        right_labels += c.color == right ? 1 : 0;
+    }
+    CHECK(left_labels >= 2);   // the left ladder
+    CHECK(right_labels >= 2);  // the right ladder
+}
+
+TEST_CASE("visual: one spine keeps neutral axis ink") {
+    GlyphTable storage;
+    ws::ui::r2d::Font font = visual_test_font(storage);
+    Bench b;
+    b.ed.font = &font;
+    b.load(v_only_table(16u));  // no second axis
+    b.draw();
+    for (const canvas::CanvasCmd& c : b.clc.cmds) {
+        if (c.kind == canvas::CanvasCmdKind::draw_text) {
+            CHECK(c.color != gui::dim(series_color(0), 0.92f));
+        }
+    }
+}
+
+TEST_CASE("visual: the fourier spectrum draws one bar per present "
+          "harmonic, scaled to the fundamental") {
+    GlyphTable storage;
+    ws::ui::r2d::Font font = visual_test_font(storage);
+    Bench b;
+    b.ed.font = &font;
+    b.load(ramp_table(16u));
+    b.draw();
+    // The accent also fills the checked legend boxes, so the bars are
+    // read as the NEW accent fills a fourier series adds.
+    const std::size_t accent_before =
+        fills_of(b, gui::kDefaultChrome.control_on).size();
+    b.ed.results.run.fouriers.push_back(two_tone_fourier());
+    b.draw();
+    const std::uint32_t amber = gui::dim(gui::kDefaultChrome.toast_warning,
+                                         0.95f);
+    const auto accents = fills_of(b, gui::kDefaultChrome.control_on);
+    const auto harmonics = fills_of(b, amber);
+    // n=1 (100 %) in the accent; n=2 is 0 % and draws nothing; n=3 is
+    // 20 % in amber.
+    CHECK(accents.size() == accent_before + 1u);
+    REQUIRE(harmonics.size() == 1u);
+    // The fundamental is the tallest accent fill (a checkbox is ~24 px).
+    float tallest = 0.0f;
+    for (const canvas::CanvasCmd* c : accents) {
+        tallest = std::max(tallest, poly_height(*c));
+    }
+    CHECK(tallest > 50.0f);
+    CHECK(poly_height(*harmonics[0]) / tallest ==
+          doctest::Approx(0.20f).epsilon(0.05));
+}
+
+TEST_CASE("visual: no face, no spectrum (and nothing crashes)") {
+    Bench b;  // ed.font stays null
+    b.load(ramp_table(16u));
+    b.ed.results.run.fouriers.push_back(two_tone_fourier());
+    b.draw();
+    CHECK(fills_of(b, gui::dim(gui::kDefaultChrome.toast_warning, 0.95f))
+              .empty());
+}
+
+TEST_CASE("visual: a failed or .op fourier series draws no spectrum") {
+    GlyphTable storage;
+    ws::ui::r2d::Font font = visual_test_font(storage);
+    Bench b;
+    b.ed.font = &font;
+    b.load(ramp_table(16u));
+    b.draw();
+    const std::size_t before = b.clc.cmds.size();
+    ws::spice::Fourier f;  // no harmonics: the .op shape
+    f.signal = "v(out)";
+    f.analysis = ".tran";
+    f.dc = 1.0;
+    b.ed.results.run.fouriers.push_back(std::move(f));
+    b.draw();
+    // The same canvas commands as before: the section's rows ride the
+    // text seam, and nothing here may add a bar.
+    CHECK(b.clc.cmds.size() == before);
+}

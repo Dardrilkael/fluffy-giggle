@@ -1163,6 +1163,11 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     canvas::Canvas2D& rc = ed.results_draw_canvas();
     rc.set_view_scale(1.0f);  // identity: local == screen
 
+    // --- the card: the plot sits on the same canvas-colored surface the
+    // schematic does, so a chart reads as a chart and not as lines drawn
+    // straight on the panel face.
+    rc.fill_rounded_rect(fx, fy, iw, ih, 3.0f, theme.canvas_bg);
+
     // --- the frame
     Paint frame_paint;
     frame_paint.width = 1.0f;
@@ -1183,6 +1188,36 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     const ws::ui::r2d::Font* font = theme.font != nullptr ? theme.font
                                                           : ed.font;
     const bool can_label = font != nullptr && font->line_height() > 0.0f;
+    // The axis ink: neutral, unless TWO spines are drawn and a spine
+    // carries exactly one visible series - then it wears that series'
+    // color (V in the red trace's red, A in the blue's), so which axis
+    // belongs to which trace reads without opening the legend.
+    std::uint32_t left_ink = gui::dim(theme.text, 0.6f);
+    std::uint32_t right_ink = left_ink;
+    if (has_right) {
+        int left_n = 0;
+        int right_n = 0;
+        std::size_t left_i = 0;
+        std::size_t right_i = 0;
+        for (std::size_t i = 0; i < t.signals.size(); ++i) {
+            if (i < ed.results.visible.size() &&
+                ed.results.visible[i] != 0u && i < stats.size()) {
+                if (stats[i].right) {
+                    ++right_n;
+                    right_i = i;
+                } else {
+                    ++left_n;
+                    left_i = i;
+                }
+            }
+        }
+        if (left_n == 1) {
+            left_ink = gui::dim(series_color(left_i), 0.92f);
+        }
+        if (right_n == 1) {
+            right_ink = gui::dim(series_color(right_i), 0.92f);
+        }
+    }
     for (double tick : x_ticks) {
         const float px = sx(tick);
         if (px < fx || px > fx + iw) {
@@ -1208,8 +1243,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             const float w = rc.measure_text(label.c_str(), *font);
             (void)rc.draw_text(fx - w - 4.0f,
                                py - font->line_height() * 0.5f,
-                               label.c_str(), *font,
-                               gui::dim(theme.text, 0.6f));
+                               label.c_str(), *font, left_ink);
         }
     }
     // The right spine's ticks (stage 6): marks on the frame's right
@@ -1230,8 +1264,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                 const std::string label = ws::circsim::format_eng(tick);
                 (void)rc.draw_text(fx + iw + 4.0f,
                                    py - font->line_height() * 0.5f,
-                                   label.c_str(), *font,
-                                   gui::dim(theme.text, 0.6f));
+                                   label.c_str(), *font, right_ink);
             }
         }
     }
@@ -1746,8 +1779,13 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     } else if (ed.results.view.active && can_label) {
         const char* hint = "double-click resets";
         const float w = rc.measure_text(hint, *font);
-        (void)rc.draw_text(fx + iw - w - 5.0f, fy + 3.0f, hint, *font,
-                           gui::dim(theme.text, 0.35f));
+        // A pill under the words: a trace passing through the corner
+        // used to strike the hint through ("doubleclick resets").
+        rc.fill_rounded_rect(fx + iw - w - 11.0f, fy + 3.0f, w + 12.0f,
+                             font->line_height() + 4.0f, 4.0f,
+                             gui::dim(theme.panel_bg, 0.9f));
+        (void)rc.draw_text(fx + iw - w - 5.0f, fy + 5.0f, hint, *font,
+                           gui::dim(theme.text, 0.6f));
     }
 }
 
@@ -2423,8 +2461,13 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
             const gui::Rect swatch = layout.next(14.0f, 14.0f);
             canvas::Canvas2D& sw = ed.results_draw_canvas();
             sw.set_view_scale(1.0f);
-            sw.fill_rounded_rect(swatch.x, swatch.y + 3.0f, 12.0f,
-                                 12.0f, 2.0f, series_color(i));
+            // Centered on the row's own height (the checkbox beside it is
+            // a full control tall); it used to hang ~5px above center.
+            sw.fill_rounded_rect(
+                swatch.x,
+                swatch.y + std::max(0.0f, (theme.control_height - 12.0f) *
+                                              0.5f),
+                12.0f, 12.0f, 3.0f, series_color(i));
             layout.same_line(6.0f);
             bool vis = i < ed.results.visible.size()
                            ? ed.results.visible[i] != 0u
@@ -2564,6 +2607,87 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
                     gui::text(layout, theme, line);
                 }
             };
+            // The harmonic spectrum: one bar per harmonic, height = its
+            // share of the fundamental (%fund), on a 0..max scale. The
+            // numbers below say exactly; the bars say at a glance which
+            // harmonics matter - the fundamental in the accent, the
+            // distortion content in amber.
+            const auto draw_spectrum = [&](const ws::spice::Fourier& f) {
+                const ws::ui::r2d::Font* sf =
+                    theme.font != nullptr ? theme.font : ed.font;
+                const std::size_t n = f.harmonics.size();
+                if (n == 0 || sf == nullptr || !(sf->line_height() > 0.0f)) {
+                    return;
+                }
+                const float lh = sf->line_height();
+                const float height = 76.0f + lh;
+                const gui::Rect box =
+                    layout.next(layout.remaining_width(), height);
+                const float left = box.x + 38.0f;  // the scale's labels
+                const float right = box.x + box.width - 6.0f;
+                const float top = box.y + 6.0f;
+                const float base = box.y + height - lh - 6.0f;
+                if (right - left < 24.0f || base - top < 12.0f) {
+                    return;
+                }
+                canvas::Canvas2D& rc = ed.results_draw_canvas();
+                rc.set_view_scale(1.0f);
+                double top_value = 100.0;
+                for (const ws::spice::FourierHarmonic& h : f.harmonics) {
+                    top_value = std::max(top_value, h.normalized);
+                }
+                rc.fill_rounded_rect(left, top, right - left, base - top,
+                                     3.0f, theme.canvas_bg);
+                Paint rail;
+                rail.width = 1.0f;
+                rail.color = gui::dim(theme.text, 0.12f);
+                for (int q = 0; q <= 2; ++q) {  // 0, half, full scale
+                    const float gy =
+                        base - (base - top) * static_cast<float>(q) * 0.5f;
+                    rc.stroke_line({left, gy}, {right, gy}, rail);
+                    char scale[24];
+                    std::snprintf(scale, sizeof scale, "%.3g%%",
+                                  top_value * q * 0.5);
+                    const float sw = rc.measure_text(scale, *sf);
+                    (void)rc.draw_text(left - sw - 4.0f, gy - lh * 0.5f,
+                                       scale, *sf,
+                                       gui::dim(theme.text, 0.5f));
+                }
+                const float slot = (right - left) / static_cast<float>(n);
+                const float bar_w = std::clamp(slot * 0.62f, 3.0f, 30.0f);
+                // A label under every bar when they fit, every kth when
+                // they do not (the number of a 40-harmonic run would
+                // otherwise overprint itself).
+                const int step = std::max(
+                    1, static_cast<int>(std::ceil(26.0f / slot)));
+                for (std::size_t k = 0; k < n; ++k) {
+                    const ws::spice::FourierHarmonic& h = f.harmonics[k];
+                    const float bx =
+                        left + slot * static_cast<float>(k) +
+                        (slot - bar_w) * 0.5f;
+                    float bh = static_cast<float>(
+                        (h.normalized / top_value) * (base - top));
+                    bh = std::clamp(bh, 0.0f, base - top);
+                    if (h.normalized > 0.0 && bh < 1.5f) {
+                        bh = 1.5f;  // a present harmonic never vanishes
+                    }
+                    const std::uint32_t ink =
+                        h.n == 1 ? theme.control_on
+                                 : gui::dim(theme.toast_warning, 0.95f);
+                    if (bh > 0.0f) {
+                        rc.fill_rounded_rect(bx, base - bh, bar_w, bh,
+                                             std::min(2.0f, bar_w * 0.4f),
+                                             ink);
+                    }
+                    if (static_cast<int>(k) % step == 0) {
+                        const std::string num = std::to_string(h.n);
+                        const float nw = rc.measure_text(num.c_str(), *sf);
+                        (void)rc.draw_text(bx + (bar_w - nw) * 0.5f,
+                                           base + 3.0f, num.c_str(), *sf,
+                                           gui::dim(theme.text, 0.6f));
+                    }
+                }
+            };
             int index = 0;
             for (const ws::spice::Fourier& f :
                  ed.results.run.fouriers) {
@@ -2601,6 +2725,7 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
                                  " the bins carry window leakage)",
                                  gui::dim(theme.text, 0.55f));
                     }
+                    draw_spectrum(f);
                     row_line("   n  frequency     magnitude      phase"
                              "  %fund",
                              gui::dim(theme.text, 0.55f));

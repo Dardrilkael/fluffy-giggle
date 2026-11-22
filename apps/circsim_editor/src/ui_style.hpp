@@ -183,6 +183,13 @@ inline constexpr std::array<AccentPreset, 7> kAccentPresets{{
     return theme;
 }
 
+// The "all good" ink (an empty Problems panel, a clean run): the
+// inductor green, the one green on each canvas already proven legible
+// there, so no new color enters the palette.
+[[nodiscard]] constexpr std::uint32_t success_color(bool dark) noexcept {
+    return dark ? rgba(74, 222, 128) : rgba(12, 124, 62);
+}
+
 // --- device-family ink ------------------------------------------------------
 //
 // One hue per family, in a dark-canvas and a light-canvas variant (the
