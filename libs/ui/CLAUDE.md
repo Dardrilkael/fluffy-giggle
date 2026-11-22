@@ -261,8 +261,11 @@ Widget functions hold no state; persistence lives in `GuiContext` side tables.
   - Android decodes every contact (pointer index from the action bits), CANCEL lifts all, and the 9th and later fingers drop with a once-per-frame warning.
   - ImGui is fed by the bridge directly through `io.AddMousePosEvent` / `AddMouseButtonEvent`.
   - The Android soft-keyboard IME rides the ime-rect seam: a focused
-    field's non-zero rect shows it, the zero rect (focus lost) hides it
-    (window_android.cpp's install_ime_rect; the manifests run adjustResize).
+    field's non-zero rect shows it, the zero rect (focus lost) hides it.
+    window_android.cpp owns the JNI bridge; every APK packages the shared
+    libs/ui/android/WsUiActivity.java base, whose DecorView calls
+    InputMethodManager on the UI thread. App Activities with extra Java
+    behavior subclass com.ws.ui.WsUiActivity; manifests use adjustResize.
 
 ## Implementing new features
 
