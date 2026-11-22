@@ -299,10 +299,9 @@ class ChatCore {
   // each other), the kind's parser after, bookkeeping on close.
   void adopt(const ws::net::TcpConnection::Ptr& conn, Kind kind,
              std::string room_key) {
-    if (peers_.size() >= kMaxConnections) {
-      (void)conn->close();
-      return;
-    }
+    // Install normal close bookkeeping even for a rejected connection:
+    // outgoing LAN dials must clear dialed_, and relay links must retry.
+    const bool reject = peers_.size() >= kMaxConnections;
     const auto tag = std::make_shared<std::string>("?");
     ws::net::TcpConnection* self = conn.get();
     // The close callback's copy, taken before the Peer's move empties
@@ -383,6 +382,9 @@ class ChatCore {
       }
       live_.fetch_sub(1);
     });
+    if (reject) {
+      (void)conn->close();
+    }
   }
 
   // v1's parser, verbatim, plus the direct-name bookkeeping the relay's
