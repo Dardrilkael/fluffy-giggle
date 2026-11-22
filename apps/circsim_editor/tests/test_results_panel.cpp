@@ -2152,3 +2152,24 @@ TEST_CASE("legend sparklines the scroll clip hides are not drawn") {
         }
     }
 }
+
+TEST_CASE("legend sparklines stroke with the series' join style") {
+    // stroke_series' own default is the round join, so a sparkline that
+    // does not pass one draws round whatever the plot's (bevel by
+    // default, CIRCSIM_PLOT_JOIN to change) - ~570 quads against ~395.
+    // The recorded commands carry the join: sparklines match the series.
+    Bench b;
+    b.load(ramp_table(41u));
+    b.draw();
+    const std::vector<const canvas::CanvasCmd*> series = b.series_cmds();
+    REQUIRE_FALSE(series.empty());
+    std::size_t sparklines = 0;
+    for (const canvas::CanvasCmd& c : b.clc.cmds) {
+        if (c.kind == canvas::CanvasCmdKind::stroke_polyline &&
+            c.width == 1.2f && c.points.size() > 4u) {
+            ++sparklines;
+            CHECK(c.join == series.front()->join);
+        }
+    }
+    CHECK(sparklines == 2u);
+}

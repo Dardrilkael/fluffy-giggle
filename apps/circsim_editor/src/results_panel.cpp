@@ -599,7 +599,7 @@ void draw_sparkline(canvas::Canvas2D& rc, const gui::Rect& r,
         pts.push_back(Point{px, py(st.spark_env[b * 2u])});
         pts.push_back(Point{px, py(st.spark_env[b * 2u + 1u])});
     }
-    stroke_series(rc, pts, with_alpha(color, 200), 1.2f);
+    stroke_series(rc, pts, with_alpha(color, 200), 1.2f, wave_env().join);
     if (mark >= 0 && static_cast<std::size_t>(mark) < n &&
         std::isfinite(ys[static_cast<std::size_t>(mark)])) {
         const float mx = r.x + static_cast<float>(mark) *
