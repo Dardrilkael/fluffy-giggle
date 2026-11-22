@@ -1051,12 +1051,13 @@ LaunchRequest parse_args(int argc, char* argv[]) {
     const std::string_view arg = argv[i];
     if (arg == "--serve") {
       int port = kDefaultRelayPort;
-      if (i + 1 < argc && argv[i + 1][0] != '-') {
+      if (i + 1 < argc && argv[i + 1][0] >= '0' &&
+          argv[i + 1][0] <= '9') {
         char* end = nullptr;
         const long parsed = std::strtol(argv[i + 1], &end, 10);
         if (end == argv[i + 1] || end == nullptr || *end != '\0' ||
-            parsed < 1024 || parsed > 65535) {
-          ws::core::error("chatter: --serve port must be 1024..65535");
+            parsed < 1 || parsed > 65535) {
+          ws::core::error("chatter: --serve port must be 1..65535");
           out.valid = false;
         } else {
           port = static_cast<int>(parsed);
@@ -1150,7 +1151,7 @@ int main(int argc, char* argv[]) {
   const LaunchRequest launch = parse_args(argc, argv);
   if (!launch.valid) {
     ws::core::error(
-        "usage: chatter [name] [--name n] [--serve [1024..65535]] [--relay host:port]...");
+        "usage: chatter [name] [--name n] [--serve [1..65535]] [--relay host:port]...");
     return 2;
   }
   ChatterApp chatter{config, launch.core};
