@@ -228,3 +228,15 @@ jobs:
       - name: Package Circsim Android APK (debug key)
         shell: pwsh
         run: ./tools/package-android.ps1 -App circsim_editor
+
+      - name: Package Playground Android APK (debug key)
+        shell: pwsh
+        run: ./tools/package-android.ps1 -App playground
+
+      - name: Package Bounce Android APK (debug key)
+        shell: pwsh
+        run: ./tools/package-android.ps1 -App bounce
+
+      - name: Package UI Gallery Android APK (debug key)
+        shell: pwsh
+        run: ./tools/package-android.ps1 -App ui_gallery
