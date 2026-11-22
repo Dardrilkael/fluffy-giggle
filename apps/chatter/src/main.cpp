@@ -56,6 +56,7 @@
 #include <ws/core/log.hpp>
 #include <ws/ui/app.hpp>
 #include <ws/ui/gui/widgets.hpp>
+#include <ws/ui/gui/theme_data.hpp>
 #include <ws/ui/renderer2d.hpp>
 
 #ifdef __ANDROID__
@@ -337,131 +338,19 @@ inline int bottom_inset() { return 0; }
 // everywhere a port can be given (--serve [port], --relay host:port).
 constexpr int kDefaultRelayPort = 27475;
 
-// The v3 face, the WhatsApp palette: a teal header, a warm paper feed,
-// green own bubbles, white foreign ones. The light chrome means the
-// font bakes with light_chrome() - dark text reads on light surfaces.
-constexpr std::uint32_t kHeader = ws::ui::r2d::rgba(7, 94, 84);       // #075E54 teal
-constexpr std::uint32_t kHeaderTitle = ws::ui::r2d::rgba(255, 255, 255);
-constexpr std::uint32_t kHeaderSub = ws::ui::r2d::rgba(190, 214, 210);
-constexpr std::uint32_t kPaper = ws::ui::r2d::rgba(230, 224, 212);   // #E0E0D4-ish warm field
-constexpr std::uint32_t kBubbleMine = ws::ui::r2d::rgba(220, 248, 198);  // #DCF8C6 pale green
-constexpr std::uint32_t kBubbleTheirs = ws::ui::r2d::rgba(255, 255, 255);
-constexpr std::uint32_t kText = ws::ui::r2d::rgba(33, 33, 33);        // near-black on light
-constexpr std::uint32_t kTimeDim = ws::ui::r2d::rgba(128, 138, 128);  // the bubble corner's HH:MM
-[[maybe_unused]] constexpr std::uint32_t kPill = ws::ui::r2d::rgba(255, 255, 255);    // system pill face
-constexpr std::uint32_t kPillText = ws::ui::r2d::rgba(110, 116, 110);
-constexpr std::uint32_t kBar = ws::ui::r2d::rgba(245, 245, 245);     // the input strip
-constexpr std::uint32_t kField = ws::ui::r2d::rgba(255, 255, 255);    // the input pill
-constexpr std::uint32_t kSend = ws::ui::r2d::rgba(7, 150, 120);      // the round send button
-constexpr std::uint32_t kSendHover = ws::ui::r2d::rgba(16, 172, 140);
-constexpr std::uint32_t kChip = ws::ui::r2d::rgba(7, 94, 84);        // the "new messages" chip
-constexpr std::uint32_t kYou = ws::ui::r2d::rgba(7, 94, 84);         // "you" in the rare label contexts
+// Chatter uses the same stock theme, typography, panels and widgets as
+// the rest of ws::ui. The conversation is content inside a scroll panel;
+// it is not a second, app-specific visual system.
+namespace gui = ws::ui::gui;
 
-// A stable tint per sender for the foreign bubbles' name line: FNV-1a
-// over the name, WhatsApp's warm set. "you" is fixed (the own side
-// never shows a name anyway - the tail says whose it is).
-std::uint32_t name_color(std::string_view name) {
-  if (name == "you") {
-    return kYou;
-  }
-  constexpr std::uint32_t kTints[] = {
-      ws::ui::r2d::rgba(230, 100, 90),   // coral
-      ws::ui::r2d::rgba(150, 105, 200),  // violet
-      ws::ui::r2d::rgba(60, 150, 210),   // blue
-      ws::ui::r2d::rgba(210, 130, 45),   // amber
-      ws::ui::r2d::rgba(90, 160, 90),   // leaf
-      ws::ui::r2d::rgba(190, 80, 130)}; // rose
-  std::uint32_t hash = 2166136261u;
-  for (const char c : name) {
-    hash ^= static_cast<unsigned char>(c);
-    hash *= 16777619u;
-  }
-  return kTints[hash % (sizeof(kTints) / sizeof(kTints[0]))];
+using gui::Rect;
+using gui::WidgetId;
+
+[[nodiscard]] ws::ui::r2d::FontBakeOptions bake_options_for(bool dark) {
+  return dark ? ws::ui::r2d::FontBakeOptions::dark_chrome()
+              : ws::ui::r2d::FontBakeOptions::light_chrome();
 }
 
-// One text run split into lines measured with the actual font. Words
-// wrap at spaces; overlong words split only between UTF-8 code points,
-// and explicit newlines remain line breaks on both desktop and Android.
-std::vector<std::string> wrap_text(std::string_view text,
-                                    const ws::ui::r2d::Font& font,
-                                    float max_w) {
-  std::vector<std::string> out;
-  std::string line;
-  std::string word;
-  const auto flush_word = [&]() {
-    if (word.empty()) {
-      return;
-    }
-    const std::string candidate = line.empty() ? word : line + " " + word;
-    if (!line.empty() && font.measure_text(candidate.c_str()) > max_w) {
-      out.push_back(std::move(line));
-      line.clear();
-    }
-    // Split overlong words only at UTF-8 code-point boundaries. This
-    // prevents invalid byte fragments from reaching the font renderer.
-    if (font.measure_text(word.c_str()) > max_w) {
-      std::string piece;
-      for (std::size_t i = 0; i < word.size();) {
-        const unsigned char lead = static_cast<unsigned char>(word[i]);
-        std::size_t count = lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2
-                                     : (lead & 0xF0) == 0xE0 ? 3
-                                     : (lead & 0xF8) == 0xF0 ? 4 : 1;
-        count = std::min(count, word.size() - i);
-        const std::string_view cp{word.data() + i, count};
-        const std::string next = piece + std::string{cp};
-        if (!piece.empty() && font.measure_text(next.c_str()) > max_w) {
-          if (!line.empty()) {
-            out.push_back(std::move(line));
-            line.clear();
-          }
-          out.push_back(std::move(piece));
-          piece.clear();
-        }
-        piece.append(cp);
-        i += count;
-      }
-      if (!piece.empty()) {
-        if (!line.empty()) {
-          out.push_back(std::move(line));
-          line.clear();
-        }
-        line = std::move(piece);
-      }
-    } else {
-      line = line.empty() ? word : line + " " + word;
-    }
-    word.clear();
-  };
-  for (const char c : text) {
-    if (c == '\n' || c == '\r') {
-      flush_word();
-      out.push_back(std::move(line));
-      line.clear();
-    } else if (c == ' ' || c == '\t') {
-      flush_word();
-    } else {
-      word.push_back(c);
-    }
-  }
-  flush_word();
-  if (!line.empty() || out.empty()) {
-    out.push_back(std::move(line));
-  }
-  return out;
-}
-
-// HH:MM as the bubble corner spells it.
-std::string stamp_hhmm(int hh, int mm) {
-  char buf[8];
-  std::snprintf(buf, sizeof(buf), "%02d:%02d", ((hh < 0 || hh > 23) ? 0 : hh),
-                ((mm < 0 || mm > 59) ? 0 : mm));
-  return buf;
-}
-
-// The UI face: the BUNDLED Inter by default, with a path override for
-// custom fonts - WS_FONT_PATH wins when it is set and loadable, the
-// bundled face answers otherwise (playground's helper, this app's copy:
-// one constant per TU, the platform boundary lives in the app).
 [[nodiscard]] ws::ui::r2d::Font load_ui_font(
     float pixel_height, const ws::ui::r2d::FontBakeOptions& options) {
 #if defined(_WIN32)
@@ -472,7 +361,7 @@ std::string stamp_hhmm(int hh, int mm) {
 #else
   const char* custom_c = std::getenv("WS_FONT_PATH");
 #endif
-  if (custom_c) {
+  if (custom_c != nullptr) {
     ws::ui::r2d::Font loaded =
         ws::ui::r2d::load_font(custom_c, pixel_height, options);
     if (!loaded.empty()) {
@@ -481,7 +370,6 @@ std::string stamp_hhmm(int hh, int mm) {
 #endif
       return loaded;
     }
-    // A dead override falls through to the bundled face.
   }
 #if defined(_WIN32)
   free(custom);
@@ -489,15 +377,14 @@ std::string stamp_hhmm(int hh, int mm) {
   return ws::ui::r2d::load_default_font(pixel_height, options);
 }
 
-// The gui's own spellings this TU writes often enough to want short.
-using ws::ui::gui::Rect;
-using ws::ui::gui::WidgetId;
-using ws::ui::gui::TextInputResult;
-using ws::ui::gui::TextInputState;
+std::string stamp_hhmm(int hh, int mm) {
+  char buf[8];
+  std::snprintf(buf, sizeof(buf), "%02d:%02d",
+                (hh < 0 || hh > 23) ? 0 : hh,
+                (mm < 0 || mm > 59) ? 0 : mm);
+  return buf;
+}
 
-// The gui: the v3 WhatsApp face - a teal header over a scrolling bubble
-// feed over the input bar. All input flows through the gui widgets, all
-// drawing through r2d; chatter draws no ImGui windows.
 class ChatterApp final : public ws::ui::App {
  public:
   ChatterApp(ws::ui::AppConfig config,
@@ -505,42 +392,35 @@ class ChatterApp final : public ws::ui::App {
       : ws::ui::App(std::move(config)),
         options_(std::move(core_options)) {}
 
-  // Joins the net thread. Call after run() returns (both entries do) so
-  // the core stops before the app object destructs.
   void stop_net() { core_.stop(); }
 
  protected:
   void on_setup() override {
     scale_ = ui_scale();
-    // The light-chrome bake: dark-on-light text needs the ~1.05 gamma the
-    // light stock uses, not the 1.6 the dark chrome lifts with - a 1.6
-    // bake on white reads as a bold weight at best, a smear at worst.
+    theme_dark_ = prefers_dark();
+    theme_ = theme_dark_ ? gui::default_dark() : gui::default_light();
+
     const ws::ui::r2d::FontBakeOptions bake =
-        ws::ui::r2d::FontBakeOptions::light_chrome();
-    font_ = load_ui_font(15.0f * scale_, bake);
+        bake_options_for(theme_dark_);
+    font_ = load_ui_font(theme_.regular.size * scale_, bake);
     font_strong_ = ws::ui::r2d::load_default_font(
-        ws::ui::r2d::DefaultFontWeight::semibold, 15.0f * scale_, bake);
-    font_small_ = ws::ui::r2d::load_default_font(
-        ws::ui::r2d::DefaultFontWeight::regular, 11.0f * scale_, bake);
-    chrome_ = ws::ui::gui::kDefaultChrome.scaled(scale_);
+        ws::ui::r2d::DefaultFontWeight::semibold,
+        theme_.bold.size * scale_, bake);
+
+    chrome_ = theme_.chrome.scaled(scale_);
     chrome_.font = font_.empty() ? nullptr : &font_;
     chrome_.font_strong =
         font_strong_.empty() ? nullptr : &font_strong_;
+
     core_.start(options_);
-    // The selftest row: CHATTER_SELFTEST=1 makes this copy open the
-    // conversation itself once (a "hello" and a longer line, the own-
-    // bubble and wrap paths' visual proof under a headless harness) -
-    // nothing about the protocol changes, the sends are ordinary ones.
     if (std::getenv("CHATTER_SELFTEST") != nullptr) {
       core_.send("hello from alice!");
-      core_.send("and here is a longer line that should wrap onto "
-                 "two rows inside the green bubble");
+      core_.send("and here is a longer line that should wrap in the stock "
+                 "conversation panel");
     }
   }
 
   void on_update() override {
-    // Adopt everything the net thread queued since the last frame; a new
-    // tail while we sit at the floor keeps the pin.
     std::vector<ChatLine> arrived = core_.pull();
     for (ChatLine& line : arrived) {
       lines_.push_back(std::move(line));
@@ -552,483 +432,126 @@ class ChatterApp final : public ws::ui::App {
 
     const ws::ui::r2d::FrameSize frame = ws::ui::r2d::frame_size();
     const float pad = chrome_.padding;
-    const float line_h =
-        font_.empty() ? chrome_.control_height : font_.line_height();
-    const float small_h =
-        font_small_.empty() ? line_h : font_small_.line_height();
-
-    // The bottom lift: on Android the navigation bar (3-button or
-    // gesture) overlays the surface's bottom edge; poll it and park the
-    // input bar above it. Desktop answers 0 forever.
     const float inset = static_cast<float>(bottom_inset());
+    const float width = std::max(0.0f, frame.width - pad * 2.0f);
+    const float header_h =
+        chrome_.control_height + (font_.empty() ? chrome_.control_height
+                                                : font_.line_height()) +
+        pad * 2.0f + chrome_.spacing;
+    const float composer_h = chrome_.control_height + pad * 2.0f;
+    const float header_y = pad;
+    const float composer_y =
+        std::max(header_y + header_h + chrome_.spacing,
+                 frame.height - inset - pad - composer_h);
+    const Rect header{pad, header_y, width, header_h};
+    const Rect feed{pad, header.y + header.height + chrome_.spacing, width,
+                    std::max(0.0f, composer_y -
+                                        (header.y + header.height +
+                                         chrome_.spacing * 2.0f))};
+    const Rect composer{pad, composer_y, width, composer_h};
 
-    // The chrome bands, WhatsApp's own ladder: header, feed, input bar.
-    const float header_h = pad * 2.0f + line_h + small_h;
-    const float bar_h = pad * 2.0f + chrome_.control_height;
-    const Rect header{0.0f, 0.0f, frame.width, header_h};
-    const Rect feed{0.0f, header_h, frame.width,
-                    std::max(0.0f, frame.height - header_h - bar_h - inset)};
-    const Rect bar{0.0f, feed.y + feed.height, frame.width, bar_h};
-
-    // --- the feed's scroll: wheel, drag, and the stick-to-bottom pin ---
-    // content_h is measured THIS frame (the walk below lays the bubbles
-    // top-down into `layout_y`); the wheel and drag read it one frame
-    // stale, like every immediate-mode scroll. Pinned: at the floor (or
-    // within a line of it) the offset tracks the content so the newest
-    // bubble stays at the bottom; lifting the finger off the floor
-    // breaks the pin, and the chip returns it.
-    const float view_h = std::max(0.0f, feed.height - pad * 2.0f);
-    float content_h = 0.0f;
-    scroll_input(feed, view_h, pad);
-    if (at_floor_) {
-      scroll_ = std::max(0.0f, content_h_ - view_h);  // last frame's height: pinned
-    }
-    const float scroll = std::min(scroll_, std::max(0.0f, content_h_ - view_h));
-
+    const ws::input::InputFrame& input = ws::input::frame_input();
+    gui_.begin_frame(input);
     ws::ui::r2d::begin();
-    ws::ui::r2d::draw_quad(0.0f, 0.0f, frame.width, frame.height, kPaper);
-    ws::ui::r2d::draw_quad(header.x, header.y, header.width, header.height,
-                           kHeader);
+    ws::ui::r2d::draw_quad(0.0f, 0.0f, frame.width, frame.height,
+                           chrome_.bar_bg);
+    gui_.begin_layer(gui::Layer::base);
 
-    // The header: identity as the title, the live room line under it.
-    if (!font_.empty()) {
-      const int n = core_.peers();
-      const char* who =
-          core_.serving() ? (n == 1 ? " member" : " members")
-                          : (n == 1 ? " peer" : " peers");
-      const std::string title = core_.name();
-      const std::string sub = "port " + std::to_string(core_.port()) +
-                              ", " + std::to_string(n) + who +
-                              ", tap to type";
-      ws::ui::r2d::draw_text(pad, header.y + pad, title.c_str(), font_,
-                             kHeaderTitle);
-      if (!font_small_.empty()) {
-        ws::ui::r2d::draw_text(pad, header.y + pad + line_h, sub.c_str(),
-                               font_small_, kHeaderSub);
-      }
-    }
+    // Standard application header: stock panel, heading and secondary
+    // metadata. Theme tokens provide all colors and typography.
+    (void)gui::begin_panel(gui_, layout_, chrome_, "header", header);
+    gui::heading(layout_, chrome_, "Chatter");
+    const int peers = core_.peers();
+    const std::string status =
+        core_.name() + "  ·  " +
+        (core_.serving() ? "Room host" : "LAN participant") +
+        "  ·  " + std::to_string(peers) +
+        (peers == 1 ? " connection" : " connections") +
+        "  ·  port " + std::to_string(core_.port());
+    gui::text(layout_, chrome_, status.c_str());
+    gui::end_panel(gui_, layout_);
 
-    // --- the feed: bubbles laid top-down inside the scrolled window ---
-    // The walk measures with the font's own metrics; a failed font load
-    // degrades to one small bar per line (tinted by sender), so the chat
-    // still reads as visibly live.
-    ws::ui::r2d::push_clip(feed.x, feed.y, feed.width, feed.height);
-    const float bubble_max = feed.width * 0.72f;
-    const float bubble_pad = 8.0f * scale_;
-    const float bubble_gap = 6.0f * scale_;
-    const float bubble_tail = 9.0f * scale_;
-    float y = feed.y + pad - scroll + std::max(0.0f, view_h - content_h_);
-    std::string_view prev_name;
-    bool have_prev = false;
-    // The day chip: the feed opens on WhatsApp's date divider, the one
-    // badge every chat carries ("TODAY"), riding centered under the
-    // first bubble's gap.
-    {
-      const float chip_h = small_h + bubble_pad * 0.6f;
-      content_h += chip_h + bubble_gap;
-      if (!font_small_.empty() && y + chip_h > feed.y &&
-          y < feed.y + feed.height) {
-        const std::string label = "TODAY";
-        const float cw =
-            font_small_.measure_text(label.c_str()) + bubble_pad * 2.4f;
-        const float px = feed.x + (feed.width - cw) * 0.5f;
-        ws::ui::r2d::draw_rounded_quad(px, y, cw, chip_h, chip_h * 0.5f,
-                                       ws::ui::r2d::rgba(255, 255, 255, 235));
-        ws::ui::r2d::draw_text(px + bubble_pad * 1.2f, y + bubble_pad * 0.3f,
-                               label.c_str(), font_small_, kPillText);
-      }
-      y += chip_h + bubble_gap;
-    }
-    for (const ChatLine& line : lines_) {
-      const float bubble_room = bubble_max - bubble_pad * 2.0f - 40.0f * scale_;
-      const std::vector<std::string> wrapped =
-          font_.empty() ? std::vector<std::string>{line.text}
-                        : wrap_text(line.text, font_, bubble_room);
-      const float text_w = [&]() {
-        float w = 0.0f;
-        if (font_.empty()) {
-          return 60.0f * scale_;
-        }
-        for (const std::string& one : wrapped) {
-          w = std::max(w, font_.measure_text(one.c_str()));
-        }
-        return w;
-      }();
-      const float stamp_w =
-          font_small_.empty() ? 0.0f : font_small_.measure_text("00:00") +
-                                           18.0f * scale_;
-      const float name_h = (line.system || line.name == "you" ||
-                            font_strong_.empty())
-                                ? 0.0f
-                                : small_h;
-      const float body_h =
-          (line.system ? small_h
-                        : line_h * static_cast<float>(wrapped.size())) +
-          (line.system ? 0.0f : 4.0f * scale_);
-      const float bubble_h = name_h + body_h + bubble_pad * 2.0f;
-      const float bubble_w = line.system
-                                 ? std::min(bubble_max * 0.8f,
-                                            text_w + bubble_pad * 2.0f)
-                                 : std::min(bubble_max, std::max(
-                                     text_w + bubble_pad * 2.0f + stamp_w,
-                                     60.0f * scale_));
-      content_h += bubble_h + bubble_gap;
-
-      // The pill: a system line centered, small, translucent over the
-      // wallpaper (WhatsApp's "messages are encrypted" chip style).
-      if (line.system) {
-        if (y + bubble_h > feed.y && y < feed.y + feed.height) {
-          const float px =
-              feed.x + (feed.width - bubble_w) * 0.5f;
-          ws::ui::r2d::draw_rounded_quad(px, y, bubble_w, bubble_h,
-                                         bubble_h * 0.5f,
-                                         ws::ui::r2d::rgba(255, 255, 255, 235));
-          if (!font_small_.empty()) {
-            ws::ui::r2d::draw_text(px + bubble_pad, y + bubble_pad,
-                                   line.text.c_str(), font_small_,
-                                   kPillText);
-          }
-        }
-        y += bubble_h + bubble_gap;
-
-        have_prev = false;
-        continue;
-      }
-
-      // A foreign run hides the name on the second and later lines of
-      // the run (WhatsApp's own group rule), so a run of bubbles from
-      // one sender reads as one block with one name.
-      const bool mine = line.name == "you";
-      const bool show_name = !mine && (!have_prev || prev_name != line.name);
-      const float name_used = show_name ? small_h : 0.0f;
-      const float bh = bubble_h - name_h + name_used;
-
-      // Degraded feed (no font): one tinted bar per line.
-      if (font_.empty()) {
-        const float bx = mine ? feed.x + feed.width - pad - 80.0f * scale_
-                              : feed.x + pad;
-        ws::ui::r2d::draw_quad(bx, y + line_h * 0.5f, 80.0f * scale_,
-                               3.0f * scale_,
-                               mine ? kHeader : name_color(line.name));
-        y += line_h + bubble_gap;
-
-        prev_name = line.name;
-        have_prev = true;
-        continue;
-      }
-
-      const float bx =
-          mine ? feed.x + feed.width - pad - bubble_w : feed.x + pad;
-      // The face, the tail, the text, the corner: rounded corners at
-      // the three far ends, a small square tail toward the sender's
-      // edge, the timestamp bottom-INSIDE the bubble, the check beside
-      // it on own sends.
-      ws::ui::r2d::draw_rounded_quad(
-          bx + (mine ? 0.0f : bubble_tail), y, bubble_w - bubble_tail, bh,
-          10.0f * scale_, mine ? kBubbleMine : kBubbleTheirs);
-      ws::ui::r2d::draw_quad(
-          mine ? bx : bx + bubble_w - bubble_tail,
-          y + bh - 14.0f * scale_, bubble_tail, 14.0f * scale_,
-          mine ? kBubbleMine : kBubbleTheirs);
-      float ty = y + bubble_pad;
-      if (show_name && !font_strong_.empty()) {
-        ws::ui::r2d::draw_text(bx + (mine ? bubble_pad : bubble_tail + bubble_pad),
-                               ty, line.name.c_str(), font_strong_,
-                               name_color(line.name));
-        ty += small_h;
-      } else if (name_h > 0.0f) {
-        ty += small_h;  // the run's hidden name keeps its blank
-      }
-      for (const std::string& one : wrapped) {
-        ws::ui::r2d::draw_text(bx + (mine ? bubble_pad : bubble_tail + bubble_pad),
-                               ty, one.c_str(), font_, kText);
-        ty += line_h;
-      }
-      // The corner: HH:MM riding inside the bubble's bottom-right, with
-      // the delivery check on own sends - a small V of two quads (the
-      // bake's ASCII range carries no check glyph; drawn beats tofu).
-      if (!font_small_.empty()) {
-        const std::string stamp = stamp_hhmm(line.sent_hh, line.sent_mm);
-        const float sw = font_small_.measure_text(stamp.c_str()) +
-                         (mine ? 14.0f * scale_ : 0.0f);
-        const float sx =
-            bx + (mine ? 0.0f : bubble_tail) + bubble_w - bubble_tail -
-            sw - bubble_pad;
-        const float sy = y + bh - small_h - bubble_pad * 0.5f;
-        ws::ui::r2d::draw_text(sx, sy, stamp.c_str(), font_small_, kTimeDim);
-        if (mine) {
-          // The delivery ticks: the single check's V, and a second V
-          // beside it once the line has at least one peer to have
-          // reached (delivered, the pair; a lone copy reads as sent).
-          const float vx = sx + font_small_.measure_text(stamp.c_str()) +
-                           5.0f * scale_;
-          const float vy = sy + small_h * 0.62f;
-          const float t = 1.4f * scale_;   // stroke thickness
-          const float arm = 4.5f * scale_;  // each arm's run
-          // A peer being connected is not an acknowledgement. Keep the
-          // single "sent" tick until the protocol has message IDs + ACKs.
-          const int marks = 1;
-          for (int m = 0; m < marks; ++m) {
-            const float ox = vx + m * 4.5f * scale_;
-            // Left arm: from up-left down to the meeting point.
-            const float arm_l[4][2] = {
-                {ox - arm, vy - arm * 0.9f - t},
-                 {ox - arm + t, vy - arm * 0.9f},
-                 {ox, vy}, {ox, vy}};
-            // Right arm: from the meeting point up to the top-right.
-            const float arm_r[4][2] = {
-                {ox, vy},
-                 {ox + arm * 0.7f - t, vy - arm * 1.4f + t},
-                 {ox + arm * 0.7f, vy - arm * 1.4f},
-                 {ox + arm * 0.7f, vy - arm * 1.4f}};
-            const float zeros[4][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
-            const float gray[4][4] = {
-                {0.5f, 0.55f, 0.5f, 1}, {0.5f, 0.55f, 0.5f, 1},
-                {0.5f, 0.55f, 0.5f, 1}, {0.5f, 0.55f, 0.5f, 1}};
-            ws::ui::r2d::draw_vertex_quad(arm_l, zeros, gray);
-            ws::ui::r2d::draw_vertex_quad(arm_r, zeros, gray);
-          }
-        }
-      }
-      y += bh + bubble_gap;
-
-      prev_name = line.name;
-      have_prev = true;
-    }
-    if (content_h > 0.0f) {
-      content_h -= bubble_gap;  // the walk's trailing gap is not content
-    }
-    ws::ui::r2d::pop_clip();
-
-    // The "new messages" chip: a small teal pill riding the feed's floor
-    // while the pin is off, one tap away from returning it.
-    if (!at_floor_ && content_h_ > view_h && !font_small_.empty()) {
-      const std::string label = "new messages";
-      const float lw = font_small_.measure_text(label.c_str()) +
-                       bubble_pad * 2.0f;
-      const Rect chip{feed.x + (feed.width - lw) * 0.5f,
-                      bar.y - small_h - bubble_pad, lw,
-                      small_h + bubble_pad * 0.5f};
-      ws::ui::r2d::draw_rounded_quad(chip.x, chip.y, chip.width, chip.height,
-                                     chip.height * 0.5f, kChip);
-      ws::ui::r2d::draw_text(chip.x + bubble_pad,
-                             chip.y + bubble_pad * 0.25f, label.c_str(),
-                             font_small_, kHeaderTitle);
-      chip_rect_ = chip;
+    // Conversation content uses the library's scroll panel. The
+    // panel owns wheel, touch-drag, clipping and scrollbar behavior.
+    (void)gui::begin_scroll_panel(gui_, layout_, chrome_, "conversation",
+                                  feed);
+    if (lines_.empty()) {
+      gui::heading(layout_, chrome_, "No messages yet");
+      gui::text_wrapped(layout_, chrome_,
+                        "Messages from LAN peers and relay participants "
+                        "will appear here.");
     } else {
-      chip_rect_ = {};
-    }
-
-    // The input bar's strip, under the feed.
-    ws::ui::r2d::draw_quad(bar.x, bar.y, bar.width, bar.height, kBar);
-    ws::ui::r2d::end();
-
-    // --- the input bar: the field and the send button, gui widgets ---
-    ws::ui::r2d::set_layer(10);
-    ws::ui::r2d::begin();
-    gui_.begin_frame(ws::input::frame_input());
-    // The chip rides this layer's pass too: a hit test over its drawn
-    // rect (the draw happened in the world pass; only the click lives
-    // here), one tap re-pins the feed.
-    if (chip_rect_.width > 0.0f) {
-      const WidgetId chip_id = gui_.ids().id("newmsg");
-      if (ws::ui::gui::button_behavior(gui_, chip_id, chip_rect_).clicked) {
-        at_floor_ = true;
+      gui::ChromeTheme secondary = chrome_;
+      secondary.text = chrome_.text_secondary;
+      gui::ChromeTheme sender_theme = chrome_;
+      if (!font_strong_.empty()) {
+        sender_theme.font = &font_strong_;
       }
-    }
-    // A WhatsApp-height row: field filling the width minus the button,
-    // the round green button beside it. The row opens as a bare layout
-    // panel (the strip's face is already drawn; the widgets need only
-    // the cursor). The field is the stock behavior (caret, selection,
-    // clipboard, undo) under this app's own look: the WhatsApp white
-    // pill, dark text, the dim placeholder while empty - the split-halves
-    // seam text_input exposes for exactly this.
-    const float send_w = chrome_.control_height * 1.2f;
-    const float field_w = content_width(bar, pad) - send_w - chrome_.spacing;
-    (void)layout_.begin_panel(bar, pad, chrome_.spacing);
-    if (field_w > 20.0f) {
-      const Rect row = layout_.next(field_w, chrome_.control_height);
-      field_row_ = row;
-      gui_.ids().push("bar");
-      const WidgetId field_id = gui_.ids().id("message");
-      TextInputState& edit = gui_.persistent_state<TextInputState>(field_id);
-      const TextInputResult result = ws::ui::gui::text_input_behavior(
-          gui_, field_id, row, input_, kInputCapacity, edit, chrome_);
-      gui_.ids().pop();
-      // The look: the white pill, the placeholder or text, the caret.
-      ws::ui::r2d::draw_rounded_quad(row.x, row.y, row.width, row.height,
-                                     row.height * 0.5f, kField);
-      const float text_x = row.x + 12.0f * scale_;
-      if (input_[0] == '\0') {
-        ws::ui::r2d::draw_text(text_x, row.y + row.height * 0.5f -
-                                         (font_.empty() ? 0.0f : font_.line_height() * 0.5f),
-                               "type a message", font_, kPillText);
-      } else {
-        ws::ui::r2d::draw_text(text_x, row.y + row.height * 0.5f -
-                                         (font_.empty() ? 0.0f : font_.line_height() * 0.5f),
-                               input_, font_, kText);
-        // The caret rides the behavior's mapped x, blinking.
-        if (result.focused && result.blink < 0.5f) {
-          ws::ui::r2d::draw_quad(result.caret_x, row.y + 4.0f * scale_,
-                                 2.0f * scale_, row.height - 8.0f * scale_,
-                                 kSend);
+      for (const ChatLine& line : lines_) {
+        if (line.system) {
+          gui::text_wrapped(layout_, secondary, line.text.c_str());
+        } else {
+          const std::string sender =
+              line.name == "you" ? "You" : line.name;
+          gui::text(layout_, sender_theme, sender.c_str());
+          layout_.same_line();
+          const std::string stamp =
+              stamp_hhmm(line.sent_hh, line.sent_mm);
+          gui::text(layout_, secondary, stamp.c_str());
+          gui::text_wrapped(layout_, chrome_, line.text.c_str());
         }
+        gui::separator(layout_, chrome_);
       }
     }
-    layout_.end_panel();
-    // Enter in the field is the desktop's send edge (the field never
-    // takes Enter itself); the button answers for touch. The id is
-    // derived in the pushed scope the field already used ("message"
-    // under "bar").
-    gui_.ids().push("bar");
+    gui::end_scroll_panel(gui_, layout_, chrome_);
+
+    // Stock text field + primary button. The field keeps the library's
+    // selection, caret, keyboard and clipboard behavior on both targets.
+    (void)gui::begin_panel(gui_, layout_, chrome_, "composer", composer);
+    constexpr float kSendWidth = 84.0f;
+    const float input_width =
+        std::max(48.0f, layout_.remaining_width() -
+                            kSendWidth * scale_ - chrome_.spacing);
+    gui::text_input(gui_, layout_, chrome_, "message", input_,
+                    kInputCapacity, input_width);
+    layout_.same_line();
+    const bool send_clicked =
+        gui::button(gui_, layout_, chrome_, "Send", kSendWidth * scale_, {},
+                    false, gui::ButtonStyle::primary);
+
     const WidgetId field_id = gui_.ids().id("message");
-    gui_.ids().pop();
-    const bool enter = gui_.input().key_pressed[ws::input::keys::kEnter];
-    const bool send_tapped = send_button(bar, pad);
-    if ((enter && field_focus_) || send_tapped) {
-      if (input_[0] != '\0') {
-        core_.send(input_);
-        input_[0] = '\0';  // the field's own caret reset rides the next frame
-      }
-    }
     field_focus_ = gui_.is_focused(field_id);
-    gui_.end_frame();
+    const bool enter =
+        gui_.input().key_pressed[ws::input::keys::kEnter] && field_focus_;
+    if ((send_clicked || enter) && input_[0] != '\0') {
+      core_.send(input_);
+      input_[0] = '\0';
+    }
+    gui::end_panel(gui_, layout_);
+
+    gui_.end_layer();
     ws::ui::r2d::end();
     ws::ui::r2d::set_layer(0);
-
-    // The scroll bookkeeping rides the frame's measurements: content_h_
-    // for the next frame's wheel/drag/pin. The pin itself is owned only
-    // by its transitions (wheel/drag off the floor, drag/chip back to it);
-    // re-deriving it here would re-pin the moment a short feed shrinks
-    // under a lifted finger, which is not the WhatsApp behavior.
-    content_h_ = content_h;
-    view_h_ = view_h;
+    gui_.end_frame();
   }
 
  private:
-  // The feed's wheel-and-drag scroll, run before the draw: the wheel
-  // moves the offset directly (mouse frames only), and a touch drag
-  // that started inside the feed follows the finger past the threshold
-  // (the tap stays a tap under it, the scroll eats it over). The pin
-  // breaks the moment the scroll leaves the floor.
-  void scroll_input(const Rect& feed, float view_h, float pad) {
-    (void)pad;
-    const ws::input::InputFrame& in = ws::input::frame_input();
-    const float line_h =
-        font_.empty() ? chrome_.control_height : font_.line_height();
-    if (in.mouse_present && in.scroll_dy != 0.0f) {
-      scroll_ -= in.scroll_dy * line_h * 2.0f;
-      at_floor_ = false;
-    }
-    for (const ws::input::TouchPoint& t : in.touches) {
-      if (!t.down && !t.released) {
-        continue;  // an empty slot (entries linger one frame past release)
-      }
-      const bool inside = t.x >= feed.x && t.x < feed.x + feed.width &&
-                          t.y >= feed.y && t.y < feed.y + feed.height;
-      if (t.pressed && inside) {
-        drag_id_ = t.id;
-        drag_last_y_ = t.y;
-        drag_active_ = false;
-      } else if (t.id == drag_id_ && t.down) {
-        if (!drag_active_ &&
-            std::abs(t.y - drag_last_y_) > chrome_.drag_threshold) {
-          drag_active_ = true;
-          at_floor_ = false;
-        }
-        if (drag_active_) {
-          scroll_ -= (t.y - drag_last_y_);
-        }
-        drag_last_y_ = t.y;
-      } else if (t.id == drag_id_ && t.released) {
-        drag_id_ = ws::input::kNoPointer;
-        drag_active_ = false;
-      }
-    }
-    scroll_ = std::clamp(scroll_, 0.0f, std::max(0.0f, content_h_ - view_h));
-    // A drag that lands back at the floor re-pins (WhatsApp returns to
-    // live-follow on the fling's own end).
-    if (drag_active_ && content_h_ > view_h &&
-        scroll_ >= content_h_ - view_h - line_h * 0.5f) {
-      at_floor_ = true;
-    }
-  }
-
-  // The send button: the WhatsApp round green disc with the paper-plane
-  // arrow, drawn and hit through the widget seam's split halves - the
-  // behavior (identity, focus, the click) with a custom draw (the disc
-  // and glyph over it, no label). One third of the control height in
-  // from the bar's right edge.
-  bool send_button(const Rect& bar, float pad) {
-    const float dia = chrome_.control_height * 0.92f;
-    const float cy = bar.y + (bar.height - dia) * 0.5f;
-    const float cx = bar.x + bar.width - pad - dia;
-    const Rect disc{cx, cy, dia, dia};
-    gui_.ids().push("bar");
-    const WidgetId id = gui_.ids().id("send");
-    const ws::ui::gui::ButtonResult result =
-        ws::ui::gui::button_behavior(gui_, id, disc);
-    gui_.ids().pop();
-    // The custom look: the hovered rung, the disc, the glyph - a
-    // paper-plane wedge the vertex triangles spell.
-    const bool hot = result.hit.hovered || result.hit.pressed;
-    const std::uint32_t disc_face =
-        (result.hit.pressed || hot) ? kSendHover : kSend;
-    ws::ui::r2d::draw_rounded_quad(disc.x, disc.y, disc.width, disc.height,
-                                   disc.width * 0.5f, disc_face);
-    // The glyph: the send arrow - one clean solid white triangle, nose
-    // to the right (the play-arrow shape every messenger's empty-state
-    // send wears). draw_vertex_quad spells a triangle as the degenerate
-    // quad the index pattern takes; the disc's green shows nowhere
-    // inside it.
-    {
-      const float cxg = disc.x + dia * 0.5f;
-      const float cyg = disc.y + dia * 0.5f;
-      const float r = dia * 0.20f;
-      const float positions0[4][2] = {
-          {cxg - r * 0.75f, cyg - r}, {cxg + r, cyg},
-          {cxg - r * 0.75f, cyg + r}, {cxg - r * 0.75f, cyg + r}};
-      const float zeros[4][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
-      const float white[4][4] = {{1, 1, 1, 1}, {1, 1, 1, 1},
-                                 {1, 1, 1, 1}, {1, 1, 1, 1}};
-      ws::ui::r2d::draw_vertex_quad(positions0, zeros, white);
-    }
-    return result.activated();
-  }
-
-  // The bar's usable width between its paddings.
-  static float content_width(const Rect& bar, float pad) {
-    return std::max(0.0f, bar.width - pad * 2.0f);
-  }
-
   static constexpr std::size_t kShownLines = 200;
   static constexpr int kInputCapacity = 256;
 
   chatter::ChatCore core_;
-  chatter::ChatCore::Options options_;  // handed to start() in on_setup
-  ws::ui::gui::GuiContext gui_;
-  ws::ui::gui::LayoutCursor layout_;
-  ws::ui::gui::ChromeTheme chrome_;
+  chatter::ChatCore::Options options_;
+  gui::GuiContext gui_;
+  gui::LayoutCursor layout_;
+  gui::ThemeData theme_;
+  gui::ChromeTheme chrome_;
   ws::ui::r2d::Font font_;
-  ws::ui::r2d::Font font_strong_;  // the semibold sibling (sender labels)
-  ws::ui::r2d::Font font_small_;   // the small face (stamps, pills, header sub)
+  ws::ui::r2d::Font font_strong_;
   float scale_ = 1.0f;
+  bool theme_dark_ = false;
   std::vector<ChatLine> lines_;
-
-  // The feed's scroll state (app-owned; the pin and the chip own it).
-  float scroll_ = 0.0f;        // px the content is shifted up by
-  float content_h_ = 0.0f;      // last frame's laid content height
-  float view_h_ = 0.0f;        // last frame's viewport height
-  bool at_floor_ = true;       // stick-to-bottom pin
-  ws::input::PointerId drag_id_ = ws::input::kNoPointer;
-  float drag_last_y_ = 0.0f;
-  bool drag_active_ = false;
-
-  // The input bar's state: the field's buffer and its focus answer.
   char input_[kInputCapacity] = {};
   bool field_focus_ = false;
-  Rect chip_rect_ = {};
-  Rect field_row_ = {};  // last frame's field row (the caret's backdrop)
 };
 
 }  // namespace
