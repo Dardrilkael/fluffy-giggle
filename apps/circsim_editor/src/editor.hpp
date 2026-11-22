@@ -601,17 +601,45 @@ struct ResultsCache {
     // consumes points synchronously, so no draw holds them).
     std::vector<canvas::Point> scratch_pts;
 
-    // E1's persistent markers: sample indices planted by a click (a
-    // sub-threshold left release in the frame - a drag is a zoom, a
-    // click is a question), at most `kMaxMarkers` of them. The hover
-    // answers while the pointer rests; a MARKER stays for the readout
-    // the legend spells beside each signal row (the "exact value at a
-    // point I choose" the hover alone cannot keep). Per-table view
-    // state beside `visible`/`view`: same key shape, reset on a
-    // delivery, keyed to the table the click planted them in.
+    // E1's persistent markers: sample indices meant to be planted by a
+    // click (a sub-threshold left release in the frame - a drag is a
+    // zoom, a click is a question), at most `kMaxMarkers` of them. The
+    // hover answers while the pointer rests; a MARKER stays for the
+    // readout the legend spells beside each signal row (the "exact
+    // value at a point I choose" the hover alone cannot keep).
+    // NOTE: nothing plants them yet - the click handler E1 describes was
+    // never written (the plot PNG export is the one reader). Their
+    // lifecycle is in place for when it is: per-table view state beside
+    // `visible`/`view`, same key shape - dropped on a table switch
+    // (sync_view) and on a delivery (begin_delivery).
     static constexpr std::size_t kMaxMarkers = 8;
     std::vector<int> markers;
     std::size_t markers_for = kNoTable;  // the table `markers` belong to
+
+    // A run was just delivered into `run` (the caller assigned it):
+    // every piece of per-delivery state resets HERE, in one place. The
+    // app's delivery block and each test bench used to copy this list by
+    // hand and had to be kept in step - the markers' reset was forgotten
+    // in all of them.
+    void begin_delivery() {
+        // A new run_id re-keys the per-signal stats, the decimation keeps
+        // and the retained geometry (a same-indexed table of the new run
+        // is a different table even where the address matches).
+        ++run_id;
+        visible_for = kNoTable;
+        visible.clear();
+        x_sorted_for = kNoTable;
+        x_runs_for = kNoTable;
+        hover = -1;
+        // A fresh run's waveforms start on the auto fit: the old plot's
+        // zoom/pan window, any in-flight gesture and the markers belong
+        // to numbers that no longer exist.
+        view = PlotView{};
+        view_for = kNoTable;
+        gesture = PlotGesture{};
+        markers.clear();
+        markers_for = kNoTable;
+    }
 };
 
 // One editable field's caller-owned buffer (the Properties panel's

@@ -165,11 +165,16 @@ void sync_visibility(Editor& ed, const ws::spice::Table& t) {
 // fresh run, which resets view_for) drops back to the auto fit. Synced
 // for EVERY table, once a frame, like sync_visibility - a table with no
 // plot (.op: value rows) never reaches draw_plot, so a reset that lived
-// there missed tran -> op -> tran and the old zoom came back.
+// there missed tran -> op -> tran and the old zoom came back. The
+// markers are sample indices into one table and ride the same rule.
 void sync_view(ResultsCache& cache) {
     if (cache.view_for != cache.table) {
         cache.view = PlotView{};
         cache.view_for = cache.table;
+    }
+    if (cache.markers_for != cache.table) {
+        cache.markers.clear();
+        cache.markers_for = cache.table;
     }
 }
 

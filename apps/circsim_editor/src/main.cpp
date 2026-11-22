@@ -1475,22 +1475,10 @@ class CircsimApp final : public ws::ui::App {
                 }
             }
             editor_.results.table = 0;
-            // The frame-budget caches' delivery key: every delivery is
-            // a new run_id, so the per-signal stats and the decimation
-            // keeps re-key (a same-indexed table of the new run is a
-            // different table even where the address matches).
-            ++editor_.results.run_id;
-            editor_.results.visible_for = editor::ResultsCache::kNoTable;
-            editor_.results.visible.clear();
-            editor_.results.x_sorted_for = editor::ResultsCache::kNoTable;
-            editor_.results.x_runs_for = editor::ResultsCache::kNoTable;
-            editor_.results.hover = -1;
-            // A fresh run's waveforms start on the auto fit: the old
-            // plot's zoom/pan window and any in-flight gesture belong
-            // to numbers that no longer exist.
-            editor_.results.view = editor::PlotView{};
-            editor_.results.view_for = editor::ResultsCache::kNoTable;
-            editor_.results.gesture = editor::PlotGesture{};
+            // Every delivery resets the per-run state in ONE call: a new
+            // run_id (the frame-budget caches' key), and the visible set,
+            // view, gesture, markers and hover of the run it replaces.
+            editor_.results.begin_delivery();
             if (!shell_->panel_host().is_open("results")) {
                 (void)shell_->panel_host().open(shell_->panels(), "results");
             }

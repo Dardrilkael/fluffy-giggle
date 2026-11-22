@@ -185,23 +185,8 @@ struct Bench {
         ed.results.run.results.tables.clear();
         ed.results.run.results.tables.push_back(std::move(table));
         ed.results.table = 0;
-        // The app's delivery bump: a new run_id re-keys the
-        // frame-budget caches (stats/decim) beside the stage-4/5 keys.
-        ++ed.results.run_id;
-        ed.results.visible_for = ResultsCache::kNoTable;
-        ed.results.visible.clear();
-        ed.results.hover = -1;
-        // The app's run delivery resets the manual view and the
-        // gesture too - the bench mirrors it (main.cpp's block).
-        ed.results.view = PlotView{};
-        ed.results.view_for = ResultsCache::kNoTable;
-        ed.results.gesture = PlotGesture{};
-        // ... and the x-sortedness key with them (main.cpp's block
-        // beside visible_for): a same-indexed table of a new run is a
-        // different axis. Stage 9's runs key rides the same reset.
-        ed.results.x_sorted_for = ResultsCache::kNoTable;
-        ed.results.x_sorted = false;
-        ed.results.x_runs_for = ResultsCache::kNoTable;
+        // The app's run delivery, by the same call (main.cpp's block).
+        ed.results.begin_delivery();
     }
 
     // The scripted mouse one draw sees. Defaults keep the stage-4
@@ -901,6 +886,70 @@ TEST_CASE("a round trip through a table without a plot drops the manual view") {
     b.ed.results.table = 0;  // and back
     b.draw();
     CHECK_FALSE(b.ed.results.view.active);
+}
+
+TEST_CASE("begin_delivery resets every piece of per-delivery state") {
+    // One call is the whole delivery reset (the app and the benches used
+    // to copy the list by hand). Dirty each field it owns, then deliver.
+    ResultsCache c;
+    c.table = 1;
+    c.visible_for = 1;
+    c.visible.assign(3u, 0u);
+    c.x_sorted_for = 1;
+    c.x_runs_for = 1;
+    c.hover = 7;
+    c.view = PlotView{true, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0};
+    c.view_for = 1;
+    c.gesture.kind = PlotGesture::Kind::Pan;
+    c.markers = {2, 5};
+    c.markers_for = 1;
+    const std::uint64_t run = c.run_id;
+
+    c.begin_delivery();
+
+    CHECK(c.run_id == run + 1u);
+    CHECK(c.visible_for == ResultsCache::kNoTable);
+    CHECK(c.visible.empty());
+    CHECK(c.x_sorted_for == ResultsCache::kNoTable);
+    CHECK(c.x_runs_for == ResultsCache::kNoTable);
+    CHECK(c.hover == -1);
+    CHECK_FALSE(c.view.active);
+    CHECK(c.view_for == ResultsCache::kNoTable);
+    CHECK(c.gesture.kind == PlotGesture::Kind::None);
+    CHECK(c.markers.empty());  // the one the hand-copied lists forgot
+    CHECK(c.markers_for == ResultsCache::kNoTable);
+}
+
+TEST_CASE("markers belong to their table: a switch drops them, a frame keeps them") {
+    Bench b;
+    b.load(ramp_table(41u));
+    b.ed.results.run.results.tables.push_back(op_table());  // table 1
+    b.draw();
+    b.ed.results.markers = {3, 17};  // planted on table 0
+
+    b.draw();  // nothing moved: they stay
+    CHECK(b.ed.results.markers == std::vector<int>{3, 17});
+
+    b.ed.results.table = 1;  // a table with no plot: still a switch
+    b.draw();
+    CHECK(b.ed.results.markers.empty());
+    CHECK(b.ed.results.markers_for == 1u);
+
+    b.ed.results.table = 0;  // and back: not resurrected
+    b.draw();
+    CHECK(b.ed.results.markers.empty());
+}
+
+TEST_CASE("a delivery drops the markers even on the same table index") {
+    // A same-indexed table of a new run is a different table: the
+    // markers' key (the table index) cannot see that, the delivery does.
+    Bench b;
+    b.load(ramp_table(41u));
+    b.draw();
+    b.ed.results.markers = {5, 9};
+    b.load(ramp_table(41u));  // the next run, table 0 again
+    b.draw();
+    CHECK(b.ed.results.markers.empty());
 }
 
 // --- stage 6: the second spine ---------------------------------------------------

@@ -101,16 +101,7 @@ struct ProfBench {
         ed.results.run.results.tables.clear();
         ed.results.run.results.tables.push_back(std::move(table));
         ed.results.table = 0;
-        ++ed.results.run_id;
-        ed.results.visible_for = ResultsCache::kNoTable;
-        ed.results.visible.clear();
-        ed.results.hover = -1;
-        ed.results.view = PlotView{};
-        ed.results.view_for = ResultsCache::kNoTable;
-        ed.results.gesture = PlotGesture{};
-        ed.results.x_sorted_for = ResultsCache::kNoTable;
-        ed.results.x_sorted = false;
-        ed.results.x_runs_for = ResultsCache::kNoTable;
+        ed.results.begin_delivery();  // main.cpp's delivery, same call
     }
 
     struct Mouse {
