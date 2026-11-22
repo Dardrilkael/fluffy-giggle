@@ -409,13 +409,14 @@ class ChatterApp final : public ws::ui::App {
     chrome_.font_strong =
         font_strong_.empty() ? nullptr : &font_strong_;
     install_clipboard(gui_);
-    install_ime_rect(gui_);
-    // The stock Android host uses ANativeActivity_showSoftInput. Chatter
-    // routes the same focus transition through its Activity shim so the
-    // request is made against a focused Java content view on the UI thread.
+#ifdef __ANDROID__
+    // NativeActivity's private content view is not accepted by newer
+    // InputMethodManager implementations. ChatterActivity routes this
+    // focus transition through the served decor view on the UI thread.
     gui_.set_ime_rect([](const Rect& rect) {
       request_chat_keyboard(rect.width > 0.0f && rect.height > 0.0f);
     });
+#endif
 
     core_.start(options_);
     if (std::getenv("CHATTER_SELFTEST") != nullptr) {
