@@ -54,19 +54,18 @@ public class ChatterActivity extends NativeActivity {
     public void showChatKeyboard() {
         runOnUiThread(() -> {
             final View decor = getWindow().getDecorView();
-            decor.setFocusableInTouchMode(true);
-            decor.requestFocus();
             final InputMethodManager imm = (InputMethodManager)
                     getSystemService(INPUT_METHOD_SERVICE);
             if (imm != null) {
-                decor.post(() -> {
-                    try {
-                        imm.showSoftInput(decor,
-                                InputMethodManager.SHOW_IMPLICIT);
-                    } catch (RuntimeException ignored) {
-                        // IME can reject a request while its window animates.
-                    }
-                });
+                try {
+                    // The decor view is InputMethodManager's served view
+                    // for NativeActivity. Passing NativeContentView here
+                    // is rejected on recent Android releases.
+                    imm.showSoftInput(decor,
+                            InputMethodManager.SHOW_IMPLICIT);
+                } catch (RuntimeException ignored) {
+                    // IME can reject a request while its window animates.
+                }
             }
         });
     }
