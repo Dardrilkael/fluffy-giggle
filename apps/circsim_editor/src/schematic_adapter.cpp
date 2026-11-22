@@ -52,7 +52,8 @@ int pin_world_dir(const ws::circsim::SymbolDef& sym, const Part& part,
 }  // namespace
 
 void SchematicAdapter::build(ws::circsim::Schematic& s,
-                              const ws::circsim::SymbolLibrary& library) {
+                              const ws::circsim::SymbolLibrary& library,
+                              const PressPose* press) {
     doc = Doc{};
     pin_node.clear();
     junction_node.clear();
@@ -62,24 +63,57 @@ void SchematicAdapter::build(ws::circsim::Schematic& s,
     schem = &s;
     lib = &library;
 
-    // Pin nodes: one per pin of every known-symbol part.
+    // Pin nodes: one per pin of every known-symbol part. (`part_sym` indexes
+    // the parts the wire pass needs to derive exit directions from, so
+    // that pass never scans the schematic per wire end.)
+    std::map<std::uint32_t,
+             std::pair<const Part*, const ws::circsim::SymbolDef*>>
+        part_sym;
     for (const Part& part : s.parts()) {
         const ws::circsim::SymbolDef* sym = library.find(part.symbol);
         if (sym == nullptr) {
             continue;  // the unknown-symbol diagnostic is ERC's
         }
+        part_sym[part.id] = {&part, sym};
+        // The press pose re-places this one part for the build (a copy
+        // only when it is re-posed; the schematic itself is never
+        // written).
+        Part posed;
+        const Part* placed = &part;
+        if (press != nullptr) {
+            if (const auto it = press->parts.find(part.id);
+                it != press->parts.end()) {
+                posed = part;
+                posed.pos = it->second;
+                placed = &posed;
+            }
+        }
         for (std::uint32_t i = 0; i < sym->pins.size(); ++i) {
             const NodeId n = doc.add_pin(
-                part.id, i, v(ws::circsim::pin_pos(*sym, part, i)));
+                part.id, i, v(ws::circsim::pin_pos(*sym, *placed, i)));
             pin_node[{part.id, i}] = n;
         }
     }
+    // Where a junction stands in this build (the press pose or stored).
+    const auto junction_pos = [&](const Junction& j) {
+        if (press != nullptr) {
+            if (const auto it = press->junctions.find(j.id);
+                it != press->junctions.end()) {
+                return it->second;
+            }
+        }
+        return j.pos;
+    };
     // Junction nodes.
     for (const Junction& j : s.junctions()) {
-        const NodeId n = doc.add_junction(v(j.pos));
+        const NodeId n = doc.add_junction(v(junction_pos(j)));
         junction_node[j.id] = n;
         node_junction[n] = j.id;
     }
+    // Persisted wire id -> the sch pieces cut from it so far (filled on
+    // its first tap; absent = the wire is still whole). Lets a tap find ITS piece without scanning
+    // every wire in the document.
+    std::map<std::uint32_t, std::vector<ws::sch::WireId>> pieces_of;
     // Wires: endpoints through the back-maps.
     for (const Wire& w : s.wires()) {
         const auto node_of = [&](const WireEndpoint& e) {
@@ -100,11 +134,10 @@ void SchematicAdapter::build(ws::circsim::Schematic& s,
         // free-ended and could run back through the part it leaves.
         const auto dir_of = [&](const WireEndpoint& e) {
             if (const PinRef* pr = std::get_if<PinRef>(&e)) {
-                const Part* part = s.find_part(pr->part);
-                const ws::circsim::SymbolDef* sym =
-                    part != nullptr ? library.find(part->symbol) : nullptr;
-                if (part != nullptr && sym != nullptr) {
-                    return pin_world_dir(*sym, *part, pr->pin);
+                const auto it = part_sym.find(pr->part);
+                if (it != part_sym.end()) {
+                    return pin_world_dir(*it->second.second, *it->second.first,
+                                         pr->pin);
                 }
             }
             return ws::sch::kDirFree;
@@ -124,6 +157,7 @@ void SchematicAdapter::build(ws::circsim::Schematic& s,
     // connected" - the adapter keeps the wire whole and the tap drops
     // out of the view (the drawing shows a dot riding a wire it no
     // longer touches).
+    std::map<NodeId, NodeId> node_remap;  // orphaned junction node -> its split
     for (const Junction& j : s.junctions()) {
         for (const std::uint32_t tapped : j.taps) {
             if (wire_ids.find(tapped) == wire_ids.end()) {
@@ -139,11 +173,12 @@ void SchematicAdapter::build(ws::circsim::Schematic& s,
             // piece descended from this persisted wire until one takes
             // it (a tap on no piece is detached - nothing to split).
             std::optional<ws::sch::Doc::Split> split;
-            for (const auto& [piece, owner] : wire_back) {
-                if (owner != tapped) {
-                    continue;
-                }
-                split = doc.split_wire(piece, v(j.pos));
+            std::vector<ws::sch::WireId>& cut = pieces_of[tapped];
+            if (cut.empty()) {
+                cut.push_back(wire_ids[tapped]);  // not cut yet: the whole wire
+            }
+            for (const ws::sch::WireId piece : cut) {
+                split = doc.split_wire(piece, v(junction_pos(j)));
                 if (split.has_value()) {
                     break;
                 }
@@ -160,21 +195,11 @@ void SchematicAdapter::build(ws::circsim::Schematic& s,
             junction_node[j.id] = split->junction;
             node_junction.erase(old_node);
             node_junction[split->junction] = j.id;
-            for (ws::sch::Wire& w : doc.wires) {
-                if (w.a == old_node) {
-                    w.a = split->junction;
-                }
-                if (w.b == old_node) {
-                    w.b = split->junction;
-                }
-            }
-            // Drop the orphaned original from the doc.
-            doc.nodes.erase(
-                std::remove_if(doc.nodes.begin(), doc.nodes.end(),
-                               [&](const ws::sch::Node& n) {
-                                   return n.id == old_node;
-                               }),
-                doc.nodes.end());
+            // The re-bind and the orphan removal are deferred to ONE pass
+            // after every tap (a per-tap sweep of all wires and nodes made
+            // the build quadratic in the tap count). A junction that taps
+            // several wires remaps old -> split1 -> split2: resolved below.
+            node_remap[old_node] = split->junction;
             // BOTH halves descend from the same persisted wire: the
             // first took the original sch id's SLOT (a fresh id in a
             // reused slot), the second is brand new. Map them both so
@@ -182,7 +207,27 @@ void SchematicAdapter::build(ws::circsim::Schematic& s,
             // the persisted wire).
             wire_back[split->first] = tapped;
             wire_back[split->second] = tapped;
+            cut.push_back(split->second);  // first == the piece itself
         }
+    }
+    if (!node_remap.empty()) {
+        const auto resolve = [&](NodeId n) {
+            for (auto it = node_remap.find(n); it != node_remap.end();
+                 it = node_remap.find(n)) {
+                n = it->second;
+            }
+            return n;
+        };
+        for (ws::sch::Wire& w : doc.wires) {
+            w.a = resolve(w.a);
+            w.b = resolve(w.b);
+        }
+        doc.nodes.erase(
+            std::remove_if(doc.nodes.begin(), doc.nodes.end(),
+                           [&](const ws::sch::Node& n) {
+                               return node_remap.count(n.id) != 0u;
+                           }),
+            doc.nodes.end());
     }
 }
 

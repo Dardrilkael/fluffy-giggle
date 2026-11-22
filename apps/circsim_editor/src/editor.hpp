@@ -897,6 +897,25 @@ struct Editor {
     editor::SchematicAdapter adapter_;
     ws::sch::Overlay overlay_;
     bool overlay_valid_ = false;
+    // The cached PRESS-pose view: what the drag is built from (kinds /
+    // ids / press positions / the schematic) and the schematic version
+    // it is consistent with. The press geometry never changes during a
+    // drag, so the view is built once per drag, not once per frame; only
+    // the session (the live landings) and the resolve run per frame.
+    struct DragViewKey {
+        const ws::circsim::Schematic* schem = nullptr;
+        std::vector<std::uint32_t> kinds;  // 1 part, 3 junction (per member)
+        std::vector<std::uint32_t> ids;
+        std::vector<ws::circsim::Pos> starts;
+    };
+    DragViewKey view_key_;
+    bool view_valid_ = false;
+    std::uint64_t view_version_ = 0;
+    std::uint64_t drag_view_builds_ = 0;
+    // The live landings the cached overlay_ answers (an idle frame - the
+    // pointer held still - reuses it instead of re-resolving).
+    std::vector<ws::circsim::Pos> live_key_;
+    bool live_key_valid_ = false;
 
     // The Properties panel's editing state: the field buffers keyed
     // by stable strings, the epoch that reloads them, the selection
@@ -1107,6 +1126,18 @@ struct Editor {
     // overlay through drag_overlay_landing() + the drops() the drag
     // showed, so preview and commit are one value.
     [[nodiscard]] const ws::sch::Overlay* drag_overlay();
+    // The canvas's drag writers call this INSTEAD of s.bump(): a drag
+    // frame only moves positions, so the press-pose view drag_overlay()
+    // cached stays valid across the bump - unless something ELSE
+    // (undo, a panel edit) changed the schematic since the view was
+    // built, in which case the next drag_overlay() rebuilds it.
+    void drag_bump(ws::circsim::Schematic& s);
+    // How many times a drag has (re)built the adapter view: once per
+    // drag while nothing else changes the schematic (the frame-cost
+    // regression reads this).
+    [[nodiscard]] std::uint64_t drag_view_builds() const {
+        return drag_view_builds_;
+    }
     // The overlay's wire ids keyed by the CIRCSIM wire id (the draw
     // loop and any consumer holding circsim ids needs this to index
     // overlay->wirePath, whose keys are the adapter's sch ids).

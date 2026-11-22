@@ -395,7 +395,7 @@ bool set_drag_pos(Editor& ed, Pos at) {
                     // ending on it) along was the "wires still get
                     // grabbed" bug.
                     p->pos = at;
-                    s->bump();
+                    ed.drag_bump(*s);
                     return true;
                 }
             }
@@ -405,7 +405,7 @@ bool set_drag_pos(Editor& ed, Pos at) {
                 if (j.id == ed.drag.id) {
                     if (!eps_eq(j.pos.x, at.x, 1e-9) || !eps_eq(j.pos.y, at.y, 1e-9)) {
                         j.pos = at;
-                        s->bump();
+                        ed.drag_bump(*s);
                         return true;
                     }
                     break;
@@ -417,7 +417,7 @@ bool set_drag_pos(Editor& ed, Pos at) {
                 if (l.id == ed.drag.id) {
                     if (!eps_eq(l.pos.x, at.x, 1e-9) || !eps_eq(l.pos.y, at.y, 1e-9)) {
                         l.pos = at;
-                        s->bump();
+                        ed.drag_bump(*s);
                         return true;
                     }
                     break;
@@ -519,7 +519,7 @@ bool set_member_pos(Editor& ed, const Selection& m, Pos at) {
             return false;
         }
         write(at);
-        s->bump();
+        ed.drag_bump(*s);
         return true;
     };
     switch (m.kind) {

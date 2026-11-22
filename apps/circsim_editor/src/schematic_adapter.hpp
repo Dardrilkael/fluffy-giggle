@@ -69,8 +69,19 @@ struct SchematicAdapter {
     // Builds the view. Taps: the persisted taps become SPLITS in the
     // view (the T-connection IS the split) - the migration's own rule,
     // applied live so the graph the router sees is already the new one.
+    //
+    // `press` (optional) re-poses parts and junctions for the build
+    // WITHOUT touching the schematic: a drag builds the view at the
+    // PRESS geometry (the router bends the corridors the press
+    // authored) while the schematic keeps the live positions the
+    // canvas draws. Entities not named keep their stored position.
+    struct PressPose {
+        std::map<std::uint32_t, ws::circsim::Pos> parts;      // part id
+        std::map<std::uint32_t, ws::circsim::Pos> junctions;  // junction id
+    };
     void build(ws::circsim::Schematic& s,
-               const ws::circsim::SymbolLibrary& library);
+               const ws::circsim::SymbolLibrary& library,
+               const PressPose* press = nullptr);
 
     // --- session builders (the canvas turns input into these) --------
 

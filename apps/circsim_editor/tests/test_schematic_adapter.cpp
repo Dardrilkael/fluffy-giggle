@@ -181,3 +181,82 @@ TEST_CASE("a moved part's wire leaves the pin the way the pin faces") {
     REQUIRE(path.size() >= 3u);
     CHECK(path[1].x >= a.x - kEps);  // first leg heads east, not west
 }
+
+TEST_CASE("a press-pose build equals building with the entities parked") {
+    // drag_overlay() used to write the press positions INTO the live
+    // schematic, build, and write the live ones back. The pose argument
+    // must give the identical view without touching the schematic.
+    Rig g;
+    const std::uint32_t j = g.tap({5, 0});
+    const Pos press_part{10, 0};
+    const Pos press_junction{5, 0};
+    // The "live" state the canvas keeps drawing: both moved.
+    g.s.find_part(g.r2)->pos = {10, 4};
+    for (Junction& jn : g.s.junctions_mut()) {
+        if (jn.id == j) {
+            jn.pos = {5, 3};
+        }
+    }
+
+    editor::SchematicAdapter posed;
+    editor::SchematicAdapter::PressPose pose;
+    pose.parts[g.r2] = press_part;
+    pose.junctions[j] = press_junction;
+    posed.build(g.s, ws::circsim::builtin_library(), &pose);
+    CHECK(g.s.find_part(g.r2)->pos.y == doctest::Approx(4.0));  // untouched
+
+    // The old way: park, build, restore.
+    g.s.find_part(g.r2)->pos = press_part;
+    for (Junction& jn : g.s.junctions_mut()) {
+        if (jn.id == j) {
+            jn.pos = press_junction;
+        }
+    }
+    editor::SchematicAdapter parked;
+    parked.build(g.s, ws::circsim::builtin_library());
+
+    REQUIRE(posed.doc.nodes.size() == parked.doc.nodes.size());
+    for (std::size_t i = 0; i < posed.doc.nodes.size(); ++i) {
+        CHECK(posed.doc.nodes[i].id == parked.doc.nodes[i].id);
+        CHECK(posed.doc.nodes[i].pos.x == doctest::Approx(parked.doc.nodes[i].pos.x));
+        CHECK(posed.doc.nodes[i].pos.y == doctest::Approx(parked.doc.nodes[i].pos.y));
+    }
+    CHECK(posed.doc.wires.size() == parked.doc.wires.size());
+}
+
+TEST_CASE("a junction tapping two wires still ends up as one node") {
+    // The tap re-bind is deferred to one pass: a junction that taps two
+    // wires remaps old -> split1 -> split2 and every wire must land on
+    // the final node.
+    Schematic s;
+    const auto* r = ws::circsim::builtin_library().find("r");
+    REQUIRE(r != nullptr);
+    Part* p1 = s.add_part(Part::make("r", "R1", "1k", {0, 0}));
+    Part* p2 = s.add_part(Part::make("r", "R2", "1k", {10, 0}));
+    Part* p3 = s.add_part(Part::make("r", "R3", "1k", {0, 6}));
+    Part* p4 = s.add_part(Part::make("r", "R4", "1k", {10, 6}));
+    Wire w1;
+    w1.a = PinRef{p1->id, 1};
+    w1.b = PinRef{p2->id, 0};
+    Wire w2;
+    w2.a = PinRef{p3->id, 1};
+    w2.b = PinRef{p4->id, 0};
+    const std::uint32_t id1 = s.add_wire(w1)->id;
+    const std::uint32_t id2 = s.add_wire(w2)->id;
+    Junction j;
+    j.pos = {5, 0};
+    j.taps = {id1};
+    s.add_junction(j);
+    Junction k;
+    k.pos = {5, 6};
+    k.taps = {id2};
+    s.add_junction(k);
+    editor::SchematicAdapter ad;
+    ad.build(s, ws::circsim::builtin_library());
+    CHECK(ad.doc.wires.size() == 4u);  // two wires, one cut each
+    // Every wire end resolves to a live node.
+    for (const auto& w : ad.doc.wires) {
+        CHECK(ad.doc.find_node(w.a) != nullptr);
+        CHECK(ad.doc.find_node(w.b) != nullptr);
+    }
+}

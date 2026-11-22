@@ -220,3 +220,56 @@ TEST_CASE("view cull margin covers every built-in symbol") {
         CHECK(reach <= editor::kViewCullMarginCells);
     }
 }
+
+TEST_CASE("a part drag builds its press view once, not once per frame") {
+    Bench b;
+    ws::circsim::Schematic& s = b.doc.schem;
+    const std::uint32_t r1 =
+        s.add_part(ws::circsim::Part::make("r", "R1", "1k", {0, 0}))->id;
+    const std::uint32_t r2 =
+        s.add_part(ws::circsim::Part::make("r", "R2", "1k", {10, 0}))->id;
+    Wire w;
+    w.a = ws::circsim::PinRef{r1, 1};
+    w.b = ws::circsim::PinRef{r2, 0};
+    s.add_wire(w);
+
+    b.ed.drag.kind = Editor::Drag::Kind::Part;
+    b.ed.drag.id = r2;
+    b.ed.drag.start_world = {10, 0};
+    b.ed.drag.moved = true;
+    const auto drag_to = [&](Pos at) {
+        s.find_part(r2)->pos = at;
+        b.ed.drag_bump(s);
+    };
+
+    drag_to({10, 2});
+    const ws::sch::Overlay* ov = b.ed.drag_overlay();
+    REQUIRE(ov != nullptr);
+    CHECK(b.ed.drag_view_builds() == 1u);
+
+    drag_to({10, 4});  // a later frame of the same drag
+    ov = b.ed.drag_overlay();
+    REQUIRE(ov != nullptr);
+    CHECK(b.ed.drag_view_builds() == 1u);
+    CHECK(!ov->wirePath.empty());
+
+    // An idle frame (nothing moved) reuses the answer.
+    const auto first = ov->wirePath;
+    ov = b.ed.drag_overlay();
+    REQUIRE(ov != nullptr);
+    CHECK(b.ed.drag_view_builds() == 1u);
+    CHECK(ov->wirePath == first);
+
+    // The schematic itself only ever holds the LIVE position.
+    CHECK(s.find_part(r2)->pos.y == doctest::Approx(4.0));
+
+    // Something else changed the schematic (an undo, a panel edit): the
+    // cached view is stale and is rebuilt.
+    s.bump();
+    REQUIRE(b.ed.drag_overlay() != nullptr);
+    CHECK(b.ed.drag_view_builds() == 2u);
+
+    // The drag ends: no overlay, and the next drag builds afresh.
+    b.ed.drag.moved = false;
+    CHECK(b.ed.drag_overlay() == nullptr);
+}

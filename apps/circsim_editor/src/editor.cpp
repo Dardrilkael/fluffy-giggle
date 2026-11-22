@@ -129,131 +129,145 @@ const ws::sch::Overlay* Editor::drag_overlay() {
     overlay_valid_ = false;
     ws::circsim::Schematic* s = schem();
     if (s == nullptr || doc == nullptr) {
+        view_valid_ = false;
         return nullptr;
     }
-    // What the session drags, from the drag state.
-    ws::sch::MoveSession session;
-    const bool part =
-        drag.kind == Drag::Kind::Part && drag.moved;
-    const bool junction =
-        drag.kind == Drag::Kind::Junction && drag.moved;
-    const bool group =
-        group_drag.active && group_drag.moved;
+    const bool part = drag.kind == Drag::Kind::Part && drag.moved;
+    const bool junction = drag.kind == Drag::Kind::Junction && drag.moved;
+    const bool group = group_drag.active && group_drag.moved;
     if (!part && !junction && !group) {
-        return nullptr;  // no live drag: the caller draws stored geometry
+        view_valid_ = false;  // no live drag: the caller draws stored geometry
+        return nullptr;
     }
 
-    // The VIEW holds the PRESS geometry (the drag's start state); the
-    // SESSION carries the LIVE landings. resolve_move then answers the
-    // full move (the wire shapes the PRESS-authored corridors bend
-    // into), which is exactly what the preview draws and the release
-    // lands. (Building the view at the live state would make every
-    // landing a no-op: the pins would already sit at their landings
-    // and nothing would ever route.)
-    adapter_.build(*s, library);
+    // WHAT the drag moves: the press positions (the view's pose) and the
+    // live positions (the session's landings), per member, in one pass.
+    // A lone part / junction is a one-member set; wires and labels carry
+    // no attachment, so a group skips them.
+    DragViewKey key;
+    key.schem = s;
+    std::vector<ws::circsim::Pos> live;
+    const auto add_member = [&](std::uint32_t kind, std::uint32_t id,
+                                ws::circsim::Pos start) {
+        ws::circsim::Pos now{0.0, 0.0};
+        if (kind == 1u) {
+            const ws::circsim::Part* p = s->find_part(id);
+            if (p == nullptr) {
+                return false;
+            }
+            now = p->pos;
+        } else {
+            const ws::circsim::Junction* j = s->find_junction(id);
+            if (j == nullptr) {
+                return false;
+            }
+            now = j->pos;
+        }
+        key.kinds.push_back(kind);
+        key.ids.push_back(id);
+        key.starts.push_back(start);
+        live.push_back(now);
+        return true;
+    };
     if (part) {
-        // The press geometry: the part at its start position.
-        if (ws::circsim::Part* p = s->find_part(drag.id)) {
-            const ws::circsim::Pos live = p->pos;
-            p->pos = drag.start_world;
-            adapter_.build(*s, library);
-            p->pos = live;
-            session = adapter_.part_session(drag.id, live);
+        if (!add_member(1u, drag.id, drag.start_world)) {
+            view_valid_ = false;
+            return nullptr;  // the dragged part vanished under the drag
         }
     } else if (junction) {
-        ws::circsim::Junction* j = nullptr;
-        for (ws::circsim::Junction& cand : s->junctions_mut()) {
-            if (cand.id == drag.id) {
-                j = &cand;
-                break;
-            }
-        }
-        if (j != nullptr) {
-            const ws::circsim::Pos live = j->pos;
-            j->pos = drag.start_world;
-            adapter_.build(*s, library);
-            j->pos = live;
-            session = adapter_.junction_session(drag.id, live);
+        if (!add_member(3u, drag.id, drag.start_world)) {
+            view_valid_ = false;
+            return nullptr;
         }
     } else {
         // The group: everyone back at their press positions for the
         // view, the live positions as the landings.
-        std::vector<editor::SchematicAdapter::MemberMove> members;
-        for (std::size_t i = 0; i < group_drag.set.size(); ++i) {
-            const Selection& m = group_drag.set[i];
-            editor::SchematicAdapter::MemberMove mm;
-            mm.id = m.id;
-            mm.kind = m.kind == Selection::Kind::Part
-                          ? 1u
-                          : (m.kind == Selection::Kind::Junction ? 3u : 0u);
-            if (mm.kind == 0u) {
-                continue;  // wires/labels carry no attachment
-            }
-            const ws::circsim::Pos start = group_drag.starts[i];
-            ws::circsim::Pos live{0.0, 0.0};
-            if (mm.kind == 1u) {
-                if (const ws::circsim::Part* p = s->find_part(m.id)) {
-                    live = p->pos;
-                }
-            } else {
-                for (const ws::circsim::Junction& cand :
-                     s->junctions()) {
-                    if (cand.id == m.id) {
-                        live = cand.pos;
-                        break;
-                    }
-                }
-            }
-            mm.to = live;
-            members.push_back(mm);
-            // Park the member at its press position for the view.
-            if (mm.kind == 1u) {
-                if (ws::circsim::Part* p = s->find_part(m.id)) {
-                    p->pos = start;
-                }
-            } else {
-                for (ws::circsim::Junction& cand :
-                     s->junctions_mut()) {
-                    if (cand.id == m.id) {
-                        cand.pos = start;
-                        break;
-                    }
-                }
-            }
-        }
-        adapter_.build(*s, library);
-        // Restore everyone to the live positions (the schematic the
-        // canvas keeps drawing must never see the press parking).
         for (std::size_t i = 0; i < group_drag.set.size(); ++i) {
             const Selection& m = group_drag.set[i];
             if (m.kind == Selection::Kind::Part) {
-                if (ws::circsim::Part* p = s->find_part(m.id)) {
-                    for (const auto& mm : members) {
-                        if (mm.id == m.id && mm.kind == 1u) {
-                            p->pos = mm.to;
-                        }
-                    }
-                }
+                (void)add_member(1u, m.id, group_drag.starts[i]);
             } else if (m.kind == Selection::Kind::Junction) {
-                for (ws::circsim::Junction& cand :
-                     s->junctions_mut()) {
-                    if (cand.id != m.id) {
-                        continue;
-                    }
-                    for (const auto& mm : members) {
-                        if (mm.id == m.id && mm.kind == 3u) {
-                            cand.pos = mm.to;
-                        }
-                    }
-                    break;
-                }
+                (void)add_member(3u, m.id, group_drag.starts[i]);
             }
+        }
+    }
+
+    // The VIEW holds the PRESS geometry; the SESSION carries the LIVE
+    // landings. resolve_move then answers the full move (the wire shapes
+    // the PRESS-authored corridors bend into), which is exactly what the
+    // preview draws and the release lands. (Building the view at the live
+    // state would make every landing a no-op: the pins would already sit
+    // at their landings and nothing would ever route.) The press pose is
+    // handed to build() as data - the schematic the canvas keeps drawing
+    // is never touched - and the built view is reused for every frame of
+    // the drag: nothing in it depends on the live position.
+    const auto same_pos = [](const std::vector<ws::circsim::Pos>& x,
+                             const std::vector<ws::circsim::Pos>& y) {
+        return x.size() == y.size() &&
+               std::equal(x.begin(), x.end(), y.begin(),
+                          [](const ws::circsim::Pos& p,
+                             const ws::circsim::Pos& q) {
+                              return p.x == q.x && p.y == q.y;
+                          });
+    };
+    const bool view_hit = view_valid_ && view_version_ == s->version() &&
+                          view_key_.schem == key.schem &&
+                          view_key_.kinds == key.kinds &&
+                          view_key_.ids == key.ids &&
+                          same_pos(view_key_.starts, key.starts);
+    if (!view_hit) {
+        editor::SchematicAdapter::PressPose pose;
+        for (std::size_t i = 0; i < key.ids.size(); ++i) {
+            (key.kinds[i] == 1u ? pose.parts : pose.junctions)[key.ids[i]] =
+                key.starts[i];
+        }
+        adapter_.build(*s, library, &pose);
+        ++drag_view_builds_;
+        view_key_ = std::move(key);
+        view_valid_ = true;
+        view_version_ = s->version();
+        live_key_valid_ = false;
+    }
+
+    // An idle frame (the pointer held still) answers the same overlay.
+    if (live_key_valid_ && same_pos(live_key_, live)) {
+        overlay_valid_ = true;
+        return &overlay_;
+    }
+    ws::sch::MoveSession session;
+    if (part) {
+        session = adapter_.part_session(drag.id, live[0]);
+    } else if (junction) {
+        session = adapter_.junction_session(drag.id, live[0]);
+    } else {
+        std::vector<editor::SchematicAdapter::MemberMove> members;
+        members.reserve(view_key_.ids.size());
+        for (std::size_t i = 0; i < view_key_.ids.size(); ++i) {
+            editor::SchematicAdapter::MemberMove mm;
+            mm.kind = view_key_.kinds[i];
+            mm.id = view_key_.ids[i];
+            mm.to = live[i];
+            members.push_back(mm);
         }
         session = adapter_.group_session(members);
     }
     overlay_ = ws::sch::resolve_move(adapter_.doc, session);
+    live_key_ = std::move(live);
+    live_key_valid_ = true;
     overlay_valid_ = true;
     return &overlay_;
+}
+
+void Editor::drag_bump(ws::circsim::Schematic& s) {
+    // The cached view stays valid across THIS bump only if it was valid
+    // up to it (no foreign change since it was built): a position write
+    // moves nothing the press-pose view reads.
+    const bool clean = view_valid_ && view_version_ == s.version();
+    s.bump();
+    if (clean) {
+        view_version_ = s.version();
+    }
+    live_key_valid_ = false;  // the live landings just changed
 }
 
 editor::SchematicAdapter::Landing Editor::drag_overlay_landing() const {
