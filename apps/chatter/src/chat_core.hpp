@@ -279,6 +279,8 @@ class ChatCore {
   int port() const { return port_; }
   const std::string& name() const { return name_; }
   int peers() const { return live_.load(); }
+  // Direct LAN peers that completed HELLO (not merely open TCP sockets).
+  int direct_peers() const { return direct_live_.load(); }
   bool serving() const { return serving_; }
 
  private:
@@ -317,6 +319,7 @@ class ChatCore {
         case Kind::lan: {
           if (*tag != "?") {
             forget_direct(*tag);
+            direct_live_.fetch_sub(1);
             push_line({*tag,
                        std::string{"left ("}
                            .append(ws::net::describe(why))
@@ -370,13 +373,22 @@ class ChatCore {
                  const std::shared_ptr<std::string>& tag) {
     if (text.starts_with("HELLO ")) {
       text.remove_prefix(6);
-      const bool first = *tag == "?";
-      *tag = std::string{text};  // copy: the span dies with the callback
-      if (first) {
-        // One count per HELLO that ever lands: a re-greet must not
-        // double the entry.
-        ++direct_names_[*tag];
+      if (text.empty() || text.size() > kMaxPeerName ||
+          text.find_first_of("\r\n") != std::string_view::npos) {
+        return;
       }
+      const bool first = *tag == "?";
+      if (first) {
+        ++direct_live_;
+      } else if (*tag != text) {
+        // A repeated HELLO may rename a peer; keep the dedup refcounts
+        // consistent instead of leaking the previous identity.
+        forget_direct(*tag);
+      } else {
+        return;  // repeated identical greeting is idempotent
+      }
+      *tag = std::string{text};  // copy: the span dies with the callback
+      ++direct_names_[*tag];
       push_line({*tag, "joined", true});
       return;
     }
@@ -430,6 +442,13 @@ class ChatCore {
                     ws::net::TcpConnection* self) {
     if (text.starts_with("HELLO ")) {
       text.remove_prefix(6);
+      if (text.empty() || text.size() > kMaxPeerName ||
+          text.find_first_of("\r\n") != std::string_view::npos) {
+        return;
+      }
+      if (*tag == text) {
+        return;
+      }
       *tag = std::string{text};
       push_line({*tag, "joined", true});
       room_broadcast("SYS " + *tag + " joined", self);
@@ -659,10 +678,15 @@ class ChatCore {
   // knows).
   void push_line(ChatLine line) {
     const std::time_t now = std::time(nullptr);
-    const std::tm* local = std::localtime(&now);
-    if (local != nullptr) {
-      line.sent_hh = local->tm_hour;
-      line.sent_mm = local->tm_min;
+    std::tm local{};
+#if defined(_WIN32)
+    const bool have_local = localtime_s(&local, &now) == 0;
+#else
+    const bool have_local = localtime_r(&now, &local) != nullptr;
+#endif
+    if (have_local) {
+      line.sent_hh = local.tm_hour;
+      line.sent_mm = local.tm_min;
     }
     const std::lock_guard<std::mutex> lock{mtx_};
     pending_.push_back(std::move(line));
@@ -674,6 +698,7 @@ class ChatCore {
   }
 
   static constexpr std::size_t kQueuedLines = 256;
+  static constexpr std::size_t kMaxPeerName = 64;
 
   // Declaration order matters: loop_ is declared first so it destructs
   // LAST - after the thread (which stop() has already joined) and after
@@ -715,7 +740,8 @@ class ChatCore {
   int port_ = 0;
   bool serving_ = false;
 
-  std::atomic<int> live_{0};          // connections up, for the status line
+  std::atomic<int> live_{0};          // open connections, for the status line
+  std::atomic<int> direct_live_{0};   // LAN peers that completed HELLO
   std::atomic<bool> running_{false};  // run() has not returned yet
 
   mutable std::mutex mtx_;         // guards pending_ only
