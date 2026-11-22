@@ -378,11 +378,9 @@ std::uint32_t name_color(std::string_view name) {
   return kTints[hash % (sizeof(kTints) / sizeof(kTints[0]))];
 }
 
-// One text run split into the lines a bubble's max width holds - the
-// measure-based greedy walk (every break at a space, a run wider than
-// the room stays whole and clips, WhatsApp's own behavior on an
-// unbreakable word). The field wraps identically on desktop and phone
-// because it is the font's own measure.
+// One text run split into lines measured with the actual font. Words
+// wrap at spaces; overlong words split only between UTF-8 code points,
+// and explicit newlines remain line breaks on both desktop and Android.
 std::vector<std::string> wrap_text(std::string_view text,
                                     const ws::ui::r2d::Font& font,
                                     float max_w) {
