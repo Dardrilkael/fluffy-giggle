@@ -218,7 +218,8 @@ class ChatCore {
   // else does); the sent line echoes into the queue from the loop thread
   // exactly like received lines, so ordering is the wire's ordering.
   void send(std::string_view line) {
-    if (!running_.load() || line.empty()) {
+    if (!running_.load() || line.empty() || line.size() > kMaxMessageBytes ||
+        line.find_first_of("\r\n") != std::string_view::npos) {
       return;
     }
     std::string outgoing = "SAY " + std::string{line};
@@ -301,6 +302,10 @@ class ChatCore {
     });
     conn->set_on_message([tag, kind, self, this](
                               std::span<const std::byte> message) {
+      if (message.size() > kMaxFrameBytes) {
+        (void)self->close();
+        return;
+      }
       std::string_view text = as_text(message);
       switch (kind) {
         case Kind::lan:
@@ -404,6 +409,10 @@ class ChatCore {
                        const std::shared_ptr<std::string>& tag) {
     if (text.starts_with("HELLO ")) {
       text.remove_prefix(6);
+      if (text.empty() || text.size() > kMaxPeerName ||
+          text.find_first_of("\r\n") != std::string_view::npos) {
+        return;
+      }
       *tag = std::string{text};
       push_line({*tag, "room linked", true});
       return;
@@ -416,8 +425,9 @@ class ChatCore {
     if (text.starts_with("FROM ")) {
       text.remove_prefix(5);
       const std::size_t space = text.find(' ');
-      if (space == std::string_view::npos) {
-        return;  // a malformed frame a room never sends; drop it quiet
+      if (space == std::string_view::npos || space == 0 ||
+          space > kMaxPeerName) {
+        return;  // malformed attribution is ignored
       }
       const std::string sender{text.substr(0, space)};
       if (direct_names_.count(sender) != 0) {
@@ -444,6 +454,11 @@ class ChatCore {
       text.remove_prefix(6);
       if (text.empty() || text.size() > kMaxPeerName ||
           text.find_first_of("\r\n") != std::string_view::npos) {
+        return;
+      }
+      if (*tag != "?" && *tag != text) {
+        // Names are immutable for the lifetime of a member connection.
+        (void)self->close();
         return;
       }
       if (*tag == text) {
@@ -699,6 +714,8 @@ class ChatCore {
 
   static constexpr std::size_t kQueuedLines = 256;
   static constexpr std::size_t kMaxPeerName = 64;
+  static constexpr std::size_t kMaxMessageBytes = 4096;
+  static constexpr std::size_t kMaxFrameBytes = kMaxMessageBytes + 128;
 
   // Declaration order matters: loop_ is declared first so it destructs
   // LAST - after the thread (which stop() has already joined) and after
