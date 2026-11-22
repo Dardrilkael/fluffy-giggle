@@ -554,6 +554,22 @@ constexpr float kMarginRightAxis = ws::plotmath::kMarginRightAxis;
 // with a dot at the hover sample. It is a thumbnail of the SHAPE - the
 // plot carries the numbers - and it costs O(buckets) a frame instead
 // of the two full-column scans it used to run per legend row.
+// False when the enclosing clip hides `r` ENTIRELY: a scroll panel
+// (the dock's body) pushes one rect into both r2d's clip stack and the
+// gui's hit clip, so a row scrolled out of sight is recorded, tessellated
+// and submitted for nothing. No clip pushed (a bare layout, a test
+// bench) shows everything - the safe default. Touching edges count as
+// hidden (the clip is half-open, like Rect::contains).
+[[nodiscard]] bool clip_shows(const gui::GuiContext& gui,
+                              const gui::Rect& r) {
+    const gui::Rect* clip = gui.current_hit_clip();
+    if (clip == nullptr) {
+        return true;
+    }
+    return r.x < clip->x + clip->width && r.x + r.width > clip->x &&
+           r.y < clip->y + clip->height && r.y + r.height > clip->y;
+}
+
 void draw_sparkline(canvas::Canvas2D& rc, const gui::Rect& r,
                     std::span<const double> ys,
                     const ResultsCache::SeriesStats& st,
@@ -2427,9 +2443,15 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
                       14.0f);
             layout.same_line();
             const gui::Rect spark = layout.next(48.0f, 14.0f);
-            draw_sparkline(sw, spark, s.data, ed.results.stats[i],
-                           series_color(i), ed.results.hover,
-                           ed.results.scratch_pts);
+            // The layout still advances (the row's own widgets and the
+            // plot below ride it); only the drawing is skipped for a
+            // sparkline the scroll clip hides - a 48-signal legend is
+            // ~19k quads a frame, most of them past the viewport.
+            if (clip_shows(gui, spark)) {
+                draw_sparkline(sw, spark, s.data, ed.results.stats[i],
+                               series_color(i), ed.results.hover,
+                               ed.results.scratch_pts);
+            }
             if (at >= 0 && static_cast<std::size_t>(at) < s.data.size()) {
                 layout.same_line();
                 const std::string value = with_unit(

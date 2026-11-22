@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <optional>
 #include <vector>
 
 #include <stb_image.h>  // declarations: stb_impl.cpp is a source of this target
@@ -163,6 +164,10 @@ static std::string env_value(const char* name) {
 // The bench: an Editor over an untitled document, a CommandListCanvas
 // injected at the plot seam, and one drawn frame per call.
 struct Bench {
+    // When set, the panel draws under this hit clip (the rect the dock's
+    // scroll panel pushes into the gui and r2d): rows outside it are
+    // invisible to the real app, and the panel may skip drawing them.
+    std::optional<gui::Rect> hit_clip;
     ws::settings::StdFileSystem fs;
     SchematicDocument doc{std::string{}, fs};
     Editor ed;
@@ -234,8 +239,15 @@ struct Bench {
         gui::LayoutCursor layout;
         (void)layout.begin_panel(gui::Rect{0.0f, 0.0f, 640.0f, 520.0f},
                                  12.0f, 8.0f);
+        // What the dock's scroll panel pushes around a panel body.
+        if (hit_clip.has_value()) {
+            gui.push_hit_clip(*hit_clip);
+        }
         const gui::ChromeTheme theme = gui::kDefaultChrome;
         editor::draw_results_panel(ed, gui, layout, theme);
+        if (hit_clip.has_value()) {
+            gui.pop_hit_clip();
+        }
         layout.end_panel();
         gui.end_frame();
     }
@@ -2060,4 +2072,83 @@ TEST_CASE("the plot PNG breaks the line at a non-finite sample") {
         one_signal_table(xs_gap, ys), nullptr, "time", nullptr, 0u));
     CHECK(by_x.near_ink(m.sx(xs[50]), m.sy(1.0), 2, kPngInk));
     CHECK_FALSE(by_x.near_ink(m.sx(xs[100]), m.sy(1.0), 2, kPngInk));
+}
+
+// ---- legend sparklines the scroll clip hides are not drawn -----------
+//
+// The dock draws a panel body inside a scroll panel, which pushes its
+// viewport into the gui's hit clip. A legend of dozens of signals runs
+// far past the viewport; the layout still advances for every row, but a
+// sparkline whose rect the clip hides entirely is not tessellated or
+// submitted.
+
+namespace {
+
+// 48 flat signals: a flat sparkline rides the middle rail, so its first
+// point sits at row.y + 7 and the rows' places read straight off it.
+[[nodiscard]] ws::spice::Table flat_legend_table() {
+    ws::spice::Table t;
+    t.analysis = ws::spice::AnalysisKind::Tran;
+    t.sweep = ws::spice::SweepKind::Time;
+    t.sweep_names = {"time"};
+    t.sweep_axes.emplace_back();
+    for (std::size_t i = 0; i < 100u; ++i) {
+        t.sweep_axes.back().push_back(1.0e-4 * static_cast<double>(i));
+    }
+    for (std::size_t s = 0; s < 48u; ++s) {
+        ws::spice::Signal sig;
+        sig.name = "v(n" + std::to_string(1000 + s) + ")";
+        sig.data.assign(100u, 1.0);
+        t.signals.push_back(std::move(sig));
+    }
+    return t;
+}
+
+// The first point's y of every legend sparkline (width 1.2), top-down.
+[[nodiscard]] std::vector<float> sparkline_ys(const Bench& b) {
+    std::vector<float> ys;
+    for (const canvas::CanvasCmd& c : b.clc.cmds) {
+        if (c.kind == canvas::CanvasCmdKind::stroke_polyline &&
+            c.width == 1.2f && c.points.size() > 4u) {
+            ys.push_back(c.points.front().y);
+        }
+    }
+    return ys;
+}
+
+}  // namespace
+
+TEST_CASE("legend sparklines the scroll clip hides are not drawn") {
+    Bench all;
+    all.load(flat_legend_table());
+    all.draw();
+    const std::vector<float> ys_all = sparkline_ys(all);
+    REQUIRE(ys_all.size() == 48u);  // no clip pushed: every row draws
+
+    // A clip over the legend's top, and one over its middle (the rows
+    // above it scrolled out): exactly the rows whose 14-px sparkline
+    // rect crosses the clip are drawn, in their unclipped places.
+    const gui::Rect clips[] = {gui::Rect{0.0f, 0.0f, 640.0f, 200.0f},
+                               gui::Rect{0.0f, 300.0f, 640.0f, 220.0f}};
+    for (const gui::Rect& clip : clips) {
+        std::vector<float> expected;
+        for (float y : ys_all) {
+            const float row_y = y - 7.0f;
+            if (row_y < clip.y + clip.height && row_y + 14.0f > clip.y) {
+                expected.push_back(y);
+            }
+        }
+        REQUIRE(expected.size() > 0u);
+        REQUIRE(expected.size() < 48u);
+
+        Bench b;
+        b.hit_clip = clip;
+        b.load(flat_legend_table());
+        b.draw();
+        const std::vector<float> got = sparkline_ys(b);
+        REQUIRE(got.size() == expected.size());
+        for (std::size_t k = 0; k < got.size(); ++k) {
+            CHECK(got[k] == doctest::Approx(expected[k]));
+        }
+    }
 }
