@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <vector>
 
 #include <ws/settings/filesystem.hpp>
@@ -82,6 +83,9 @@ struct ProfBench {
     // Where the panel sits: tests move it to shift the plot frame the way
     // a scroll or a layout change above it would.
     gui::Rect panel{0.0f, 0.0f, 640.0f, 520.0f};
+    // When set, drawn under this hit clip (what the dock's scroll panel
+    // pushes): a plot frame outside it is invisible to the real app.
+    std::optional<gui::Rect> hit_clip;
     // Record every vertex quad the draw submits (stub.vertex_quads).
     bool record_quads = false;
 
@@ -140,7 +144,13 @@ struct ProfBench {
         gui.begin_frame(in);
         gui::LayoutCursor layout;
         (void)layout.begin_panel(panel, 12.0f, 8.0f);
+        if (hit_clip.has_value()) {
+            gui.push_hit_clip(*hit_clip);
+        }
         editor::draw_results_panel(ed, gui, layout, theme);
+        if (hit_clip.has_value()) {
+            gui.pop_hit_clip();
+        }
         layout.end_panel();
         gui.end_frame();
         return ws::ui::gui_test::stub.quads;  // proxy for draw activity
@@ -491,6 +501,45 @@ TEST_CASE("a shifted frame draws the same geometry at the shifted spot") {
         }
     }
     CHECK(off == 0u);
+}
+
+// Scrolling the plot out of view and back must cost nothing in cache
+// terms: the hidden frames skip the series loop (no decimation, no
+// tessellation, no replay) and leave the caches exactly as they were, so
+// the frame it scrolls back in is a hit.
+TEST_CASE("a hidden plot skips its series and its caches survive") {
+    ProfBench b;
+    b.load(build_large_table(4, 2000));
+    b.draw();  // visible: every series a miss, built
+    const std::uint32_t visible_quads = ws::ui::gui_test::stub.quads;
+    std::vector<float> poisoned;
+    for (ResultsCache::SeriesGeometry& g : b.ed.results.geometry) {
+        REQUIRE(g.built);
+        g.buffer.quads[0].x += 1.0e6f;
+        poisoned.push_back(g.buffer.quads[0].x);
+    }
+
+    // Scrolled out: a clip over the panel's top, above the plot.
+    b.hit_clip = gui::Rect{0.0f, 0.0f, 640.0f, 40.0f};
+    b.draw();
+    // The series were really skipped (their replays are most of a
+    // frame's quads)...
+    CHECK(ws::ui::gui_test::stub.quads < visible_quads / 2u);
+    // ...and nothing was invalidated, rebuilt or freed.
+    for (std::size_t i = 0; i < poisoned.size(); ++i) {
+        CHECK(b.ed.results.geometry[i].built);
+        CHECK(b.ed.results.geometry[i].buffer.quads[0].x == poisoned[i]);
+    }
+
+    // Scrolled back: unchanged view, unchanged sizes - every series a
+    // hit (the poison survives), the full quad count again.
+    b.hit_clip.reset();
+    b.draw();
+    for (std::size_t i = 0; i < poisoned.size(); ++i) {
+        CHECK(b.ed.results.geometry[i].built);
+        CHECK(b.ed.results.geometry[i].buffer.quads[0].x == poisoned[i]);
+    }
+    CHECK(ws::ui::gui_test::stub.quads >= visible_quads / 2u);
 }
 
 TEST_CASE("waveform tessellation cache is per series and delivery keyed") {

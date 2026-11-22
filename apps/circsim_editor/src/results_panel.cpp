@@ -1353,6 +1353,17 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     // back to front, its keeps mapped home and re-sorted.
     std::vector<double> rev_x;
     std::vector<double> rev_y;
+    // A frame the enclosing clip hides ENTIRELY draws nothing anyone can
+    // see: a long legend runs the plot down past the dock's scroll
+    // viewport, and every frame would still decimate, tessellate-or-hit
+    // and submit every signal's ~2.8k quads for it (several times the
+    // legend's own cost). Skip the series loop then. The caches are
+    // untouched by the skip - the decimation key above updated either
+    // way, and a geometry entry's key is exact - so the first frame the
+    // plot scrolls back in is a hit when nothing moved. Everything below
+    // the loop (crosshair, tooltip, playhead) reads the data directly.
+    // No clip pushed (a bare layout, a test bench) shows everything.
+    const bool series_shown = clip_shows(gui, gui::Rect{fx, fy, iw, ih});
     wave_prof_begin_frame();
     // The series live INSIDE the frame. The slice keeps one sample of
     // slack past each window edge (the stroke needs the neighbor to
@@ -1365,7 +1376,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     // balanced pair around the whole loop - every `continue` below
     // stays inside it.
     rc.push_clip(fx, fy, iw, ih);
-    for (std::size_t i = 0; i < t.signals.size(); ++i) {
+    for (std::size_t i = 0; series_shown && i < t.signals.size(); ++i) {
         if (i >= ed.results.visible.size() || ed.results.visible[i] == 0u) {
             if (renderer != nullptr && i < cache.geometry.size()) {
                 cache.geometry[i].key.visible = false;

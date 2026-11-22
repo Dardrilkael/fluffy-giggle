@@ -2315,3 +2315,39 @@ TEST_CASE("visual: a failed or .op fourier series draws no spectrum") {
     // text seam, and nothing here may add a bar.
     CHECK(b.clc.cmds.size() == before);
 }
+
+// ---- a plot the scroll clip hides skips its series -------------------
+//
+// A long legend runs the plot down past the dock's scroll viewport. The
+// frame, ticks and overlays are cheap; the series are the expensive
+// part (decimate, tessellate-or-hit, ~2.8k quads a signal submitted).
+// With the frame entirely outside the clip the series loop is skipped.
+
+TEST_CASE("a plot frame the scroll clip hides draws no series") {
+    Bench probe;
+    probe.load(ramp_table(41u));
+    probe.draw();
+    const Bench::FrameBox f = probe.frame_box(probe.frame_cmd());
+    REQUIRE(probe.series_cmds().size() == 2u);  // no clip: drawn
+
+    // Hidden: the clip ends above the frame (and exactly at its top -
+    // the clip is half-open, a touching edge shows nothing).
+    for (float bottom : {f.fy - 5.0f, f.fy}) {
+        Bench b;
+        b.hit_clip = gui::Rect{0.0f, 0.0f, 640.0f, bottom};
+        b.load(ramp_table(41u));
+        b.draw();
+        CHECK(b.series_cmds().empty());
+        CHECK(b.frame_cmd() != nullptr);  // the frame itself still draws
+    }
+
+    // Shown: a clip that overlaps the frame by even a few px, or one
+    // that holds all of it, draws the series.
+    for (float bottom : {f.fy + 4.0f, f.fy2 + 50.0f}) {
+        Bench b;
+        b.hit_clip = gui::Rect{0.0f, 0.0f, 640.0f, bottom};
+        b.load(ramp_table(41u));
+        b.draw();
+        CHECK(b.series_cmds().size() == 2u);
+    }
+}
