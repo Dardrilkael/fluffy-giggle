@@ -322,10 +322,10 @@ class ChatCore {
       std::string_view text = as_text(message);
       switch (kind) {
         case Kind::lan:
-          parse_lan(text, tag);
+          parse_lan(text, tag, self);
           return;
         case Kind::to_relay:
-          parse_room_link(text, tag);
+          parse_room_link(text, tag, self);
           return;
         case Kind::member:
           parse_member(text, tag, self);
@@ -388,7 +388,8 @@ class ChatCore {
   // v1's parser, verbatim, plus the direct-name bookkeeping the relay's
   // duplicate rule reads.
   void parse_lan(std::string_view text,
-                 const std::shared_ptr<std::string>& tag) {
+                 const std::shared_ptr<std::string>& tag,
+                 ws::net::TcpConnection* self) {
     if (text.starts_with("HELLO ")) {
       text.remove_prefix(6);
       if (text.empty() || text.size() > kMaxPeerName ||
@@ -399,9 +400,9 @@ class ChatCore {
       if (first) {
         ++direct_live_;
       } else if (*tag != text) {
-        // A repeated HELLO may rename a peer; keep the dedup refcounts
-        // consistent instead of leaking the previous identity.
-        forget_direct(*tag);
+        // A connection's identity is fixed by its first HELLO.
+        (void)self->close();
+        return;
       } else {
         return;  // repeated identical greeting is idempotent
       }
@@ -423,11 +424,19 @@ class ChatCore {
   // Our link up to a room: HELLO names the room's operator (that is who
   // a SAY from here is), SYS is a room event, FROM is a member speaking.
   void parse_room_link(std::string_view text,
-                       const std::shared_ptr<std::string>& tag) {
+                       const std::shared_ptr<std::string>& tag,
+                       ws::net::TcpConnection* self) {
     if (text.starts_with("HELLO ")) {
       text.remove_prefix(6);
       if (text.empty() || text.size() > kMaxPeerName ||
           text.find_first_of("\r\n") != std::string_view::npos) {
+        return;
+      }
+      if (*tag != "?" && *tag != text) {
+        (void)self->close();
+        return;
+      }
+      if (*tag == text) {
         return;
       }
       *tag = std::string{text};
