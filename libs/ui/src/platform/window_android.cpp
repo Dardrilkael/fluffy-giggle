@@ -146,6 +146,34 @@ bool jni_threw(JNIEnv* env, const char* what) {
     return true;
 }
 
+// The shared ws::ui Activity base owns the only Java-side IME bridge.
+// Activity methods marshal to Android's UI thread; this native shell thread
+// only requests the transition and never touches a View directly.
+void request_soft_keyboard(ANativeActivity* activity, bool show) {
+    if (activity == nullptr || activity->clazz == nullptr) {
+        return;
+    }
+    ScopedJavaThread java{activity->vm};
+    if (!java.ok()) {
+        core::error("ui: android IME: no JNIEnv");
+        return;
+    }
+    JNIEnv* const env = java.env;
+    jclass const cls = env->GetObjectClass(activity->clazz);
+    if (cls == nullptr) {
+        (void)jni_threw(env, "activity class lookup failed");
+        return;
+    }
+    const char* const name = show ? "showWsUiKeyboard" : "hideWsUiKeyboard";
+    jmethodID const method = env->GetMethodID(cls, name, "()V");
+    env->DeleteLocalRef(cls);
+    if (method == nullptr || jni_threw(env, "shared Activity IME method missing")) {
+        return;
+    }
+    env->CallVoidMethod(activity->clazz, method);
+    (void)jni_threw(env, "shared Activity IME request failed");
+}
+
 [[nodiscard]] std::string jstring_to_std(JNIEnv* env, jstring text) {
     if (text == nullptr) {
         return {};
@@ -432,38 +460,16 @@ public:
             });
     }
 
-    // THE SOFT KEYBOARD (the ime-rect seam's platform stage - the
-    // plumbing window.h documents as the channel's Android half). The
-    // gui calls the positioner with the FOCUSED field's bounds when
-    // they change: a non-zero rect is a field gaining focus, SHOW the
-    // IME; the zero rect is focus lost, HIDE it. That show/hide pair
-    // is the whole "tap a field, the keyboard opens" story on Android -
-    // desktop never needs it (the OS owns the keyboard), which is why
-    // the seam's default was the headless no-op and a touch device
-    // with no wiring never opened anything (the bug this closes).
-    // ANativeActivity_showSoftInput is native_activity.h's spelling of
-    // InputMethodManager.showSoftInput (it JNI-hops internally - the
-    // clipboard's own reflection dance stays where it was), and the
-    // documented thread rule says it marshals to the main thread
-    // however it is called. The IMPLICIT flag is the tap's own request
-    // (not FORCED - the user stays free to dismiss); NOT_ALWAYS lets
-    // the system keep the window if it has stronger reasons. The rect
-    // is kept, not consumed: Android's stock keyboard
-    // positions itself over adjustResize - the field's bounds ride
-    // the host for a future composition window that wants them.
+    // The IME-rect seam is implemented once for every ws::ui Android
+    // application. The shared Activity base routes the request through
+    // InputMethodManager on Android's UI thread; the rect remains available
+    // to the gui for future composition-window positioning.
     void install_ime_rect(gui::GuiContext& gui) override {
         gui.set_ime_rect(
             [this](const ws::ui::gui::Rect& rect) {
                 ime_rect_ = rect;
-                if (rect.width > 0.0f && rect.height > 0.0f) {
-                    ANativeActivity_showSoftInput(
-                        app_->activity,
-                        ANATIVEACTIVITY_SHOW_SOFT_INPUT_IMPLICIT);
-                } else {
-                    ANativeActivity_hideSoftInput(
-                        app_->activity,
-                        ANATIVEACTIVITY_HIDE_SOFT_INPUT_NOT_ALWAYS);
-                }
+                request_soft_keyboard(app_->activity,
+                                      rect.width > 0.0f && rect.height > 0.0f);
             });
     }
 
