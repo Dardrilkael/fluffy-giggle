@@ -1051,13 +1051,16 @@ LaunchRequest parse_args(int argc, char* argv[]) {
     const std::string_view arg = argv[i];
     if (arg == "--serve") {
       int port = kDefaultRelayPort;
-      if (i + 1 < argc) {
+      if (i + 1 < argc && argv[i + 1][0] != '-') {
         char* end = nullptr;
         const long parsed = std::strtol(argv[i + 1], &end, 10);
-        if (end != nullptr && *end == '\0' && parsed > 0 &&
-            parsed < 65536) {
+        if (end == argv[i + 1] || end == nullptr || *end != '\0' ||
+            parsed < 1024 || parsed > 65535) {
+          ws::core::error("chatter: --serve port must be 1024..65535");
+          out.valid = false;
+        } else {
           port = static_cast<int>(parsed);
-          ++i;  // consumed the port token
+          ++i;
         }
       }
       if (out.core.serve_port == 0) {
@@ -1084,8 +1087,16 @@ LaunchRequest parse_args(int argc, char* argv[]) {
         continue;
       }
       out.core.name = argv[++i];
+    } else if (!arg.empty() && arg.front() == '-') {
+      ws::core::error("chatter: unknown option '{}'", arg);
+      out.valid = false;
     } else if (!arg.empty()) {
-      out.core.name = std::string{arg};  // v1's positional form
+      if (!out.core.name.empty()) {
+        ws::core::error("chatter: only one positional name is allowed; use --name");
+        out.valid = false;
+      } else {
+        out.core.name = std::string{arg};  // v1's positional form
+      }
     }
   }
   if (out.core.serve_port > 0 && !out.core.relays.empty()) {
@@ -1139,7 +1150,8 @@ int main(int argc, char* argv[]) {
   const LaunchRequest launch = parse_args(argc, argv);
   if (!launch.valid) {
     ws::core::error(
-        "usage: chatter [name] [--name n] [--serve [port]] [--relay host:port]...");
+        "usage: chatter [name] [--name n] [--serve [1024..65535]] [--relay host:port]...");
+    return 2;
   }
   ChatterApp chatter{config, launch.core};
   const int rc = chatter.run();
