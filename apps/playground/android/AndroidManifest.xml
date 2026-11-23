@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Input to tools/package-android.ps1 (aapt2 link). NativeActivity +
-     hasCode=false: zero Java - the OS dlopens lib/arm64-v8a/libplayground.so
-     (android.app.lib_name below) and calls ANativeActivity_onCreate, which
-     native_app_glue owns. Follows device rotation (no screenOrientation
+<!-- Input to tools/package-android.ps1 (aapt2 link). The shared ws::ui
+     Activity base provides Android IME integration; the OS dlopens
+     lib/arm64-v8a/libplayground.so (android.app.lib_name below) and calls
+     ANativeActivity_onCreate, which native_app_glue owns. Follows device rotation (no screenOrientation
      lock): configChanges below keeps the activity - and android_main's
      state - alive across the turn, so the surface round-trips through
      APP_CMD_TERM/INIT_WINDOW, and the shell builds its swapchain with
@@ -21,12 +21,12 @@
     <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="35" />
 
     <application
-        android:hasCode="false"
+        android:hasCode="true"
         android:label="ws playground"
         android:extractNativeLibs="true"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
         <activity
-            android:name="android.app.NativeActivity"
+            android:name="com.ws.ui.WsUiActivity"
             android:exported="true"
             android:label="ws playground"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"

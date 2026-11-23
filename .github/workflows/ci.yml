@@ -42,6 +42,7 @@ jobs:
       - name: Build application and maintained test targets
         run: |
           cmake --build --preset linux --target \
+            chatter chatter_relay_smoke \
             circsim_editor test_physics test_ui_canvas \
             test_circsim_editor_document test_circsim_editor_canvas \
             test_circsim_editor_canvas_cost test_circsim_editor_panel \
@@ -49,6 +50,7 @@ jobs:
 
       - name: Run maintained regression tests
         run: |
+          build/linux/bin/chatter_relay_smoke
           build/linux/bin/test_physics
           build/linux/bin/test_ui_canvas
           build/linux/bin/test_circsim_editor_document
@@ -95,6 +97,7 @@ jobs:
       - name: Build maintained sanitizer targets
         run: |
           cmake --build --preset linux-asan --target \
+            chatter chatter_relay_smoke \
             circsim_editor test_physics test_ui_canvas \
             test_circsim_editor_document test_circsim_editor_canvas test_circsim_editor_canvas_cost test_circsim_editor_panel \
             test_circsim_editor_side_panels test_circsim_editor_waveform_prof
@@ -109,6 +112,7 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:halt_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:abort_on_error=1
         run: |
+          build/linux-asan/bin/chatter_relay_smoke
           build/linux-asan/bin/test_physics
           build/linux-asan/bin/test_ui_canvas
           build/linux-asan/bin/test_circsim_editor_document
@@ -179,7 +183,7 @@ jobs:
         run: cmake --preset release
 
       - name: Build Windows executable
-        run: cmake --build --preset release --target circsim_editor --parallel 2
+        run: cmake --build --preset release --target chatter circsim_editor --parallel 2
 
   # Runs the real packaging script (debug-signed) so manifest, aapt2, d8,
   # zipalign and signing problems show up on the PR, not after the merge.
@@ -217,6 +221,22 @@ jobs:
           "ANDROID_NDK_HOME=$ndk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "ANDROID_SDK_ROOT=$env:ANDROID_HOME" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Package Android APK (debug key)
+      - name: Package Chatter Android APK (debug key)
+        shell: pwsh
+        run: ./tools/package-android.ps1 -App chatter
+
+      - name: Package Circsim Android APK (debug key)
         shell: pwsh
         run: ./tools/package-android.ps1 -App circsim_editor
+
+      - name: Package Playground Android APK (debug key)
+        shell: pwsh
+        run: ./tools/package-android.ps1 -App playground
+
+      - name: Package Bounce Android APK (debug key)
+        shell: pwsh
+        run: ./tools/package-android.ps1 -App bounce
+
+      - name: Package UI Gallery Android APK (debug key)
+        shell: pwsh
+        run: ./tools/package-android.ps1 -App ui_gallery

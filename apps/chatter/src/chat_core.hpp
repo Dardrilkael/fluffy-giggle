@@ -43,6 +43,7 @@
 // display name tint the same and dedup as one - a toy-room tradeoff.
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -157,6 +158,10 @@ class ChatCore {
                 ? options.name
                 : (serving_ ? std::string{"relay-"} : std::string{"chatter-"}) +
                       std::to_string(port_);
+    if (!valid_peer_name(name_)) {
+      ws::core::error("chatter: invalid display name; using generated name");
+      name_ = (serving_ ? "relay-" : "chatter-") + std::to_string(port_);
+    }
 
     if (listener_) {
       listener_->set_on_connection([this](ws::net::TcpConnection::Ptr conn) {
@@ -218,7 +223,8 @@ class ChatCore {
   // else does); the sent line echoes into the queue from the loop thread
   // exactly like received lines, so ordering is the wire's ordering.
   void send(std::string_view line) {
-    if (!running_.load() || line.empty()) {
+    if (!running_.load() || line.empty() || line.size() > kMaxMessageBytes ||
+        line.find_first_of("\r\n") != std::string_view::npos) {
       return;
     }
     std::string outgoing = "SAY " + std::string{line};
@@ -279,14 +285,24 @@ class ChatCore {
   int port() const { return port_; }
   const std::string& name() const { return name_; }
   int peers() const { return live_.load(); }
+  // Direct LAN peers that completed HELLO (not merely open TCP sockets).
+  int direct_peers() const { return direct_live_.load(); }
   bool serving() const { return serving_; }
 
  private:
+  static bool valid_peer_name(std::string_view name) {
+    return !name.empty() && name.size() <= kMaxPeerName &&
+           name.find_first_of("\r\n") == std::string_view::npos;
+  }
+
   // Everything a fresh connection needs, every kind: HELLO on connect
   // (a room greets its members, a client greets the room, Lan pairs greet
   // each other), the kind's parser after, bookkeeping on close.
   void adopt(const ws::net::TcpConnection::Ptr& conn, Kind kind,
              std::string room_key) {
+    // Install normal close bookkeeping even for a rejected connection:
+    // outgoing LAN dials must clear dialed_, and relay links must retry.
+    const bool reject = peers_.size() >= kMaxConnections;
     const auto tag = std::make_shared<std::string>("?");
     ws::net::TcpConnection* self = conn.get();
     // The close callback's copy, taken before the Peer's move empties
@@ -299,13 +315,17 @@ class ChatCore {
     });
     conn->set_on_message([tag, kind, self, this](
                               std::span<const std::byte> message) {
+      if (message.size() > kMaxFrameBytes) {
+        (void)self->close();
+        return;
+      }
       std::string_view text = as_text(message);
       switch (kind) {
         case Kind::lan:
-          parse_lan(text, tag);
+          parse_lan(text, tag, self);
           return;
         case Kind::to_relay:
-          parse_room_link(text, tag);
+          parse_room_link(text, tag, self);
           return;
         case Kind::member:
           parse_member(text, tag, self);
@@ -317,6 +337,7 @@ class ChatCore {
         case Kind::lan: {
           if (*tag != "?") {
             forget_direct(*tag);
+            direct_live_.fetch_sub(1);
             push_line({*tag,
                        std::string{"left ("}
                            .append(ws::net::describe(why))
@@ -362,36 +383,65 @@ class ChatCore {
       }
       live_.fetch_sub(1);
     });
+    if (reject) {
+      (void)conn->close();
+    }
   }
 
   // v1's parser, verbatim, plus the direct-name bookkeeping the relay's
   // duplicate rule reads.
   void parse_lan(std::string_view text,
-                 const std::shared_ptr<std::string>& tag) {
+                 const std::shared_ptr<std::string>& tag,
+                 ws::net::TcpConnection* self) {
     if (text.starts_with("HELLO ")) {
       text.remove_prefix(6);
-      const bool first = *tag == "?";
-      *tag = std::string{text};  // copy: the span dies with the callback
-      if (first) {
-        // One count per HELLO that ever lands: a re-greet must not
-        // double the entry.
-        ++direct_names_[*tag];
+      if (text.empty() || text.size() > kMaxPeerName ||
+          text.find_first_of("\r\n") != std::string_view::npos) {
+        return;
       }
+      const bool first = *tag == "?";
+      if (first) {
+        ++direct_live_;
+      } else if (*tag != text) {
+        // A connection's identity is fixed by its first HELLO.
+        (void)self->close();
+        return;
+      } else {
+        return;  // repeated identical greeting is idempotent
+      }
+      *tag = std::string{text};  // copy: the span dies with the callback
+      ++direct_names_[*tag];
       push_line({*tag, "joined", true});
       return;
     }
     // SAY is this app's chat wrapper. Anything else still shows as-is.
     const std::string_view body =
         text.starts_with("SAY ") ? text.substr(4) : text;
+    if (body.size() > kMaxMessageBytes ||
+        body.find_first_of("\r\n") != std::string_view::npos) {
+      return;
+    }
     push_line({*tag, std::string{body}, false});
   }
 
   // Our link up to a room: HELLO names the room's operator (that is who
   // a SAY from here is), SYS is a room event, FROM is a member speaking.
   void parse_room_link(std::string_view text,
-                       const std::shared_ptr<std::string>& tag) {
+                       const std::shared_ptr<std::string>& tag,
+                       ws::net::TcpConnection* self) {
     if (text.starts_with("HELLO ")) {
       text.remove_prefix(6);
+      if (text.empty() || text.size() > kMaxPeerName ||
+          text.find_first_of("\r\n") != std::string_view::npos) {
+        return;
+      }
+      if (*tag != "?" && *tag != text) {
+        (void)self->close();
+        return;
+      }
+      if (*tag == text) {
+        return;
+      }
       *tag = std::string{text};
       push_line({*tag, "room linked", true});
       return;
@@ -404,8 +454,9 @@ class ChatCore {
     if (text.starts_with("FROM ")) {
       text.remove_prefix(5);
       const std::size_t space = text.find(' ');
-      if (space == std::string_view::npos) {
-        return;  // a malformed frame a room never sends; drop it quiet
+      if (space == std::string_view::npos || space == 0 ||
+          space > kMaxPeerName) {
+        return;  // malformed attribution is ignored
       }
       const std::string sender{text.substr(0, space)};
       if (direct_names_.count(sender) != 0) {
@@ -413,13 +464,22 @@ class ChatCore {
         // pair, this relayed copy would be the second showing. Drop.
         return;
       }
-      push_line({sender, std::string{text.substr(space + 1)}, false});
+      const std::string_view body = text.substr(space + 1);
+      if (body.size() > kMaxMessageBytes ||
+          body.find_first_of("\r\n") != std::string_view::npos) {
+        return;
+      }
+      push_line({sender, std::string{body}, false});
       return;
     }
     // SAY straight from the room is the operator speaking (this link's
     // tag); anything else shows as-is, v1's lenient tail.
     const std::string_view body =
         text.starts_with("SAY ") ? text.substr(4) : text;
+    if (body.size() > kMaxMessageBytes ||
+        body.find_first_of("\r\n") != std::string_view::npos) {
+      return;
+    }
     push_line({*tag, std::string{body}, false});
   }
 
@@ -430,6 +490,18 @@ class ChatCore {
                     ws::net::TcpConnection* self) {
     if (text.starts_with("HELLO ")) {
       text.remove_prefix(6);
+      if (text.empty() || text.size() > kMaxPeerName ||
+          text.find_first_of("\r\n") != std::string_view::npos) {
+        return;
+      }
+      if (*tag != "?" && *tag != text) {
+        // Names are immutable for the lifetime of a member connection.
+        (void)self->close();
+        return;
+      }
+      if (*tag == text) {
+        return;
+      }
       *tag = std::string{text};
       push_line({*tag, "joined", true});
       room_broadcast("SYS " + *tag + " joined", self);
@@ -450,6 +522,10 @@ class ChatCore {
     // nobody.
     if (text.starts_with("SAY ")) {
       text.remove_prefix(4);
+      if (text.size() > kMaxMessageBytes ||
+          text.find_first_of("\r\n") != std::string_view::npos) {
+        return;
+      }
       if (*tag != "?") {
         room_broadcast("FROM " + *tag + " " + std::string{text}, self);
       }
@@ -659,10 +735,15 @@ class ChatCore {
   // knows).
   void push_line(ChatLine line) {
     const std::time_t now = std::time(nullptr);
-    const std::tm* local = std::localtime(&now);
-    if (local != nullptr) {
-      line.sent_hh = local->tm_hour;
-      line.sent_mm = local->tm_min;
+    std::tm local{};
+#if defined(_WIN32)
+    const bool have_local = localtime_s(&local, &now) == 0;
+#else
+    const bool have_local = localtime_r(&now, &local) != nullptr;
+#endif
+    if (have_local) {
+      line.sent_hh = local.tm_hour;
+      line.sent_mm = local.tm_min;
     }
     const std::lock_guard<std::mutex> lock{mtx_};
     pending_.push_back(std::move(line));
@@ -674,6 +755,10 @@ class ChatCore {
   }
 
   static constexpr std::size_t kQueuedLines = 256;
+  static constexpr std::size_t kMaxConnections = 64;
+  static constexpr std::size_t kMaxPeerName = 64;
+  static constexpr std::size_t kMaxMessageBytes = 4096;
+  static constexpr std::size_t kMaxFrameBytes = kMaxMessageBytes + 128;
 
   // Declaration order matters: loop_ is declared first so it destructs
   // LAST - after the thread (which stop() has already joined) and after
@@ -715,7 +800,8 @@ class ChatCore {
   int port_ = 0;
   bool serving_ = false;
 
-  std::atomic<int> live_{0};          // connections up, for the status line
+  std::atomic<int> live_{0};          // open connections, for the status line
+  std::atomic<int> direct_live_{0};   // LAN peers that completed HELLO
   std::atomic<bool> running_{false};  // run() has not returned yet
 
   mutable std::mutex mtx_;         // guards pending_ only

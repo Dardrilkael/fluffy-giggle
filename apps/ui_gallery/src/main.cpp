@@ -478,6 +478,7 @@ protected:
         rebuild_font();
         sync_chrome();
         install_clipboard(gui_);  // Ctrl+C/X/V in the text inputs
+        install_ime_rect(gui_);  // Android soft keyboard for every text field
         // The drain seat: once per frame, between the events and
         // on_update, the shell drains this system - every progress
         // report and completion below lands on the main thread, where

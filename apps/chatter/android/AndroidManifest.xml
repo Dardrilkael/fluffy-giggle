@@ -32,8 +32,7 @@
          from API 28. -->
     <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="35" />
 
-    <!-- hasCode="true": the APK carries classes.dex with the
-         MulticastLock shim (apps without Java stay hasCode="false"). -->
+    <!-- Shared ws::ui Activity base plus Chatter's multicast-lock subclass. -->
     <application
         android:hasCode="true"
         android:label="ws chatter"

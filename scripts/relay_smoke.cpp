@@ -99,8 +99,12 @@ bool wait_until(Feed& feed, const std::string& what,
   return false;
 }
 
-bool paired_carol(const Feed& f) { return has_system(f, "joined"); }
-bool paired_bob(const Feed& f) { return has_system(f, "joined"); }
+bool paired_carol(const Feed& f) {
+  return f.core != nullptr && f.core->direct_peers() >= 1;
+}
+bool paired_bob(const Feed& f) {
+  return f.core != nullptr && f.core->direct_peers() >= 1;
+}
 bool room_linked(const Feed& f) { return has_system(f, "room linked"); }
 
 // How many "room linked" lines the feed holds. The relink waits must
@@ -118,8 +122,16 @@ int count_room_links(const Feed& f) {
 
 bool relinked(const Feed& f) { return count_room_links(f) >= 2; }
 
-bool relay_saw_bob(const Feed& f) { return has_system(f, "joined"); }
-bool relay_saw_carol(const Feed& f) { return has_system(f, "joined"); }
+bool relay_saw_member(const Feed& f, const std::string& name) {
+  for (const ChatLine& line : f.lines) {
+    if (line.system && line.name == name && line.text == "joined") {
+      return true;
+    }
+  }
+  return false;
+}
+bool relay_saw_bob(const Feed& f) { return relay_saw_member(f, "bob"); }
+bool relay_saw_carol(const Feed& f) { return relay_saw_member(f, "carol"); }
 
 int g_failures = 0;
 
@@ -159,12 +171,12 @@ int main() {
   // 1. Both transports up. The LAN pair HELLOs must land BEFORE any
   //    message is sent, or the duplicate-suppression race (direct link
   //    alive but tag in flight) would show the relay copy too.
-  check(wait_until(carol_feed, "carol paired with bob over LAN", paired_carol,
+  check(wait_until(carol_feed, "carol completed a direct LAN HELLO",
+                   paired_carol, 15000),
+        "carol completed a direct LAN handshake");
+  check(wait_until(bob_feed, "bob completed a direct LAN HELLO", paired_bob,
                    15000),
-        "carol paired with bob over LAN (feed has 'joined')");
-  check(wait_until(bob_feed, "bob paired with carol over LAN", paired_bob,
-                   15000),
-        "bob paired with carol over LAN (feed has 'joined')");
+        "bob completed a direct LAN handshake");
   check(wait_until(bob_feed, "bob's room link", room_linked, 15000),
         "bob linked the room");
   check(wait_until(carol_feed, "carol's room link", room_linked, 15000),
@@ -191,12 +203,19 @@ int main() {
   const auto carol_got_hello = [](const Feed& f) {
     return count_chat(f, "bob", "hello network") >= 1;
   };
-  wait_until(carol_feed, "carol received bob's hello", carol_got_hello, 15000);
+  const bool got_hello = wait_until(
+      carol_feed, "carol received bob's hello", carol_got_hello, 15000);
+  check(got_hello, "carol received bob's hello");
   std::this_thread::sleep_for(std::chrono::milliseconds{750});
   carol_feed.drain();
   check(count_chat(carol_feed, "bob", "hello network") == 1,
         "carol saw bob's message EXACTLY ONCE (two transports, one line)");
-  relay_feed.drain();
+  const auto relay_got_hello = [](const Feed& f) {
+    return count_chat(f, "bob", "hello network") >= 1;
+  };
+  const bool relay_received_hello = wait_until(
+      relay_feed, "relay received bob's hello", relay_got_hello, 15000);
+  check(relay_received_hello, "relay received bob's message");
   check(count_chat(relay_feed, "bob", "hello network") == 1,
         "relay saw bob's message once, attributed");
 
@@ -205,7 +224,9 @@ int main() {
   const auto bob_got_yes = [](const Feed& f) {
     return count_chat(f, "carol", "yes") >= 1;
   };
-  wait_until(bob_feed, "bob received carol's yes", bob_got_yes, 15000);
+  const bool got_yes = wait_until(
+      bob_feed, "bob received carol's yes", bob_got_yes, 15000);
+  check(got_yes, "bob received carol's yes");
   std::this_thread::sleep_for(std::chrono::milliseconds{750});
   bob_feed.drain();
   carol_feed.drain();
@@ -222,9 +243,12 @@ int main() {
   const auto carol_got_op = [](const Feed& f) {
     return count_chat(f, "relay", "hi from relay") >= 1;
   };
-  wait_until(bob_feed, "bob received the operator's hi", bob_got_op, 15000);
-  wait_until(carol_feed, "carol received the operator's hi", carol_got_op,
-             15000);
+  const bool bob_got_operator = wait_until(
+      bob_feed, "bob received the operator's hi", bob_got_op, 15000);
+  const bool carol_got_operator = wait_until(
+      carol_feed, "carol received the operator's hi", carol_got_op, 15000);
+  check(bob_got_operator, "bob received operator message");
+  check(carol_got_operator, "carol received operator message");
   std::this_thread::sleep_for(std::chrono::milliseconds{750});
   bob_feed.drain();
   carol_feed.drain();
