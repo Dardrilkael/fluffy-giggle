@@ -288,6 +288,92 @@ BakedGlyph rasterize_glyph(const stbtt_fontinfo& info,
     return g;
 }
 
+// The sdf mode's single step: stbtt's own distance field
+// (stbtt_GetCodepointSDF) straight into the baked-mask layout. The
+// convention: onedge_value 128 (alpha 0.5 is the outline), pixel_dist_scale
+// 128/range (one SOURCE px of distance moves alpha by 128/range), padding =
+// range on every side so the field reaches its saturation before the quad
+// ends. The gamma/boost/oversample knobs do not apply - a field is linear
+// distance, not coverage to weight - and the shader rebuilds the coverage
+// analytically per draw ((a - 0.5) / fwidth(a) + 0.5), so the atlas stays
+// theme- and zoom-independent. Metrics match rasterize_glyph EXCEPT the
+// box, which grows by the padding on every side (w/h are the field's, not
+// the ink's; offset_x/y move out with the apron) - the advance, the one
+// metric layout consumes across modes, is bit-identical.
+//
+// One post-pass after stbtt's field: INTERIOR STRETCH. stb measures the
+// distance to the OUTLINE, so a stem's centerline only ever sits
+// stem_width/2 px inside - at 24 px a 4 px stem's center reads 128+2*32
+// = 193, not 255 - and under magnification the shader's ramp renders the
+// unsaturated interior slightly thin (the classic limit of a plain
+// single-channel SDF). The stretch doubles the interior's slope
+// (a > 128 -> 128 + 2*(a-128), clamped): stems saturate at range/2 px
+// inside instead of range, the exterior ramp (which dominates the look -
+// zoom-in AA rides the OUTSIDE half) is untouched, and the outline
+// itself never moves. The visible trade: the interior AA ramp narrows to
+// range/2, invisible next to the exterior's.
+BakedGlyph rasterize_sdf_glyph(const stbtt_fontinfo& info,
+                               std::uint32_t codepoint, float scale,
+                               float baseline, int range) {
+    BakedGlyph g;
+    g.codepoint = codepoint;
+    int advance = 0;
+    int lsb = 0;
+    stbtt_GetCodepointHMetrics(&info, static_cast<int>(codepoint), &advance,
+                               &lsb);
+    g.advance = static_cast<float>(advance) * scale;
+
+    int w = 0;
+    int h = 0;
+    int x0 = 0;
+    int y0 = 0;
+    unsigned char* field = stbtt_GetCodepointSDF(
+        &info, scale, static_cast<int>(codepoint), range,
+        128, static_cast<float>(128) / static_cast<float>(range), &w, &h,
+        &x0, &y0);
+    if (field == nullptr || w <= 0 || h <= 0) {
+        stbtt_FreeSDF(field, nullptr);
+        return g;  // the blanks: an advance to honor, no bitmap
+    }
+    // White RGB, the distance field in alpha - the same page layout the
+    // coverage bitmaps use, so pack/upload stay untouched and the same
+    // sampler does for both. The interior stretch rides the copy: alpha
+    // above 128 doubles its distance-from-outline (the stem-saturation
+    // fix above), the exterior half passes through untouched.
+    g.w = static_cast<std::uint32_t>(w);
+    g.h = static_cast<std::uint32_t>(h);
+    g.rgba.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) *
+                      4u,
+                  255);
+    for (int row = 0; row < h; ++row) {
+        for (int col = 0; col < w; ++col) {
+            const std::uint8_t raw =
+                field[static_cast<std::size_t>(row) *
+                          static_cast<std::size_t>(w) +
+                      static_cast<std::size_t>(col)];
+            int a = raw;
+            if (a > 128) {
+                a = 128 + 2 * (a - 128);
+                if (a > 255) {
+                    a = 255;
+                }
+            }
+            g.rgba[(static_cast<std::size_t>(row) * static_cast<std::size_t>(w) +
+                    static_cast<std::size_t>(col)) * 4u + 3u] =
+                static_cast<std::uint8_t>(a);
+        }
+    }
+    stbtt_FreeSDF(field, nullptr);
+    // stbtt's box is baseline-relative and INCLUDES the padding; the
+    // glyph contract measures from the line top, so the same
+    // baseline + y0 folding rasterize_glyph does - the apron rides
+    // along in offset_y (draw_text positions the whole quad, field
+    // apron included).
+    g.offset_x = static_cast<float>(x0);
+    g.offset_y = baseline + static_cast<float>(y0);
+    return g;
+}
+
 }  // namespace
 
 std::uint32_t utf8_next(const char*& s) {
@@ -358,6 +444,12 @@ BakedFont bake_info(const stbtt_fontinfo& info, float pixel_height,
         return out;
     }
     const CoverageLut lut{effective_gamma(options)};
+    // The sdf mode's reach, clamped once - same policy as oversample_x:
+    // configuration noise, never a bake failure.
+    const int sdf_range = options.sdf_range < 1
+                              ? 1
+                              : (options.sdf_range > 16 ? 16
+                                                         : options.sdf_range);
 
     const float scale = stbtt_ScaleForPixelHeight(&info, pixel_height);
     int ascent = 0;
@@ -375,7 +467,9 @@ BakedFont bake_info(const stbtt_fontinfo& info, float pixel_height,
     for (std::uint32_t cp = kFirstCodepoint;
          cp < kFirstCodepoint + kBakedCount; ++cp) {
         out.glyphs.push_back(
-            rasterize_glyph(info, cp, scale, ascent_px, options, lut));
+            options.sdf
+                ? rasterize_sdf_glyph(info, cp, scale, ascent_px, sdf_range)
+                : rasterize_glyph(info, cp, scale, ascent_px, options, lut));
     }
 
     // The fallback box - the bake's one glyph past the ASCII range, the
@@ -394,17 +488,67 @@ BakedFont bake_info(const stbtt_fontinfo& info, float pixel_height,
     tofu.h = std::max(
         2u, static_cast<std::uint32_t>(std::lround(0.7f * pixel_height)));
     tofu.advance = 0.6f * pixel_height;
-    tofu.offset_x = 0.0f;
-    tofu.offset_y = std::max(0.0f, ascent_px - static_cast<float>(tofu.h));
-    // All white first, then the interior's coverage zeroes out: the 1 px
-    // border ring is the stroke, the hollow center draws nothing.
-    tofu.rgba.assign(static_cast<std::size_t>(tofu.w) * tofu.h * 4u, 255);
-    for (std::uint32_t ty = 0; ty < tofu.h; ++ty) {
-        for (std::uint32_t tx = 0; tx < tofu.w; ++tx) {
-            const bool edge =
-                tx == 0u || ty == 0u || tx + 1u == tofu.w || ty + 1u == tofu.h;
-            tofu.rgba[(static_cast<std::size_t>(ty) * tofu.w + tx) * 4u + 3u] =
-                edge ? 255 : 0;
+    if (options.sdf) {
+        // The sdf mode's tofu: the same 1 px stroke, but the field grows
+        // the apron (range each side) and the border ring carries the
+        // DISTANCE (128 on the stroke, falling off by 128/range per px
+        // out), so the shader's analytic ramp reconstructs the box
+        // sharp at any zoom too. The interior keeps 255 - inside the
+        // stroke the distance stays saturated - and the far apron reads
+        // 0 by the same clamping stbtt applies to its own fields.
+        const int pad = sdf_range;
+        const std::uint32_t fw = tofu.w + 2u * static_cast<std::uint32_t>(pad);
+        const std::uint32_t fh = tofu.h + 2u * static_cast<std::uint32_t>(pad);
+        tofu.offset_x = static_cast<float>(-pad);
+        tofu.offset_y = std::max(
+                             0.0f, ascent_px - static_cast<float>(tofu.h)) -
+                        static_cast<float>(pad);
+        tofu.rgba.assign(static_cast<std::size_t>(fw) * fh * 4u, 255);
+        const float step = 128.0f / static_cast<float>(sdf_range);
+        for (std::uint32_t fy = 0; fy < fh; ++fy) {
+            for (std::uint32_t fx = 0; fx < fw; ++fx) {
+                // The stroke ring's distance in apron units: how many
+                // source px the texel sits off the box's border band.
+                const float dx = fx < static_cast<std::uint32_t>(pad)
+                                     ? static_cast<float>(pad - 1 - fx)
+                                     : (fx >= fw - static_cast<std::uint32_t>(pad)
+                                            ? static_cast<float>(fx - (fw - pad))
+                                            : -1.0f);
+                const float dy = fy < static_cast<std::uint32_t>(pad)
+                                     ? static_cast<float>(pad - 1 - fy)
+                                     : (fy >= fh - static_cast<std::uint32_t>(pad)
+                                            ? static_cast<float>(fy - (fh - pad))
+                                            : -1.0f);
+                // In-band texels sit ON the stroke (inside a 1 px ring
+                // of it): 128. Out-of-band ones fall by one step per
+                // apron px, saturating like stbtt's own fields.
+                float alpha = 128.0f;
+                if (dx >= 0.0f || dy >= 0.0f) {
+                    const float d = dx > dy ? dx : dy;
+                    alpha = 128.0f - d * step;
+                    if (alpha < 0.0f) {
+                        alpha = 0.0f;
+                    }
+                }
+                tofu.rgba[(static_cast<std::size_t>(fy) * fw + fx) * 4u + 3u] =
+                    static_cast<std::uint8_t>(alpha + 0.5f);
+            }
+        }
+        tofu.w = fw;
+        tofu.h = fh;
+    } else {
+        tofu.offset_x = 0.0f;
+        tofu.offset_y = std::max(0.0f, ascent_px - static_cast<float>(tofu.h));
+        // All white first, then the interior's coverage zeroes out: the 1 px
+        // border ring is the stroke, the hollow center draws nothing.
+        tofu.rgba.assign(static_cast<std::size_t>(tofu.w) * tofu.h * 4u, 255);
+        for (std::uint32_t ty = 0; ty < tofu.h; ++ty) {
+            for (std::uint32_t tx = 0; tx < tofu.w; ++tx) {
+                const bool edge =
+                    tx == 0u || ty == 0u || tx + 1u == tofu.w || ty + 1u == tofu.h;
+                tofu.rgba[(static_cast<std::size_t>(ty) * tofu.w + tx) * 4u + 3u] =
+                    edge ? 255 : 0;
+            }
         }
     }
     out.glyphs.push_back(std::move(tofu));
@@ -710,8 +854,15 @@ BakedGlyph bake_face_glyph(const FaceBake& face, std::uint32_t codepoint,
         return {};
     }
     const CoverageLut lut{effective_gamma(options)};
-    return rasterize_glyph(face.info, codepoint, face.scale, baseline_y,
-                           options, lut);
+    const int sdf_range = options.sdf_range < 1
+                              ? 1
+                              : (options.sdf_range > 16 ? 16
+                                                         : options.sdf_range);
+    return options.sdf
+               ? rasterize_sdf_glyph(face.info, codepoint, face.scale,
+                                     baseline_y, sdf_range)
+               : rasterize_glyph(face.info, codepoint, face.scale, baseline_y,
+                                 options, lut);
 }
 
 const FaceBake* FontExtra::resolve(std::uint32_t codepoint) const {

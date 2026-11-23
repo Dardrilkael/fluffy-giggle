@@ -20,6 +20,18 @@
 
 namespace ws::ui::r2d::batch {
 
+// How a quad rides the glyph channel of tex_index (see the two flag
+// constants above): plain quads carry none, coverage-text quads add
+// kTextCoverageFlag (the snapped-bitmap path), SDF-text quads add
+// kTextSdfFlag (the distance-field path). An enum, not a bool, because
+// the channel is three-valued now; GlyphCoverage and GlyphSdf spell
+// the old `false`/`true` for every pre-existing call.
+enum class GlyphMode : std::uint8_t {
+    none = 0,
+    coverage = 1,
+    sdf = 2,
+};
+
 inline constexpr std::uint32_t kMaxTexturesPerChunk = 32;   // = the sampler2D[32] array in shaders/batch.frag
 // One chunk never exceeds this many quads: 16384 quads = 65536 vertices,
 // exactly the u16 index space, so the flush's chunk-local index pattern
@@ -53,6 +65,18 @@ inline constexpr std::uint32_t kMaxBindlessTextures = 1024;
 // collides with a texture index and never loses the slot to rounding.
 // Comment-tied to `kTextFlag` in shaders/batch.frag.
 inline constexpr float kTextCoverageFlag = 4096.0f;
+
+// The second glyph channel: a quad from an SDF-baked font (the canvas
+// text mode - FontBakeOptions::sdf) carries (slot + kTextSdfFlag), and
+// the shader reconstructs the coverage analytically from the distance
+// field per draw (fwidth-scaled ramp), so one bake stays sharp at any
+// zoom or rotation. 8192 = kTextCoverageFlag * 2: a SECOND bit-mass
+// past every legal slot, never a third arithmetic combination - a
+// tex_index >= 8192 is unambiguously SDF text, 4096..8191 coverage
+// text, and the shader never confuses the two. Both flags stay far
+// below float's exact-integer limit with the slot recoverable after
+// one subtraction.
+inline constexpr float kTextSdfFlag = 8192.0f;
 
 // The "no clip pushed" rect: the whole framebuffer. The flush intersects
 // every chunk clip with the frame extent, so infinite extents mean
@@ -217,12 +241,14 @@ public:
     // antialiasing fringes ramp alpha across a quad's corners. A solid
     // quad is this with four identical rows (the plain push_quad is the
     // cheaper spelling of exactly that).
-    // `text` marks a glyph quad: the vertices' tex_index carries
-    // kTextCoverageFlag on top of the slot (see its comment). Default
-    // false = every pre-existing caller, bit for bit.
+    // `glyph` marks a glyph quad: the vertices' tex_index carries the
+    // mode's flag on top of the slot (see the constants above) - coverage
+    // for the snapped-bitmap text path, sdf for the distance-field one.
+    // Default none = every pre-existing caller, bit for bit.
     bool push_quad_vcol(const float (&pos)[4][3], const float (&uv)[4][2],
                         const float (&colors)[4][4],
-                        std::uint32_t texture_id, bool text = false);
+                        std::uint32_t texture_id,
+                        GlyphMode glyph = GlyphMode::none);
 
     // The rounded-rect sibling: same guards and cap split, but the quad
     // names no texture. `radius` is the corner radius in WORLD units;

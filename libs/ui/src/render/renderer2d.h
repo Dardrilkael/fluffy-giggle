@@ -67,6 +67,12 @@ struct DrawCommand {
                           // pushes it with batch::kTextCoverageFlag, so the
                           // shader reads the texel as a coverage mask and
                           // applies its text contrast curve
+    // SDF text (the second glyph mode): set only for quads from an
+    // sdf-baked font (draw_text on FontBakeOptions::sdf). The replay
+    // then adds batch::kTextSdfFlag INSTEAD of the coverage flag, and
+    // the shader reconstructs the coverage from the distance field per
+    // draw. Never both: the two bands are disjoint (see batch.frag).
+    bool text_sdf = false;
 };
 
 // One begin() block's camera state, snapshotted at stash time. The block's
@@ -241,10 +247,13 @@ public:
     void draw_sprite(float x, float y, float z, float w, float h,
                      std::uint32_t color, Sprite sprite);
     // The glyph draw path's quad constructor: the sprite's rect supplies
-    // pos/uv, the color is uniform, and the quad is recorded with text=true
-    // so the replay tags it for the shader's contrast curve.
+    // pos/uv, the color is uniform, and the quad is recorded on the glyph
+    // channel so the replay tags it for the shader's contrast curve - the
+    // coverage flag for bitmap fonts (text), or the SDF flag for
+    // distance-field fonts (text_sdf; the two bands are disjoint).
     void draw_sprite_quad(const Sprite& sprite, const float (&pos)[4][3],
-                          const float (&uv)[4][2], std::uint32_t color);
+                          const float (&uv)[4][2], std::uint32_t color,
+                          bool text_sdf = false);
     FrameSize sprite_size(Sprite sprite) const;
     // Installs a page's sub-rect table; Sprite::page is its key. Production
     // (load_atlas) calls this per uploaded page; tests inject synthetic
@@ -324,9 +333,13 @@ private:
     // Appends one fully-expanded quad command; drops it (with the once-per-
     // frame warn) when no begin() block is open. `radius > 0` marks the
     // command as draw_rounded_quad's SDF form (see DrawCommand::radius).
+    // `text_sdf` selects the SECOND glyph channel (SDF-baked fonts): the
+    // command then carries text_sdf, never text, and the replay flags the
+    // quad with batch::kTextSdfFlag instead.
     void record(const char* what, const float (&pos)[4][3],
                 const float (&uv)[4][2], std::uint32_t color, Texture texture,
-                float radius = 0.0f, bool text = false);
+                float radius = 0.0f, bool text = false,
+                bool text_sdf = false);
     // record()'s per-corner spelling (draw_vertex_quad): same guards, same
     // command list, but each corner's packed color comes from its own rgba
     // row (clamped 0..1 before packing - the canvas math may overshoot on

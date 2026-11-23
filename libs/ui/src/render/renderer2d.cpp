@@ -136,11 +136,15 @@ void Renderer2D::frame_end() {
             // record() already proved the id's generation. Per-corner
             // colors ride the vcol push (identical rows for the plain
             // draws - the same vertices push_quad would have built).
-            // Text glyphs carry the coverage flag so the shader applies
-            // its contrast curve (see batch::kTextCoverageFlag).
+            // Glyph quads carry their band's flag: the coverage flag
+            // for bitmap text (the contrast curve), the SDF flag for
+            // distance-field text (the analytic ramp + the curve).
+            const batch::GlyphMode glyph =
+                cmd.text ? batch::GlyphMode::coverage
+                : cmd.text_sdf ? batch::GlyphMode::sdf
+                               : batch::GlyphMode::none;
             (void)batch_.push_quad_vcol(cmd.pos, cmd.uv, color,
-                                        cmd.texture.id & kSlotMask,
-                                        cmd.text);
+                                        cmd.texture.id & kSlotMask, glyph);
         }
     }
     batch_.close_segment();
@@ -262,7 +266,8 @@ void Renderer2D::stash_camera(const Camera3D& camera) {
 
 void Renderer2D::record(const char* what, const float (&pos)[4][3],
                         const float (&uv)[4][2], std::uint32_t color,
-                        Texture texture, float radius, bool text) {
+                        Texture texture, float radius, bool text,
+                        bool text_sdf) {
     if (!camera_stashed_) {
         warn_drop(what);  // outside any begin()/end() block
         return;
@@ -298,6 +303,7 @@ void Renderer2D::record(const char* what, const float (&pos)[4][3],
     cmd.color[3] = color;
     cmd.radius = radius;
     cmd.text = text;
+    cmd.text_sdf = text_sdf;
     const float* clip = active_clip();
     for (int i = 0; i < 4; ++i) {
         cmd.clip[i] = clip[i];
@@ -928,17 +934,20 @@ void Renderer2D::draw_sprite(float x, float y, float z, float w, float h,
 void Renderer2D::draw_sprite_quad(const Sprite& sprite,
                                   const float (&pos)[4][3],
                                   const float (&uv)[4][2],
-                                  std::uint32_t color) {
+                                  std::uint32_t color, bool text_sdf) {
     if (!camera_stashed_) {
         warn_drop("draw_sprite_quad");  // outside any begin()/end() block
         return;
     }
-    // Record as a text glyph quad: the sprite's page supplies the texture,
-    // and text=true tags it for the shader's coverage path (alpha-channel
-    // coverage + the contrast curve - see batch.frag). Glyph pages are
-    // white-RGB/coverage-in-alpha, so this is ONLY for glyph-page sprites;
-    // a plain draw_sprite/draw_image quad must never come through here.
-    record("draw_sprite_quad", pos, uv, color, Texture{sprite.page}, 0.0f, true);
+    // Record as a glyph quad: the sprite's page supplies the texture,
+    // and the glyph channel tags it for the shader - text=true routes
+    // the coverage path (alpha-channel mask + the contrast curve), the
+    // text_sdf spelling routes the distance-field path (the analytic
+    // ramp + the same curve). Glyph pages are white-RGB with the mask
+    // or the field in alpha, so this is ONLY for glyph-page sprites; a
+    // plain draw_sprite/draw_image quad must never come through here.
+    record("draw_sprite_quad", pos, uv, color, Texture{sprite.page}, 0.0f,
+           !text_sdf, text_sdf);
 }
 
 FrameSize Renderer2D::sprite_size(Sprite sprite) const {
@@ -976,16 +985,20 @@ float Renderer2D::draw_text(float x, float y, const char* utf8_text,
     // and sub-pixel camera motion must stay smooth. Camera pan is not a
     // gate - a fractional pan shifts every glyph by one common phase;
     // the snap kills per-glyph jitter, not uniform motion.
+    // SDF fonts never snap: the field's analytic ramp is the antialiasing
+    // (rounding the quad would quantize the ramp's input for nothing),
+    // and a canvas label under zoom has no texel-on-pixel grid to land
+    // on anyway.
+    const font::FontExtra* extra = font.extras_state();
+    const bool use_shader_contrast = extra->options.shader_contrast;
+    const bool font_is_sdf = extra->options.sdf;
     bool snap = false;
-    if (camera_stashed_ && !current_perspective_) {
+    if (!font_is_sdf && camera_stashed_ && !current_perspective_) {
         const Camera2D& cam = frame_cameras_[current_epoch_ - 1].camera;
         snap = cam.rotation == 0.0f && cam.zoom == 1.0f;
     }
     const char* s = utf8_text;
     float pen_x = x;
-    // Check if this font uses shader contrast at draw time (the option can
-    // be changed after baking via font.extras_state()->options).
-    const bool use_shader_contrast = font.extras_state()->options.shader_contrast;
     for (std::uint32_t cp = font::utf8_next(s); cp != 0u;
          cp = font::utf8_next(s)) {
         const Font::Glyph* g = font.glyph(cp);
@@ -1015,9 +1028,15 @@ float Renderer2D::draw_text(float x, float y, const char* utf8_text,
                 // Icons (Private Use Area U+E000-U+F8FF) are shapes, not letters:
                 // they stay on the plain sprite path even in a shader-contrast font.
                 const bool is_icon = (cp >= 0xE000 && cp <= 0xF8FF);
-                // Only flag as text glyph if shader contrast is enabled AND it's not an icon.
-                const bool is_text_glyph = use_shader_contrast && !is_icon;
-                if (is_text_glyph) {
+                // The glyph channel, per glyph: an SDF font's letters ride the
+                // distance-field band (the analytic ramp keeps them sharp at
+                // zoom/rotation); a shader-contrast bitmap font's letters ride
+                // the coverage band; everything else (icons, baked-contrast
+                // bitmaps) is a plain sprite.
+                if (font_is_sdf && !is_icon) {
+                    draw_sprite_quad(g->sprite, pos, uv, color,
+                                     /*text_sdf=*/true);
+                } else if (use_shader_contrast && !is_icon) {
                     draw_sprite_quad(g->sprite, pos, uv, color);
                 } else {
                     record("draw_text_plain", pos, uv, color, Texture{g->sprite.page},

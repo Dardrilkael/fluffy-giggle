@@ -438,6 +438,7 @@ class CircsimApp final : public ws::ui::App {
         editor_.toasts = &shell_->toasts();
         editor_.font = font_.empty() ? nullptr : &font_;
         editor_.font_mono = font_mono_.empty() ? nullptr : &font_mono_;
+        editor_.font_canvas = font_canvas_.empty() ? nullptr : &font_canvas_;
         editor_.set_status = [this](std::string text) {
             shell_->set_status(std::move(text));
         };
@@ -634,6 +635,22 @@ class CircsimApp final : public ws::ui::App {
             (void)ws::ui::r2d::font_add_face(
                 font_, font_or(kUiFontPath, kExtraFontPath), 0);
             (void)ws::ui::r2d::font_add_face(font_, kExtraFontPath, 1);
+        }
+        // The canvas-label face: the UI face's own bake in the SDF mode -
+        // same face, same size, same advances, but the pages carry
+        // distance fields and draw_text routes it through the shader's
+        // analytic ramp, so net/pin/part labels stay sharp at any zoom or
+        // rotation. The chrome keeps the snapped bitmap font (1:1 UI text
+        // reads crisper from its own texel-on-pixel snap); a canvas label
+        // under the camera has no such grid to land on.
+        font_canvas_ = load_ui_font(16.0f * scale_, bake.with_sdf());
+        if (!font_canvas_.empty()) {
+            // The label face answers the same carriers as the UI face -
+            // a zoomed label must never degrade to the tofu box one zoom
+            // level past the ASCII bake.
+            (void)ws::ui::r2d::font_add_face(
+                font_canvas_, font_or(kUiFontPath, kExtraFontPath), 0);
+            (void)ws::ui::r2d::font_add_face(font_canvas_, kExtraFontPath, 1);
         }
         // The heading face: the semibold at 18 px against the body's
         // 16 - "bold and slightly larger", the typography brief's own
@@ -1889,6 +1906,7 @@ class CircsimApp final : public ws::ui::App {
     ws::ui::r2d::Font font_;
     ws::ui::r2d::Font font_strong_;  // the semibold sibling (headings)
     ws::ui::r2d::Font font_mono_;
+    ws::ui::r2d::Font font_canvas_;  // the labels' SDF face (canvas text)
     int title_bar_dark_ = -1;  // -1 = not pushed to the OS yet
     int title_bar_frames_ = 0;
     bool font_dark_ = true;  // the brightness the fonts are baked for

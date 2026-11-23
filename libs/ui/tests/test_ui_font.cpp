@@ -403,3 +403,197 @@ TEST_CASE("the lazy face bake rides the owning font's options") {
     CHECK(plain.offset_y == tuned.offset_y);
     CHECK(ink_of(tuned) > ink_of(plain));    // the gamma really applied
 }
+
+// --- the sdf mode (canvas text) ----------------------------------------------
+// The distance-field bake: same glyph contract, alpha carries the FIELD
+// (128 = the outline) instead of coverage. The metrics that layout
+// consumes across modes stay identical, the boxes grow the apron, and
+// the invariants the analytic ramp depends on hold - the field spans
+// both sides of the outline and saturates inside.
+
+TEST_CASE("sdf: the field spans both sides of the outline and saturates") {
+    const BakedFont baked = ws::ui::r2d::font::bake_inter(
+        ws::ui::r2d::font::inter_regular_ttf(), 24.0f,
+        FontBakeOptions{}.with_sdf());
+    REQUIRE(baked.ok);
+    REQUIRE(baked.glyphs.size() == 96u);
+
+    for (const char c : {'A', 'g', 'W', '0'}) {
+        const BakedGlyph& g = glyph_of(baked, c);
+        REQUIRE(g.w > 0u);
+        REQUIRE(g.h > 0u);
+        // The far apron reads 0 (the field's outside reach) and the
+        // outline's crossing exists: the two facts the analytic ramp
+        // needs. A 24 px face's stems are ~2 px wide, so the interior
+        // never gets `range` px deep - saturation is NOT the invariant
+        // at this size (see the stretch comment in font.cpp); the
+        // interior being LIFTED ABOVE the outline value is.
+        std::uint32_t zeroed = 0;
+        std::uint32_t onedge_band = 0;
+        std::uint32_t interior = 0;
+        for (std::size_t i = 0; i < g.rgba.size() / 4u; ++i) {
+            const std::uint8_t a = g.rgba[i * 4u + 3u];
+            if (a == 0u) {
+                ++zeroed;
+            }
+            // The transition band (120..136): the outline's ~1 px
+            // crossing between apron and interior.
+            if (a >= 120u && a <= 136u) {
+                ++onedge_band;
+            }
+            if (a > 128u) {
+                ++interior;
+            }
+        }
+        CHECK(zeroed > 0u);
+        CHECK(onedge_band > 0u);
+        CHECK(interior > 0u);
+        // The max lives in the interior (the stretch lifted it past the
+        // outline's 128), the min in the apron corners.
+        std::uint8_t max_a = 0;
+        std::uint8_t min_a = 255;
+        for (std::size_t i = 0; i < g.rgba.size() / 4u; ++i) {
+            max_a = std::max(max_a, g.rgba[i * 4u + 3u]);
+            min_a = std::min(min_a, g.rgba[i * 4u + 3u]);
+        }
+        CHECK(max_a > 128u);
+        CHECK(min_a == 0u);
+    }
+}
+
+TEST_CASE("sdf: metrics match the bitmap bake, boxes grow the apron") {
+    const std::span<const std::uint8_t> ttf =
+        ws::ui::r2d::font::inter_regular_ttf();
+    const BakedFont bitmap = ws::ui::r2d::font::bake_inter(ttf, 24.0f);
+    const BakedFont field = ws::ui::r2d::font::bake_inter(
+        ttf, 24.0f, FontBakeOptions{}.with_sdf());
+    REQUIRE(bitmap.ok);
+    REQUIRE(field.ok);
+
+    CHECK(field.pixel_height == bitmap.pixel_height);
+    CHECK(field.line_height == bitmap.line_height);
+    CHECK(field.ascent_px == bitmap.ascent_px);
+
+    // The advance is THE cross-mode metric (measure_text and layout
+    // must not move when a theme flips a font to the sdf mode):
+    // bit-identical for every glyph, the blanks included.
+    for (std::size_t i = 0; i < bitmap.glyphs.size(); ++i) {
+        CHECK(field.glyphs[i].advance == bitmap.glyphs[i].advance);
+        CHECK(field.glyphs[i].codepoint == bitmap.glyphs[i].codepoint);
+    }
+
+    // The box grows by the apron on each side (range 4: the ink box of
+    // the bitmap plus 8 px in each dimension, offsets moved out with
+    // it). The space keeps no bitmap in either mode.
+    const BakedGlyph& bm = glyph_of(bitmap, 'A');
+    const BakedGlyph& sd = glyph_of(field, 'A');
+    CHECK(sd.w == bm.w + 8u);
+    CHECK(sd.h == bm.h + 8u);
+    CHECK(sd.offset_x == bm.offset_x - 4.0f);
+    CHECK(sd.offset_y == bm.offset_y - 4.0f);
+    CHECK(glyph_of(bitmap, ' ').w == 0u);
+    CHECK(glyph_of(field, ' ').w == 0u);
+}
+
+TEST_CASE("sdf: the fallback box bakes a field too") {
+    const BakedFont baked = ws::ui::r2d::font::bake_inter(
+        ws::ui::r2d::font::inter_regular_ttf(), 16.0f,
+        FontBakeOptions{}.with_sdf());
+    REQUIRE(baked.ok);
+    const BakedGlyph& tofu = baked.glyphs.back();
+    // The apron: the box's own (8x11-ish at 16 px) plus 2*range.
+    CHECK(tofu.w > 8u);
+    CHECK(tofu.h > 8u);
+    CHECK(tofu.advance > 0.0f);
+    // The tofu is a 1 px STROKE RING, not a filled shape: both sides of
+    // the ring are OUTSIDE the outline, so the field peaks AT the ring
+    // (128) and decays outward on both sides - there is no interior to
+    // saturate, and the letters' interior stretch never engages (nothing
+    // reads above 128). What the shader needs to reconstruct it sharp:
+    // the onedge band at 128 and the outward decay to 0.
+    std::uint8_t max_a = 0;
+    std::uint8_t min_a = 255;
+    bool has_128 = false;
+    for (std::size_t i = 0; i < tofu.rgba.size() / 4u; ++i) {
+        const std::uint8_t a = tofu.rgba[i * 4u + 3u];
+        max_a = std::max(max_a, a);
+        min_a = std::min(min_a, a);
+        if (a >= 126u && a <= 130u) {
+            has_128 = true;
+        }
+    }
+    CHECK(max_a >= 128u);  // the ring's onedge value
+    CHECK(max_a <= 138u);  // a stroke, never a filled interior
+    // The apron decays outward but the 1 px ring sits inside a range-deep
+    // apron, so the rim's floor is 128 - (range-1)*step, not yet 0 - the
+    // letters' stb fields clamp their own far reach to 0 at the padding
+    // boundary; the synthesized ring's rim stops one step short of it.
+    CHECK(min_a <= 32u);   // the rim, decaying outward
+    CHECK(has_128);        // the stroke's onedge band
+}
+
+TEST_CASE("sdf: the lazy face bake rides the owning font's sdf options") {
+    const std::span<const std::uint8_t> ttf =
+        ws::ui::r2d::font::inter_regular_ttf();
+    const int offset = stbtt_GetFontOffsetForIndex(ttf.data(), 0);
+    const float baseline = 18.0f;
+    ws::ui::r2d::font::FaceBake face;
+    face.bytes.assign(ttf.begin(), ttf.end());
+    // The info's pointers reach into face.bytes' own heap buffer (the
+    // copy above), never into ttf or the struct itself.
+    REQUIRE(stbtt_InitFont(&face.info, face.bytes.data(), offset));
+    face.scale = stbtt_ScaleForPixelHeight(&face.info, 24.0f);
+    face.ok = true;
+
+    const BakedGlyph bitmap = ws::ui::r2d::font::bake_face_glyph(
+        face, 0x00E9u, baseline, FontBakeOptions{});
+    const BakedGlyph field = ws::ui::r2d::font::bake_face_glyph(
+        face, 0x00E9u, baseline, FontBakeOptions{}.with_sdf());
+    REQUIRE(bitmap.w > 0u);
+    REQUIRE(field.w > 0u);
+    CHECK(field.advance == bitmap.advance);
+    CHECK(field.w == bitmap.w + 8u);
+    CHECK(field.h == bitmap.h + 8u);
+    // The field really is a field: the bitmap's alpha is 0/255-heavy
+    // (coverage), the sdf's spans 0..255 with an onedge band.
+    bool bitmap_binary = false;
+    for (std::size_t i = 0; i < bitmap.rgba.size() / 4u; ++i) {
+        const std::uint8_t a = bitmap.rgba[i * 4u + 3u];
+        if (a != 0u && a != 255u) {
+            bitmap_binary = true;  // mid coverage exists: NOT binary
+            break;
+        }
+    }
+    CHECK(bitmap_binary);  // the coverage bake antialiases
+    bool field_span = false;
+    for (std::size_t i = 0; i < field.rgba.size() / 4u; ++i) {
+        const std::uint8_t a = field.rgba[i * 4u + 3u];
+        if (a >= 120u && a <= 136u) {
+            field_span = true;
+            break;
+        }
+    }
+    CHECK(field_span);
+}
+
+TEST_CASE("sdf: the range knob clamps, never fails the bake") {
+    const std::span<const std::uint8_t> ttf =
+        ws::ui::r2d::font::inter_regular_ttf();
+    const auto bake_at = [&](int range) {
+        FontBakeOptions options;
+        options.sdf = true;
+        options.sdf_range = range;
+        return ws::ui::r2d::font::bake_inter(ttf, 24.0f, options);
+    };
+    REQUIRE(bake_at(0).ok);    // clamps to 1
+    REQUIRE(bake_at(1).ok);
+    REQUIRE(bake_at(4).ok);
+    REQUIRE(bake_at(64).ok);   // clamps to 16
+    REQUIRE(bake_at(-3).ok);
+    // The clamp bounds the apron: range 1 grows the box by exactly 2,
+    // range 64 does NOT grow it by 128 (it bakes at 16).
+    const BakedFont bitmap = ws::ui::r2d::font::bake_inter(ttf, 24.0f);
+    const BakedGlyph& bm = glyph_of(bitmap, 'A');
+    CHECK(glyph_of(bake_at(1), 'A').w == bm.w + 2u);
+    CHECK(glyph_of(bake_at(64), 'A').w == bm.w + 32u);
+}

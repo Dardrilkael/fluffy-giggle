@@ -25,6 +25,12 @@
 // applies the luminance-dependent contrast curve instead of the plain
 // v_color * texel multiply. This is the runtime text contrast feature:
 // one atlas serves all themes/text colors without re-bake on theme flip.
+// A tex_index >= kTextSdfFlag (8192) marks an SDF GLYPH quad (the
+// canvas text mode): the alpha channel carries the SIGNED DISTANCE
+// FIELD (0/255 = range px outside, 128 = on the outline, 255 = range
+// px inside), and the coverage is reconstructed analytically per draw
+// so one bake stays sharp at any zoom or rotation. Comment-tied to
+// batch::kTextSdfFlag in batch_core.h.
 
 #ifdef WS_BINDLESS
 #extension GL_EXT_nonuniform_qualifier : require
@@ -49,6 +55,12 @@ layout(set = 0, binding = 0) uniform sampler2D u_textures[32];
 // never loses the slot to rounding. Comment-tied to
 // batch::kTextCoverageFlag in batch_core.h.
 const float kTextCoverageFlag = 4096.0f;
+
+// The second glyph channel's flag (canvas SDF text): 8192 = double the
+// coverage flag's mass, so the two bands never mix - >= 8192 is SDF
+// text, 4096..8191 coverage text. Comment-tied to
+// batch::kTextSdfFlag in batch_core.h.
+const float kTextSdfFlag = 8192.0f;
 
 // Text contrast curve. The glyph atlas texel is white RGB with the
 // LINEAR coverage in ALPHA (font.cpp's "RGB white, coverage in alpha"
@@ -111,6 +123,32 @@ void main() {
         const float aa = max(fwidth(dist), 1e-4);
         const float coverage = clamp(0.5 - dist / aa, 0.0, 1.0);
         out_color = vec4(v_color.rgb, v_color.a * coverage);
+        return;
+    }
+    // SDF glyph channel: tex_index >= kTextSdfFlag (8192). The alpha
+    // texel is the signed distance (128 = the outline), and the ramp
+    // reconstructs the coverage ANALYTICALLY at the quad's on-screen
+    // scale: fwidth(dist) measures one source pixel's footprint on
+    // screen, so dividing the distance by it normalizes both zoom and
+    // rotation into a ~1 screen-px edge transition. The result feeds
+    // the SAME contrast curve as the bitmap path - the theme
+    // independence carries over unchanged.
+    if (v_tex_index >= kTextSdfFlag) {
+        const int sdf_index = int((v_tex_index - kTextSdfFlag) + 0.5);
+        float dist;
+#ifdef WS_BINDLESS
+        dist = texture(u_textures[nonuniformEXT(sdf_index)], v_uv).a;
+#else
+        dist = texture(u_textures[sdf_index], v_uv).a;
+#endif
+        // 0..255 -> 0..1, the outline at 0.5: the field's convention
+        // (onedge_value 128, pixel_dist_scale 128/range at bake time).
+        dist = dist / 255.0;
+        const float aa = max(fwidth(dist), 1e-4);
+        const float coverage =
+            clamp((dist - 0.5) / aa + 0.5, 0.0, 1.0);
+        const float cov = text_coverage(coverage, v_color.rgb);
+        out_color = vec4(v_color.rgb, v_color.a * cov);
         return;
     }
     // Glyph channel: tex_index >= kTextCoverageFlag (4096).

@@ -314,8 +314,10 @@ TEST_CASE("push_quad_vcol: the text flag rides on top of the slot, both tiers") 
         core.begin_frame();
         core.open_segment(default_vp());
         REQUIRE(core.push_quad_vcol(pos, uv, white, 40u));         // plain
-        REQUIRE(core.push_quad_vcol(pos, uv, white, 41u, true));   // glyph
-        REQUIRE(core.push_quad_vcol(pos, uv, white, 40u, true));   // glyph, slot 0
+        REQUIRE(core.push_quad_vcol(pos, uv, white, 41u,
+                            batch::GlyphMode::coverage));  // glyph
+        REQUIRE(core.push_quad_vcol(pos, uv, white, 40u,
+                            batch::GlyphMode::coverage));  // glyph, slot 0
         const auto& v = core.vertices();
         CHECK(v[0].tex_index == 0.0f);
         CHECK(v[4].tex_index == batch::kTextCoverageFlag + 1.0f);
@@ -330,7 +332,8 @@ TEST_CASE("push_quad_vcol: the text flag rides on top of the slot, both tiers") 
         core.begin_frame();
         core.use_global_texture_ids(true);
         core.open_segment(default_vp());
-        REQUIRE(core.push_quad_vcol(pos, uv, white, 1023u, true));
+        REQUIRE(core.push_quad_vcol(pos, uv, white, 1023u,
+                            batch::GlyphMode::coverage));
         CHECK(core.vertices()[0].tex_index ==
               batch::kTextCoverageFlag + 1023.0f);
         CHECK(core.chunk(0).texture_count == 0);
@@ -339,6 +342,40 @@ TEST_CASE("push_quad_vcol: the text flag rides on top of the slot, both tiers") 
     CHECK(static_cast<int>(batch::kTextCoverageFlag + 1023.0f -
                            batch::kTextCoverageFlag + 0.5f) == 1023);
     CHECK(batch::kTextCoverageFlag > 1023.0f);
+    // The SDF band: disjoint from the coverage band, slot recoverable
+    // by ITS subtraction - the shader's second glyph mode. Chunked tier
+    // (the slots are chunk-local: 41 is slot 0, 1023 slot 1).
+    {
+        BatchCore core;
+        core.begin_frame();
+        core.open_segment(default_vp());
+        REQUIRE(core.push_quad_vcol(pos, uv, white, 41u,
+                                    batch::GlyphMode::sdf));
+        REQUIRE(core.push_quad_vcol(pos, uv, white, 1023u,
+                                    batch::GlyphMode::sdf));
+        const auto& v = core.vertices();
+        CHECK(v[0].tex_index == batch::kTextSdfFlag + 0.0f);
+        CHECK(v[4].tex_index == batch::kTextSdfFlag + 1.0f);
+        // The mode never touches the chunk's own table, same as
+        // coverage: two textures, two slots.
+        CHECK(core.chunk(0).texture_count == 2);
+    }
+    // Bindless tier: the GLOBAL registry slot rides the band directly.
+    {
+        BatchCore core;
+        core.begin_frame();
+        core.use_global_texture_ids(true);
+        core.open_segment(default_vp());
+        REQUIRE(core.push_quad_vcol(pos, uv, white, 1023u,
+                                    batch::GlyphMode::sdf));
+        CHECK(core.vertices()[0].tex_index ==
+              batch::kTextSdfFlag + 1023.0f);
+        CHECK(core.chunk(0).texture_count == 0);
+    }
+    CHECK(batch::kTextSdfFlag == 2.0f * batch::kTextCoverageFlag);
+    CHECK(static_cast<int>(batch::kTextSdfFlag + 1023.0f -
+                           batch::kTextSdfFlag + 0.5f) == 1023);
+    CHECK(batch::kTextSdfFlag > 1023.0f);
 }
 
 TEST_CASE("global texture ids skip the chunk table (bindless mode)") {
@@ -9597,6 +9634,70 @@ TEST_CASE("draw_text: glyph channel only for shader-contrast fonts, never sprite
     REQUIRE(mixed.size() == 8);
     CHECK(mixed[0] == kFlag);   // 'A'
     CHECK(mixed[4] == 0.0f);    // U+E000: the icon range, plain path
+}
+
+TEST_CASE("draw_text: the sdf band for sdf-baked fonts, and no snap for them") {
+    using namespace ws::ui::r2d;
+    constexpr float kSdfFlag = batch::kTextSdfFlag;
+    const auto run = [](const Font& font, const char* text) {
+        Renderer2D r;
+        r.register_atlas_page(Texture{7}, {{0.0f, 0.0f, 0.5f, 0.5f, 4, 5},
+                                           {0.5f, 0.0f, 1.0f, 0.5f, 2, 3}});
+        r.frame_begin(800.0f, 600.0f);
+        r.begin_screen();
+        r.draw_text(10.0f, 10.0f, text, font, rgba(235, 238, 242));
+        r.end();
+        r.frame_end();
+        std::vector<float> idx;
+        for (const auto& v : r.batch().vertices()) {
+            idx.push_back(v.tex_index);
+        }
+        return idx;
+    };
+
+    // An sdf font: every letter glyph rides the SDF band (kTextSdfFlag,
+    // never kTextCoverageFlag), same page/slot arithmetic underneath.
+    const Font sdf_font = ab_font();
+    sdf_font.extras_state()->options = FontBakeOptions{}.with_sdf();
+    const std::vector<float> sdf = run(sdf_font, "AB");
+    REQUIRE(sdf.size() == 8);
+    for (const float t : sdf) {
+        CHECK(t == kSdfFlag);
+    }
+
+    // The icon carve-out carries over: U+E000 in an sdf font stays a
+    // plain sprite (shapes, not letters - the field would blur them).
+    Font::Glyph glyphs[96]{};
+    glyphs['A' - 32].advance = 10.0f;
+    glyphs['A' - 32].width = 4.0f;
+    glyphs['A' - 32].height = 5.0f;
+    glyphs['A' - 32].sprite = Sprite{7, 0};
+    glyphs[95].advance = 8.0f;
+    glyphs[95].width = 2.0f;
+    glyphs[95].height = 3.0f;
+    glyphs[95].sprite = Sprite{7, 1};
+    const Font sdf_tofu(24.0f, 30.0f, glyphs, 96);
+    sdf_tofu.extras_state()->options = FontBakeOptions{}.with_sdf();
+    const std::vector<float> mixed = run(sdf_tofu, "A\xEE\x80\x80");
+    REQUIRE(mixed.size() == 8);
+    CHECK(mixed[0] == kSdfFlag);  // 'A' on the sdf band
+    CHECK(mixed[4] == 0.0f);      // the icon: plain path
+
+    // No snap for sdf fonts, even on the axis-aligned zoom-1 screen
+    // camera (the analytic ramp IS the antialiasing): fractional pen
+    // positions land untouched, where a bitmap font would round.
+    {
+        Renderer2D r;
+        r.register_atlas_page(Texture{7}, {{0.0f, 0.0f, 1.0f, 1.0f, 4, 5}});
+        r.frame_begin(800.0f, 600.0f);
+        r.begin_screen();
+        r.draw_text(10.25f, 20.75f, "A", sdf_font);
+        r.end();
+        r.frame_end();
+        REQUIRE(r.batch().vertices().size() == 4);
+        CHECK(r.batch().vertices()[0].pos[0] == 11.25f);  // 10.25+1, kept
+        CHECK(r.batch().vertices()[0].pos[1] == 22.75f);  // 20.75+2, kept
+    }
 }
 
 TEST_CASE("draw_text snaps to whole pixels on the axis-aligned screen camera") {

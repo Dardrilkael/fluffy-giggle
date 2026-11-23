@@ -700,6 +700,12 @@ struct Editor {
     ws::jobs::JobSystem* jobs = nullptr;
     ws::ui::r2d::Font* font = nullptr;          // the UI face
     ws::ui::r2d::Font* font_mono = nullptr;     // the netlist panel's face
+    // The canvas labels' face: the UI face's own SDF bake (same face,
+    // same advances, distance-field pages). Null falls the labels back
+    // to `font`, so a test build (or a failed bake) keeps the bitmap
+    // path. The canvas panel uses it for the world-space text only;
+    // chrome rows keep `font`'s texel-on-pixel snap.
+    ws::ui::r2d::Font* font_canvas = nullptr;
     gui::Toasts* toasts = nullptr;              // the shell's store
     std::function<void(std::string)> set_status;
     // Backing store for toast text. Toasts BORROWS the bytes, so every

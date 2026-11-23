@@ -2028,6 +2028,13 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     }
 
     if (theme.font != nullptr) {
+        // The labels' face: the canvas SDF bake when the app built one,
+        // the chrome's bitmap font otherwise (a test build, a failed
+        // bake). Same face, same advances - the field's pages ride the
+        // shader's analytic ramp, so the text stays sharp at any zoom
+        // or rotation the camera carries.
+        const ws::ui::r2d::Font& label_font =
+            ed.font_canvas != nullptr ? *ed.font_canvas : *theme.font;
         // Net labels: draw from the placement engine's net_tiles (C1).
         // The engine places the net name at the net's centroid, avoiding
         // collisions. We match by name since the engine returns the net
@@ -2035,7 +2042,7 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
         for (const auto& tile : placement.net_tiles) {
             // The tile's screen_rect is the text bounds; draw at its top-left
             (void)rc.draw_text(tile.screen_rect.x, tile.screen_rect.y,
-                               tile.refdes.c_str(), *theme.font,
+                               tile.refdes.c_str(), label_font,
                                gui::dim(theme.text, 0.9f));
         }
         // Authored labels (the Label tool's labels): keep drawing at their
@@ -2049,7 +2056,7 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
             rc.stroke_line(at, Point{at.x + 0.35f, at.y + 0.35f},
                            wire_paint);
             (void)rc.draw_text(at.x + 0.45f, at.y - 0.1f, l.name.c_str(),
-                               *theme.font,
+                               label_font,
                                sel_index.contains({Selection::Kind::Label, l.id})
                                    ? theme.control_on
                                    : gui::dim(theme.text, 0.9f));
@@ -2186,6 +2193,10 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                 found_tile != part_tiles_by_refdes.end()
                     ? found_tile->second
                     : nullptr;
+            // The part annotations ride the labels' SDF face too (same
+            // fallback as the net labels above: the chrome's bitmap font).
+            const ws::ui::r2d::Font& label_font =
+                ed.font_canvas != nullptr ? *ed.font_canvas : *theme.font;
             if (placed != nullptr) {
                 // Draw refdes and value from the placed tile.
                 // The tile's screen_rect is the combined text bounds
@@ -2197,16 +2208,16 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
                     (void)rc.draw_text(placed->screen_rect.x,
                                        placed->screen_rect.y,
                                        placed->refdes.c_str(),
-                                       *theme.font, label_ink);
+                                       label_font, label_ink);
                 }
                 if (!placed->value.empty()) {
                     const float ref_w = rc.measure_text(placed->refdes.c_str(),
-                                                        *theme.font);
-                    const float space_w = rc.measure_text(" ", *theme.font);
+                                                        label_font);
+                    const float space_w = rc.measure_text(" ", label_font);
                     (void)rc.draw_text(placed->screen_rect.x + ref_w + space_w,
                                        placed->screen_rect.y,
                                        placed->value.c_str(),
-                                       *theme.font,
+                                       label_font,
                                        gui::dim(theme.text, 0.75f));
                 }
             }

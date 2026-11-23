@@ -388,7 +388,7 @@ bool BatchCore::push_quad(const float (&pos)[4][3], const float (&uv)[4][2],
 bool BatchCore::push_quad_vcol(const float (&pos)[4][3],
                                const float (&uv)[4][2],
                                const float (&colors)[4][4],
-                               std::uint32_t texture_id, bool text) {
+                               std::uint32_t texture_id, GlyphMode glyph) {
     if (!prepare_quad()) {
         return false;
     }
@@ -397,9 +397,15 @@ bool BatchCore::push_quad_vcol(const float (&pos)[4][3],
     // so no remap, no split, and the chunk's own table stays empty.
     const std::uint32_t tex_index =
         global_tex_ids_ ? texture_id : texture_slot(texture_id);
+    // The glyph channel: which flag rides the slot. Both stay exact in
+    // float with the slot added (the header constants' contracts), and
+    // the shader recovers the slot by subtracting whichever flag the
+    // tex_index's band names.
+    const float flag = glyph == GlyphMode::coverage ? kTextCoverageFlag
+                       : glyph == GlyphMode::sdf    ? kTextSdfFlag
+                                                    : 0.0f;
     write_quad(pos, uv, colors,
-               static_cast<float>(tex_index) +
-                   (text ? kTextCoverageFlag : 0.0f));
+               static_cast<float>(tex_index) + flag);
     return true;
 }
 

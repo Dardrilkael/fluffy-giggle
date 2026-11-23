@@ -477,8 +477,36 @@ struct FontBakeOptions {
     // glyphs' true area, turned MORE fringe pixels into full-coverage
     // stem pixels and read at least as crisp - so the default stays 3,
     // and 1 remains the option (the hard-snapped look, or a byte-pinned
-    // bake).
+    // bake). IGNORED in the sdf mode below: an SDF field carries no
+    // coverage to average, and its own ramp runs per draw in the
+    // shader.
     int oversample_x = 3;
+    // SDF text: bake a signed distance FIELD per glyph instead of
+    // snapped coverage bitmaps. The atlas layout is unchanged (white
+    // RGB, the field in alpha, 128 = the outline; the pages pack and
+    // upload exactly like bitmaps), but each glyph quad carries a
+    // second flag (batch::kTextSdfFlag) and shaders/batch.frag
+    // reconstructs the coverage ANALYTICALLY per draw:
+    //     cov = clamp((a - 0.5) / fwidth(a) + 0.5)
+    // The ramp adapts to the quad's on-screen scale, so one bake stays
+    // sharp at any zoom or rotation - the canvas-label mode. gamma,
+    // boost and oversample_x are IGNORED here (the field is linear
+    // distance, not coverage); the contrast curve still applies per
+    // draw, keyed on the text color, exactly like the bitmap mode's.
+    // The snapped bitmap path (sdf = false) stays the default: 1:1 UI
+    // chrome reads crisp from its own texel-on-pixel snap, and the
+    // field's ramp would blur it a hair at zoom 1. Turn the mode on
+    // with with_sdf().
+    bool sdf = false;
+    // The SDF field's reach, in SOURCE pixels, clamped to [1, 16] at
+    // bake time: the distance the alpha channel spans on each side of
+    // the outline before it saturates at 0/255. The bake's per-glyph
+    // padding grows by exactly this, and the shader's ramp widens
+    // under minification proportionally (the field, not a fixed 1 px
+    // AA ramp, is what keeps rotated/zoomed edges smooth). 4 is the
+    // classic middle - room for a 4x zoom-in before the field runs out
+    // and the edge hardens; the glyph grows 2*4 = 8 px of apron.
+    int sdf_range = 4;
     // true (default): linear coverage at bake time, the text contrast
     // curve in the batch shader (see the struct comment). false: the old
     // bake-time gamma/boost LUT, drawn through the plain sprite path.
@@ -499,6 +527,15 @@ struct FontBakeOptions {
     [[nodiscard]] static constexpr FontBakeOptions identity() {
         return FontBakeOptions{.gamma = 1.0f, .boost = 1.0f,
                                .oversample_x = 1, .shader_contrast = false};
+    }
+    // The same options with the SDF field on (canvas text): distance-field
+    // pages, the per-draw analytic ramp in the shader. The coverage knobs
+    // ride along ignored; sdf_range keeps whatever this object carries.
+    // The mirror of with_baked_contrast()'s spelling.
+    [[nodiscard]] constexpr FontBakeOptions with_sdf() const {
+        FontBakeOptions copy = *this;
+        copy.sdf = true;
+        return copy;
     }
     // The stock dark chrome's pair (light-on-dark text): the lifted
     // mids plus a tenth of boost. Apps pick between this and
