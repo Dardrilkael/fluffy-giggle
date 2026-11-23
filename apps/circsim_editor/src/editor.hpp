@@ -586,6 +586,9 @@ struct ResultsCache {
     struct SeriesGeometry {
         SeriesGeometryKey key;
         bool built = false;
+        // The geometry_serial of the last frame that drew (hit or
+        // rebuilt) this entry: the retention policy's LRU stamp.
+        std::uint64_t last_used = 0;
         canvas::TessBuffer buffer;
     };
     // One retained tessellation per signal, in FRAME-LOCAL space (the
@@ -594,6 +597,31 @@ struct ResultsCache {
     // tessellation; TessBuffer::clear retains capacity when a key
     // changes.
     std::vector<SeriesGeometry> geometry;
+
+    // The retention policy. The buffers are the bulk of this cache
+    // (~0.3 MB a signal at a 600 px plot, ~1.5 MB at 2000 px; ~75 MB of
+    // capacity for 50 signals on a wide window) and used to live until
+    // their entry was destroyed. Now:
+    //  - a BYTE BUDGET over the buffers' capacity, enforced at the end of
+    //    a frame that drew the series: entries NOT drawn in that frame
+    //    (hidden signals, leftovers of another table or run) are freed
+    //    least-recently-drawn first until the total fits. What the frame
+    //    drew is never evicted, so a visible set over the budget simply
+    //    overshoots it; a frame that skipped the loop (the plot scrolled
+    //    out of the viewport) evicts nothing.
+    //  - a rebuilt buffer is trimmed when its capacity (the high-water
+    //    of every build it ever held - clear() keeps it, which is the
+    //    point of reuse) is more than 4x what it now holds.
+    static constexpr std::size_t kGeometryBudgetBytes = 64u << 20;  // 64 MiB
+    std::size_t geometry_budget = kGeometryBudgetBytes;
+    std::uint64_t geometry_serial = 0;  // bumped per frame that drew series
+    [[nodiscard]] std::size_t geometry_bytes() const {
+        std::size_t total = 0;
+        for (const SeriesGeometry& g : geometry) {
+            total += g.buffer.quads.capacity() * sizeof(canvas::TessVertex);
+        }
+        return total;
+    }
 
     // The series/sparkline point scratch: one buffer reused across
     // signals and frames (a fresh vector per series per signal was

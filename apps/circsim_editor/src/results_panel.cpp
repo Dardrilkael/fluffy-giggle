@@ -518,6 +518,52 @@ void shadow_tessellate(const std::vector<Point>& pts, std::uint32_t color,
 
 // Tessellate the already-mapped screen-space points into a retained
 // buffer. NaNs split stepped passes exactly as stroke_series does.
+// A rebuilt buffer keeps the capacity of every build it ever held
+// (clear() retains it - the point of reuse), so a maximize then a
+// restore leaves a quarter-size build in four times the storage. Trim
+// when the slack is big enough to matter and the buffer big enough to be
+// worth a reallocation. The 4x hysteresis keeps steady pan/zoom from
+// reallocating: a vector grown by doubling holds at most ~2x what it uses.
+void trim_slack(canvas::TessBuffer& buffer) {
+    constexpr std::size_t kMinBytes = 256u << 10;
+    constexpr std::size_t kSlack = 4u;
+    const std::size_t capacity = buffer.quads.capacity();
+    if (capacity * sizeof(canvas::TessVertex) >= kMinBytes &&
+        capacity > kSlack * buffer.quads.size()) {
+        buffer.quads.shrink_to_fit();
+    }
+}
+
+// The retention budget (ResultsCache::geometry_budget): over it, free the
+// entries the frame did NOT draw, least recently drawn first. Run once at
+// the end of a frame that drew the series.
+void trim_geometry(ResultsCache& cache) {
+    std::size_t total = cache.geometry_bytes();
+    if (total <= cache.geometry_budget) {
+        return;
+    }
+    std::vector<std::size_t> idle;
+    for (std::size_t i = 0; i < cache.geometry.size(); ++i) {
+        const ResultsCache::SeriesGeometry& g = cache.geometry[i];
+        if (g.last_used != cache.geometry_serial &&
+            g.buffer.quads.capacity() > 0u) {
+            idle.push_back(i);
+        }
+    }
+    std::sort(idle.begin(), idle.end(), [&](std::size_t a, std::size_t b) {
+        return cache.geometry[a].last_used < cache.geometry[b].last_used;
+    });
+    for (std::size_t i : idle) {
+        if (total <= cache.geometry_budget) {
+            break;
+        }
+        ResultsCache::SeriesGeometry& g = cache.geometry[i];
+        total -= g.buffer.quads.capacity() * sizeof(canvas::TessVertex);
+        g.buffer = canvas::TessBuffer{};  // frees the storage
+        g.built = false;
+    }
+}
+
 void tessellate_series(const std::vector<Point>& pts,
                        std::uint32_t color, float width,
                        canvas::StrokeJoin join, canvas::TessBuffer& out) {
@@ -1388,6 +1434,9 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
     // geometry is unaffected: it stays valid with or without it. One
     // balanced pair around the whole loop - every `continue` below
     // stays inside it.
+    if (series_shown && renderer != nullptr) {
+        ++cache.geometry_serial;  // this frame's stamp for the LRU
+    }
     rc.push_clip(fx, fy, iw, ih);
     for (std::size_t i = 0; series_shown && i < t.signals.size(); ++i) {
         if (i >= ed.results.visible.size() || ed.results.visible[i] == 0u) {
@@ -1429,6 +1478,7 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
             if (cached_geometry->built && cached_geometry->key == geometry_key) {
                 const auto replay_t0 = wave_now();
                 if (wave_env().prof != 0) ++prof.cache_hits;
+                cached_geometry->last_used = cache.geometry_serial;
                 renderer->replay_quads(cached_geometry->buffer, fx, fy);
                 if (wave_env().prof != 0) {
                     const double stroke_ms = wave_ms_since(replay_t0);
@@ -1611,6 +1661,8 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                               cached_geometry->buffer);
             cached_geometry->key = geometry_key;
             cached_geometry->built = true;
+            cached_geometry->last_used = cache.geometry_serial;
+            trim_slack(cached_geometry->buffer);
             renderer->replay_quads(cached_geometry->buffer, fx, fy);
         } else {
             // CommandListCanvas and other recording/test backends retain
@@ -1643,6 +1695,9 @@ void draw_plot(Editor& ed, gui::GuiContext& gui,
                 }
             }
         }
+    }
+    if (series_shown && renderer != nullptr) {
+        trim_geometry(cache);
     }
     rc.pop_clip();
     wave_prof_end_frame();

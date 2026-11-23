@@ -592,6 +592,114 @@ TEST_CASE("a signal hidden across a zoom is rebuilt, never replayed stale") {
     CHECK(after.key.x_lo != doctest::Approx(old_x_lo));
 }
 
+// ---- the geometry retention policy ------------------------------------
+//
+// A byte budget over the retained buffers (LRU over the entries the frame
+// did not draw) and a trim of a rebuilt buffer's slack. See
+// ResultsCache::geometry_budget.
+
+TEST_CASE("the retention budget frees idle geometry, least recent first") {
+    ProfBench b;
+    b.load(build_large_table(6, 2000));
+    ResultsCache& r = b.ed.results;
+    b.draw();                    // every entry drawn
+    r.visible[1] = 0u;
+    b.draw();                    // entry 1: last drawn a frame ago
+    r.visible[2] = 0u;
+    b.draw();                    // entry 2: drawn one frame later than 1
+    REQUIRE(r.geometry[1].last_used < r.geometry[2].last_used);
+    REQUIRE(r.geometry[1].buffer.quads.capacity() > 0u);
+
+    r.geometry_budget = r.geometry_bytes() - 1u;  // one byte over
+    b.draw();
+    // The oldest idle entry went; that was enough, so the next stays.
+    CHECK(r.geometry[1].buffer.quads.capacity() == 0u);
+    CHECK_FALSE(r.geometry[1].built);
+    CHECK(r.geometry[2].built);
+    CHECK(r.geometry[2].buffer.quads.capacity() > 0u);
+    for (std::size_t i : {0u, 3u, 4u, 5u}) {
+        CHECK(r.geometry[i].built);  // what the frame drew is untouched
+    }
+}
+
+TEST_CASE("the retention budget never evicts what the frame drew") {
+    ProfBench b;
+    b.load(build_large_table(4, 2000));
+    ResultsCache& r = b.ed.results;
+    b.draw();
+    r.geometry_budget = 1u;  // far below the working set
+    b.draw();
+    for (const ResultsCache::SeriesGeometry& g : r.geometry) {
+        CHECK(g.built);
+        CHECK(g.buffer.quads.capacity() > 0u);  // overshoot, not eviction
+    }
+}
+
+TEST_CASE("a plot scrolled out of view evicts nothing") {
+    // The skipped series loop is not a frame that "did not draw" a
+    // signal: the working set must survive the scroll away and back.
+    ProfBench b;
+    b.load(build_large_table(4, 2000));
+    ResultsCache& r = b.ed.results;
+    b.draw();
+    r.visible[1] = 0u;
+    b.draw();                    // entry 1 is idle
+    r.geometry_budget = 1u;
+
+    b.hit_clip = gui::Rect{0.0f, 0.0f, 640.0f, 40.0f};  // plot hidden
+    b.draw();
+    CHECK(r.geometry[1].buffer.quads.capacity() > 0u);  // not touched
+
+    b.hit_clip.reset();          // scrolled back: the pass runs again
+    b.draw();
+    CHECK(r.geometry[1].buffer.quads.capacity() == 0u);
+    for (std::size_t i : {0u, 2u, 3u}) {
+        CHECK(r.geometry[i].built);
+    }
+}
+
+TEST_CASE("a rebuilt buffer is trimmed after a big shrink") {
+    // A wide window, then a narrow one: the same buffers hold a fraction
+    // of what they were built for. clear() keeps the capacity (that is
+    // what reuse is), so the rebuild trims it.
+    ProfBench b;
+    b.panel.width = 1800.0f;
+    b.load(build_large_table(3, 4000));
+    b.draw();
+    ResultsCache& r = b.ed.results;
+    const std::size_t before = r.geometry[0].buffer.quads.capacity();
+    REQUIRE(before * sizeof(canvas::TessVertex) >= (256u << 10));
+
+    b.panel.width = 400.0f;
+    b.draw();
+    for (const ResultsCache::SeriesGeometry& g : r.geometry) {
+        REQUIRE(g.built);
+        CHECK(g.buffer.quads.capacity() < before);
+        CHECK(g.buffer.quads.capacity() <= 2u * g.buffer.quads.size());
+    }
+}
+
+TEST_CASE("a rebuild of about the same size does not reallocate") {
+    // The 4x hysteresis: continuous pan/zoom/resize rebuilds every frame
+    // and must reuse the storage in place.
+    ProfBench b;
+    b.panel.width = 1200.0f;
+    b.load(build_large_table(3, 4000));
+    b.draw();
+    ResultsCache& r = b.ed.results;
+    std::vector<const canvas::TessVertex*> data;
+    for (const ResultsCache::SeriesGeometry& g : r.geometry) {
+        REQUIRE(g.built);
+        data.push_back(g.buffer.quads.data());
+    }
+    b.panel.width = 1199.0f;  // one pixel: every entry misses
+    b.draw();
+    for (std::size_t i = 0; i < data.size(); ++i) {
+        CHECK(r.geometry[i].built);
+        CHECK(r.geometry[i].buffer.quads.data() == data[i]);
+    }
+}
+
 TEST_CASE("waveform tessellation cache is per series and delivery keyed") {
     ProfBench b;
     b.load(build_large_table(20, 10000));
