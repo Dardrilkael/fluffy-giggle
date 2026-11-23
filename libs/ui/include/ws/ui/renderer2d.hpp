@@ -511,6 +511,20 @@ struct FontBakeOptions {
     // curve in the batch shader (see the struct comment). false: the old
     // bake-time gamma/boost LUT, drawn through the plain sprite path.
     bool shader_contrast = true;
+    // Vertical grid-fitting (a tiny autohinter, bitmap mode only): the
+    // glyph outlines are warped vertically, per face, so the baseline,
+    // the x-height and the cap/ascender height land on WHOLE pixel rows,
+    // and the round letters' overshoot above/below those lines is
+    // flattened onto them. stb_truetype does no hinting, so without this
+    // every lowercase top and every cap top is a gray, half-covered row
+    // at UI sizes (the main "text is not sharp" cause on a 1080p
+    // screen). Coverage-and-shape only: advances, line height and
+    // ascent never move (offset_y / bitmap height change by whole rows).
+    // Off by default so byte-pinned bakes stay byte-pinned; the
+    // dark_chrome()/light_chrome() pairs turn it on. IGNORED in the sdf
+    // mode (a field has no pixel grid to fit to) and past ~24 px
+    // x-height, where fitting buys nothing.
+    bool fit_vertical = false;
 
     // The same options with the contrast baked into the atlas instead
     // (shader_contrast = false): gamma/boost apply again, and the font
@@ -543,13 +557,13 @@ struct FontBakeOptions {
     // the theme flips - a bake is a snapshot of its options.
     [[nodiscard]] static constexpr FontBakeOptions dark_chrome() {
         return FontBakeOptions{.gamma = 1.6f, .boost = 1.1f,
-                               .oversample_x = 3};
+                               .oversample_x = 3, .fit_vertical = true};
     }
     // The light stock chrome's pair (dark-on-light text): a
     // near-identity gamma, no boost.
     [[nodiscard]] static constexpr FontBakeOptions light_chrome() {
         return FontBakeOptions{.gamma = 1.05f, .boost = 1.0f,
-                               .oversample_x = 3};
+                               .oversample_x = 3, .fit_vertical = true};
     }
 };
 

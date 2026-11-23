@@ -92,6 +92,20 @@ if(TARGET test_ui)
   target_link_libraries(test_ui PRIVATE volk stb)
 endif()
 
+# The r3d mesh-path suite (Phase 1): the generators are pure CPU, the
+# registry and command recording are Renderer2D's CPU half - the same
+# headless-driver shape test_ui uses (the internal renderer2d.h names
+# volk types in declarations, so volk rides PRIVATE for the headers; the
+# suite never drives Vulkan).
+ws_add_test(ui_mesh SOURCES tests/test_ui_mesh.cpp LINK ws::ui)
+if(TARGET test_ui_mesh)
+  target_include_directories(test_ui_mesh PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  # renderer2d.h's include chain reaches text/font.h, which declares
+  # stb_truetype - the same PRIVATE-header class as test_ui's stb link.
+  target_link_libraries(test_ui_mesh PRIVATE volk stb)
+endif()
+
 # The idle-frame pacing policy (src/app/frame_pacer.hpp): header-only and
 # pure, so its suite links nothing of the app loop (no Vulkan, no window).
 ws_add_test(ui_frame_pacer SOURCES tests/test_frame_pacer.cpp LINK ws::core)

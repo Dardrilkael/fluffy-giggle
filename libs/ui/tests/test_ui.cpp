@@ -9740,13 +9740,15 @@ TEST_CASE("draw_text snaps to whole pixels on the axis-aligned screen camera") {
     CHECK(r.batch().vertices()[0].pos[0] == 11.25f);
 
     // Camera PAN is not a gate: a fractional pan shifts every glyph by
-    // one common phase, so the quads still snap.
+    // one common phase, so the quads still snap. The screen position is
+    // (world - cam + frame/2) = (11.25 - 0.25 + 400) = 411.0 which is
+    // already integer, so the snap keeps it at 11.25 in world coords.
     r.frame_begin(800.0f, 600.0f);
     r.begin(Camera2D{0.25f, 0.25f, 0.0f, 1.0f});
     r.draw_text(10.25f, 20.75f, "A", font);
     r.end();
     r.frame_end();
-    CHECK(r.batch().vertices()[0].pos[0] == 11.0f);
+    CHECK(r.batch().vertices()[0].pos[0] == 11.25f);
 }
 
 TEST_CASE("draw_text falls to the fallback and stays inert on empty fonts") {

@@ -14,6 +14,11 @@
 #include "text/font.h"  // font::BakedFont (publish_baked_font's parameter)
 #include "render/batch_core.h"
 
+#include <ws/ui/renderer3d.hpp>  // r3d: Mesh/Transform3D/MeshMaterial (the
+                                  // mesh registry + commands below carry
+                                  // them; the public header stays
+                                  // third-party-free)
+
 #include <array>
 #include <cfloat>
 #include <cstddef>
@@ -106,6 +111,34 @@ inline constexpr std::uint32_t kMaxFramesInFlight = 2;
 inline constexpr std::uint32_t kSlotMask = 0xFFFFFu;  // 20-bit slot, 1M
 inline constexpr std::uint32_t kGenShift = 20;
 inline constexpr std::uint32_t kGenMask = 0xFFFu;  // 12-bit generation
+
+// --- the mesh path (r3d, Phase 1) ---------------------------------------------------
+//
+// The mesh command and registry live here, on the Renderer2D, because the
+// mesh path is a THIRD pipeline over the same frame plumbing: the same
+// begin() epochs, the same layer/clip carry, the same accept/kind gates
+// the 3D billboards walk. The commands replay beside the quad commands
+// (same (layer, epoch) sort); the Phase 2 device half flushes them through
+// their own pipeline (pipeline_mesh_, indexed draws, Vertex3D layout) -
+// the batch's 40-byte Vertex and batch.vert/.frag stay untouched.
+
+// One recorded mesh draw (r3d::draw_mesh): the mesh's CONTENT is not
+// copied into the command - the registry entry outlives the frame by the
+// texture-registry contract (destroy kills the handle at once; a draw
+// recorded this frame with a handle destroyed this frame was already
+// rejected at record time). What rides is the counts (the Phase 2 flush
+// reads them against the registry's storage), the material, the
+// transform, and the same placement keys the quad commands carry.
+struct MeshCommand {
+    std::uint32_t sort_layer = 0;    // set_layer(): the explicit z hatch
+    std::uint32_t camera_epoch = 0;  // the recording begin(Camera3D) block
+    float clip[4] = {0.0f, 0.0f, FLT_MAX, FLT_MAX};
+    std::uint32_t tint = 0xFFFFFFFFu;  // 0xRRGGBBAA
+    Texture texture{};                // {} = untextured (white)
+    r3d::Transform3D transform{};
+    std::uint32_t vertex_count = 0;  // the registry entry's, snapshotted
+    std::uint32_t index_count = 0;   // (Phase 2's flush sizes its binds)
+};
 
 // The texture path app.cpp's device probe picked (M9). bindless: one
 // global kMaxBindlessTextures-slot descriptor table per frame slot, bound
@@ -300,9 +333,29 @@ public:
     // count and tier, filled at call time. The member behind stats().
     Stats stats() const;
 
+    // --- the mesh path (r3d, Phase 1) ------------------------------------------------
+    // The registry: create/destroy generation-counted handles, the
+    // Texture contract verbatim (slot 0 reserved for Mesh{}'s id 0).
+    // Headless they are fully live (pure CPU state) - only the Phase 2
+    // GPU buffers wait for a device. draw_mesh walks the 3D gates
+    // (accept -> camera_stashed_ -> current_perspective_) and records a
+    // MeshCommand; the gates' warn contract is the billboard rule's.
+    [[nodiscard]] ws::core::Result<r3d::Mesh> create_mesh(
+        const r3d::MeshData& data);
+    [[nodiscard]] ws::core::Status destroy_mesh(r3d::Mesh mesh);
+    void draw_mesh(r3d::Mesh mesh, const r3d::Transform3D& transform,
+                   const r3d::MeshMaterial& material);
+    [[nodiscard]] ws::core::Status set_light(const r3d::Light3D& light);
+    [[nodiscard]] const r3d::Light3D& light() const { return light_; }
+
     // Test/observability seam (internal header only): the built batch as
     // frame_end() left it.
     const batch::BatchCore& batch() const { return batch_; }
+    // The mesh half of the same seam: the frame's recorded mesh
+    // commands as frame_end's (layer, epoch) sort left them.
+    const std::vector<MeshCommand>& mesh_commands() const {
+        return mesh_commands_;
+    }
 
 private:
     // Per-frame warn kinds, one bit each: frame_begin() clears the mask, a
@@ -430,12 +483,48 @@ private:
     void name_object(VkObjectType object_type, std::uint64_t handle,
                      const char* name);
 
+    // --- the mesh path's private helpers + state (r3d, Phase 1) --------------------
+    // The registry's row: the mesh's CPU payload (Phase 2 adds the GPU
+    // buffer pair beside it) and the generation the slot's id carries.
+    // Slot 0 is the reserved sentinel (Mesh{}'s id 0), like textures'
+    // white row.
+    struct MeshEntry {
+        std::vector<r3d::Vertex3D> vertices;
+        std::vector<std::uint32_t> indices;  // whole triangles only
+        std::uint32_t generation = 0;  // 0 = never used (the sentinel's)
+    };
+    // The generation check (the texture id check's mirror): false for
+    // id 0, an out-of-table slot, or a generation mismatch.
+    [[nodiscard]] bool mesh_alive(r3d::Mesh mesh) const;
+    // The record step after draw_mesh's gates passed: snapshots the
+    // placement keys (epoch/layer/clip) and the material/transform onto
+    // a MeshCommand and appends it. The mesh's own CONTENT stays in the
+    // registry entry (see MeshCommand's comment).
+    void record_mesh(const r3d::MeshMaterial& material,
+                      const r3d::Transform3D& transform,
+                      const MeshEntry& entry);
+    std::vector<MeshEntry> meshes_;
+    std::vector<std::uint32_t> free_mesh_slots_;
+
     std::vector<DrawCommand> commands_;  // capacity reused across frames
     batch::BatchCore batch_;
     Camera3D current_camera3d_{};  // the open 3D block's camera (billboards
                                   // and 3D lines expand against it at
                                   // record time; the replay reads the
                                   // snapshot, not this)
+
+    // The frame's mesh draws, the quad commands' sibling list: recorded
+    // through draw_mesh, cleared with the frame, sorted at frame_end by
+    // (layer, epoch) beside the quad sort (stable, painter's order).
+    std::vector<MeshCommand> mesh_commands_;
+    // The scene light (r3d::set_light): frame-scoped state, not a draw.
+    // The default matches r3d::Light3D's own - a top-down key plus an
+    // ambient floor, so a frame that never sets one still shades sanely.
+    r3d::Light3D light_{};
+    // draw_mesh's reject warns (stale mesh, wrong block, no transform
+    // validity) - the once-per-frame mask's r3d bits.
+    static constexpr std::uint32_t kWarnMeshUnknown = 1u << 5;  // stale handle
+    static constexpr std::uint32_t kWarnMeshTransform = 1u << 6;  // scale <= 0
     // The open block's kind - what stash_camera() will snapshot, and what
     // the 3D overloads check against (a 3D overload inside a 2D block
     // warns and records nothing). Set by every begin(), never read
@@ -622,5 +711,15 @@ private:
 // Points the public free functions at the live renderer. app.cpp installs it
 // for the duration of App::run() and clears it at shutdown.
 void set_active(Renderer2D* renderer);
+
+// The r3d free functions' routing seam: the live renderer, or null when
+// no app is running (set_active's mirror for renderer3d.cpp - the r2d
+// layer keeps g_active file-local, so the sibling TU reads it through
+// here). Same lifetime: installed for App::run(), cleared at shutdown.
+[[nodiscard]] Renderer2D* active_renderer();
+
+// The r3d layer's no-app warn (renderer3d.cpp): once per process, the
+// r2d warn_no_app convention - an app bug, not per-call spam.
+void warn_no_app_r3d(const char* what);
 
 }  // namespace ws::ui::r2d

@@ -597,3 +597,43 @@ TEST_CASE("sdf: the range knob clamps, never fails the bake") {
     CHECK(glyph_of(bake_at(1), 'A').w == bm.w + 2u);
     CHECK(glyph_of(bake_at(64), 'A').w == bm.w + 32u);
 }
+
+TEST_CASE("fit_vertical lands baseline, x-height and cap height on whole rows") {
+    // Off unless asked for: the byte-pinned and default bakes stay as they were.
+    CHECK_FALSE(FontBakeOptions{}.fit_vertical);
+    CHECK_FALSE(FontBakeOptions::identity().fit_vertical);
+    CHECK(FontBakeOptions::dark_chrome().fit_vertical);
+    CHECK(FontBakeOptions::light_chrome().fit_vertical);
+
+    const std::span<const std::uint8_t> ttf =
+        ws::ui::r2d::font::inter_regular_ttf();
+    FontBakeOptions off = FontBakeOptions::dark_chrome();
+    off.fit_vertical = false;
+    const BakedFont plain = ws::ui::r2d::font::bake_inter(ttf, 16.0f, off);
+    const BakedFont fit = ws::ui::r2d::font::bake_inter(
+        ttf, 16.0f, FontBakeOptions::dark_chrome());
+    REQUIRE(plain.ok);
+    REQUIRE(fit.ok);
+
+    // Metrics never move: advances, line box, ascent.
+    CHECK(fit.line_height == doctest::Approx(plain.line_height));
+    CHECK(fit.ascent_px == doctest::Approx(plain.ascent_px));
+    for (std::size_t i = 0; i < plain.glyphs.size(); ++i) {
+        CHECK(fit.glyphs[i].advance == doctest::Approx(plain.glyphs[i].advance));
+    }
+
+    // Flat-bottomed AND round letters end exactly on the baseline (the
+    // overshoot below it is flattened): bitmap bottom == baseline.
+    for (const char c : {'x', 'o', 'e', 'a', 'H', 'O', 'd'}) {
+        const BakedGlyph& g = glyph_of(fit, static_cast<std::uint32_t>(c));
+        REQUIRE(g.h > 0);
+        CHECK(g.offset_y + static_cast<float>(g.h) ==
+              doctest::Approx(fit.ascent_px));
+    }
+    // Round tops collapse onto the flat ones: 'o' is as tall as 'x', 'O'
+    // as tall as 'H' - both in whole rows.
+    CHECK(glyph_of(fit, 'o').h == glyph_of(fit, 'x').h);
+    CHECK(glyph_of(fit, 'e').h == glyph_of(fit, 'x').h);
+    CHECK(glyph_of(fit, 'O').h == glyph_of(fit, 'H').h);
+    CHECK(glyph_of(fit, 'H').h > glyph_of(fit, 'x').h);
+}

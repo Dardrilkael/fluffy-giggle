@@ -8,6 +8,9 @@
 #include <ws/ui/renderer2d.hpp>
 #include <ws/core/log.hpp>
 
+#include <string>
+#include <vector>
+
 using namespace ws::ui;
 
 struct GlyphProbeApp : App {
@@ -26,6 +29,21 @@ struct GlyphProbeApp : App {
             WS_LOG_ERROR("Failed to load default font");
             return;
         }
+
+        // A/B variants for the sharpness investigation (right-hand column).
+        // 16 px = the circsim chrome body size at ui_scale 1.0.
+        r2d::FontBakeOptions base;  // shader contrast, oversample 3, no fit
+        r2d::FontBakeOptions fit = base;
+        fit.fit_vertical = true;
+        r2d::FontBakeOptions fit_os1 = fit;
+        fit_os1.oversample_x = 1;
+        r2d::FontBakeOptions os1 = base;
+        os1.oversample_x = 1;
+        variants_.push_back({"A  old: fit off, os3", r2d::load_default_font(16.0f, base)});
+        variants_.push_back({"B  os1 only", r2d::load_default_font(16.0f, os1)});
+        variants_.push_back({"C  vertical fit, os3", r2d::load_default_font(16.0f, fit)});
+        variants_.push_back({"D  vertical fit, os1", r2d::load_default_font(16.0f, fit_os1)});
+        variants_.push_back({"E  SDF (canvas labels)", r2d::load_default_font(16.0f, base.with_sdf())});
 
         // Test strings - various text to show contrast behavior
         test_strings_ = {
@@ -76,6 +94,20 @@ struct GlyphProbeApp : App {
         // Draw a center divider
         r2d::draw_quad(0, half_h - 1, fb_size.width, 2, r2d::rgba(128, 128, 128, 255));
 
+        // A/B column: the same sentence, five bakes, on both backgrounds.
+        // Compare the TOPS of x/e/o/a and the cap tops (T, H) - with the
+        // vertical fit they should be one crisp row, not a gray one.
+        const float col_x = 700.0f;
+        const char* sample = "Hexagon of the quick onyx axe - 0123 ready";
+        for (size_t i = 0; i < variants_.size(); ++i) {
+            const float y = start_y + static_cast<float>(i) * 44.0f;
+            const auto& v = variants_[i];
+            r2d::draw_text(col_x, y, v.label, font_, r2d::rgba(179, 179, 204, 255));
+            r2d::draw_text(col_x, y + 20.0f, sample, v.font, r2d::rgba(242, 242, 248, 255));
+            r2d::draw_text(col_x, half_h + y, v.label, font_, r2d::rgba(51, 51, 77, 255));
+            r2d::draw_text(col_x, half_h + y + 20.0f, sample, v.font, r2d::rgba(26, 26, 31, 255));
+        }
+
         // Draw labels for the two halves
         r2d::draw_text(padding, 10.0f, "DARK THEME (light text)", font_,
             r2d::rgba(204, 204, 230, 255));
@@ -101,7 +133,12 @@ struct GlyphProbeApp : App {
     }
 
 private:
+    struct Variant {
+        const char* label;
+        r2d::Font font;
+    };
     r2d::Font font_;
+    std::vector<Variant> variants_;
     std::vector<std::string> test_strings_;
     int frame_count_ = 0;
 };

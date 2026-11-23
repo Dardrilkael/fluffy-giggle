@@ -46,6 +46,7 @@ void Renderer2D::frame_begin(float fb_width, float fb_height) {
     fb_height_ = fb_height;
     batch_.begin_frame();
     commands_.clear();  // capacity kept - the frame reuses the arena
+    mesh_commands_.clear();  // the mesh path's sibling arena, same rule
     // The epochs restart at 1, so the snapshots go with them. Capacity
     // kept, like every per-frame arena here.
     frame_cameras_.clear();
@@ -60,6 +61,18 @@ void Renderer2D::frame_begin(float fb_width, float fb_height) {
 
 void Renderer2D::frame_end() {
     frame_active_ = false;
+    // The mesh commands ride the SAME (layer, epoch) stable sort as the
+    // quad commands - the two lists' relative order is the flush's to
+    // weave (Phase 2 batches mesh draws between the quad chunks of the
+    // same epoch; Phase 1 leaves them sorted and ready). Sorting them
+    // here keeps frame_end the single ordering authority.
+    std::stable_sort(mesh_commands_.begin(), mesh_commands_.end(),
+                     [](const MeshCommand& a, const MeshCommand& b) {
+                         if (a.sort_layer != b.sort_layer) {
+                             return a.sort_layer < b.sort_layer;
+                         }
+                         return a.camera_epoch < b.camera_epoch;
+                     });
     // Captured before the empty check: the replay clears commands_, and
     // stats() reports what the app recorded whatever the replay did.
     const std::uint32_t command_count =
@@ -533,6 +546,61 @@ void Renderer2D::draw_quad(float x, float y, float z, float w, float h,
     record("draw_quad", pos, kQuadUV, color, texture);
 }
 
+void Renderer2D::draw_mesh(r3d::Mesh mesh, const r3d::Transform3D& transform,
+                           const r3d::MeshMaterial& material) {
+    // The 3D billboard rule verbatim, one gate ladder: no active frame,
+    // no open block, a 2D block, a dead handle, a degenerate transform -
+    // each warns once per frame and records nothing.
+    if (!accept("draw_mesh")) {
+        return;
+    }
+    if (!camera_stashed_) {
+        warn_drop("draw_mesh");  // outside any begin()/end() block
+        return;
+    }
+    if (!current_perspective_) {
+        warn_kind("draw_mesh");  // a 2D block is open: the wrong kind
+        return;
+    }
+    if (!mesh_alive(mesh)) {
+        if (!(warned_mask_ & kWarnMeshUnknown)) {
+            warned_mask_ |= kWarnMeshUnknown;
+            ws::core::warn("ui: r3d::draw_mesh dropped - mesh handle {} "
+                           "names no live mesh (destroyed, stale, or never "
+                           "created)",
+                           mesh.id);
+        }
+        return;
+    }
+    if (transform.scale <= 0.0f) {
+        if (!(warned_mask_ & kWarnMeshTransform)) {
+            warned_mask_ |= kWarnMeshTransform;
+            ws::core::warn("ui: r3d::draw_mesh dropped - transform scale "
+                           "{} is not positive",
+                           transform.scale);
+        }
+        return;
+    }
+    record_mesh(material, transform, meshes_[mesh.id & kSlotMask]);
+}
+
+ws::core::Status Renderer2D::set_light(const r3d::Light3D& light) {
+    // Scene state, not a draw: no block gate (the set_layer standing),
+    // but the direction must exist - a zero vector is a refuse-and-keep
+    // (the previous light stays, the Status names it).
+    const float len_sq = light.dir[0] * light.dir[0] +
+                         light.dir[1] * light.dir[1] +
+                         light.dir[2] * light.dir[2];
+    if (len_sq < 1e-12f) {
+        return ws::core::fail(
+            6004, "ui",
+            "r3d::set_light - the direction is a zero vector (there is no "
+            "direction to light along)");
+    }
+    light_ = light;  // normalized at shade time (Phase 2), stored as given
+    return {};
+}
+
 void Renderer2D::draw_line(float x0, float y0, float x1, float y1,
                            float thickness, std::uint32_t color) {
     if (!accept("draw_line")) {
@@ -992,10 +1060,22 @@ float Renderer2D::draw_text(float x, float y, const char* utf8_text,
     const font::FontExtra* extra = font.extras_state();
     const bool use_shader_contrast = extra->options.shader_contrast;
     const bool font_is_sdf = extra->options.sdf;
+    // The screen-space origin of the world: at zoom 1 / rotation 0 a world
+    // point lands on screen at (world - cam + frame/2). The snap must round
+    // THAT sum, not the world coordinate: rounding in world space and then
+    // letting a fractional camera pan / odd frame size shift the result
+    // puts every glyph back at a fractional screen position, and the
+    // linear sampler blurs the whole string.
+    float snap_off_x = 0.0f;
+    float snap_off_y = 0.0f;
     bool snap = false;
     if (!font_is_sdf && camera_stashed_ && !current_perspective_) {
         const Camera2D& cam = frame_cameras_[current_epoch_ - 1].camera;
         snap = cam.rotation == 0.0f && cam.zoom == 1.0f;
+        if (snap) {
+            snap_off_x = static_cast<float>(fb_width_) * 0.5f - cam.x;
+            snap_off_y = static_cast<float>(fb_height_) * 0.5f - cam.y;
+        }
     }
     const char* s = utf8_text;
     float pen_x = x;
@@ -1014,8 +1094,10 @@ float Renderer2D::draw_text(float x, float y, const char* utf8_text,
             // Resolve the sprite's UV rect from the atlas page.
             const atlas::Rect* rect = find_sprite_rect(g->sprite);
             if (rect != nullptr) {
-                const float gx_snapped = snap ? std::roundf(gx) : gx;
-                const float gy_snapped = snap ? std::roundf(gy) : gy;
+                const float gx_snapped =
+                    snap ? std::roundf(gx + snap_off_x) - snap_off_x : gx;
+                const float gy_snapped =
+                    snap ? std::roundf(gy + snap_off_y) - snap_off_y : gy;
                 float pos[4][3];
                 batch::quad_corners(gx_snapped, gy_snapped, g->width, g->height,
                                     0.0f, pos);
@@ -1347,6 +1429,14 @@ void warn_no_app(const char* what) {
 
 void set_active(Renderer2D* renderer) {
     g_active = renderer;
+}
+
+Renderer2D* active_renderer() {
+    return g_active;
+}
+
+void warn_no_app_r3d(const char* what) {
+    warn_no_app(what);  // the same once-per-process warn, shared seam
 }
 
 void begin() {

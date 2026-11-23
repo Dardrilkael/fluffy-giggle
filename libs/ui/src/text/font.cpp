@@ -168,6 +168,141 @@ struct CoverageLut {
         }
     }
 };
+// --- vertical grid-fitting (FontBakeOptions::fit_vertical) -------------------
+// A minimal "blue zone" autohinter. stb_truetype never hints, so at UI
+// sizes the baseline is the only horizontal edge that lands on a pixel
+// boundary; the x-height and cap height fall on fractions and every
+// lowercase/cap top renders as a half-covered gray row. The fit is a
+// monotone piecewise-linear warp of the outline's Y (font units) with
+// three zones:
+//   baseline  [-ovs, 0]            -> 0
+//   x-height  [xh, xh + ovs]       -> round(xh * scale) px
+//   cap/asc.  [cap, cap + ovs]     -> round(cap * scale) px
+// Each zone is FLAT in the map: the round letters' overshoot collapses
+// onto the zone line, so 'o' tops out exactly where 'x' does. Between
+// the zones the map interpolates (strokes stretch/squeeze by a few
+// percent at most); past the outer zones it is a pure translation.
+// Everything is per face and per size, computed from the face's own 'x'
+// and 'H' boxes - a face without them (a CJK carrier) simply is not fit.
+// Horizontal metrics, advances and the line box are untouched.
+struct VerticalFit {
+    bool valid = false;
+    float in_y[6] = {};   // font units, ascending
+    float out_y[6] = {};  // font units, non-decreasing
+    [[nodiscard]] float warp(float y) const {
+        if (y <= in_y[0]) {
+            return out_y[0] + (y - in_y[0]);
+        }
+        if (y >= in_y[5]) {
+            return out_y[5] + (y - in_y[5]);
+        }
+        for (int i = 0; i < 5; ++i) {
+            if (y <= in_y[i + 1]) {
+                const float span = in_y[i + 1] - in_y[i];
+                const float t = span > 0.0f ? (y - in_y[i]) / span : 0.0f;
+                return out_y[i] + t * (out_y[i + 1] - out_y[i]);
+            }
+        }
+        return y;
+    }
+};
+
+VerticalFit make_vertical_fit(const stbtt_fontinfo& info, float scale,
+                              const FontBakeOptions& options) {
+    VerticalFit fit;
+    if (!options.fit_vertical || options.sdf || scale <= 0.0f) {
+        return fit;
+    }
+    const int gx = stbtt_FindGlyphIndex(&info, 'x');
+    const int gh = stbtt_FindGlyphIndex(&info, 'H');
+    int bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
+    if (gx == 0 || gh == 0 ||
+        stbtt_GetGlyphBox(&info, gx, &bx0, &by0, &bx1, &by1) == 0) {
+        return fit;
+    }
+    const float xh_u = static_cast<float>(by1);
+    if (stbtt_GetGlyphBox(&info, gh, &bx0, &by0, &bx1, &by1) == 0) {
+        return fit;
+    }
+    const float cap_u = static_cast<float>(by1);
+    const float xh_px = xh_u * scale;
+    const float cap_px = cap_u * scale;
+    // Tiny text has no room to fit; large text does not need it.
+    if (xh_px < 3.0f || xh_px > 24.0f || cap_u <= xh_u) {
+        return fit;
+    }
+    const float xo = std::round(xh_px);
+    const float co = std::round(cap_px);
+    if (co <= xo) {
+        return fit;
+    }
+    // A fit that would distort noticeably is refused, never forced.
+    if (std::fabs(xo / xh_px - 1.0f) > 0.12f ||
+        std::fabs(co / cap_px - 1.0f) > 0.12f) {
+        return fit;
+    }
+    const float ovs = 0.035f * xh_u;  // ~1.9% em in Inter / JetBrains Mono
+    if (xh_u + ovs >= cap_u) {
+        return fit;
+    }
+    const float xo_u = xo / scale;
+    const float co_u = co / scale;
+    const float in[6] = {-ovs, 0.0f, xh_u, xh_u + ovs, cap_u, cap_u + ovs};
+    const float out[6] = {0.0f, 0.0f, xo_u, xo_u, co_u, co_u};
+    for (int i = 0; i < 6; ++i) {
+        fit.in_y[i] = in[i];
+        fit.out_y[i] = out[i];
+    }
+    fit.valid = true;
+    return fit;
+}
+
+// The fitted counterpart of stbtt_GetCodepointBitmapBoxSubpixel at shift 0:
+// same floor/ceil rule, Y taken through the warp. False for an empty glyph.
+bool fitted_box(const stbtt_fontinfo& info, const VerticalFit& fit, int glyph,
+                float scale_x, float scale_y, int& x0, int& y0, int& x1,
+                int& y1) {
+    int bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
+    if (stbtt_GetGlyphBox(&info, glyph, &bx0, &by0, &bx1, &by1) == 0) {
+        return false;
+    }
+    const float wy0 = fit.warp(static_cast<float>(by0));
+    const float wy1 = fit.warp(static_cast<float>(by1));
+    x0 = static_cast<int>(std::floor(static_cast<float>(bx0) * scale_x));
+    x1 = static_cast<int>(std::ceil(static_cast<float>(bx1) * scale_x));
+    y0 = static_cast<int>(std::floor(-wy1 * scale_y));
+    y1 = static_cast<int>(std::ceil(-wy0 * scale_y));
+    return true;
+}
+
+// stbtt_MakeGlyphBitmapSubpixel with the outline's Y warped first (the
+// same GetGlyphShape + Rasterize pair stb itself runs, flatness 0.35).
+void fitted_render(const stbtt_fontinfo& info, const VerticalFit& fit,
+                   int glyph, float scale_x, float scale_y, int x0, int y0,
+                   int w, int h, std::uint8_t* out) {
+    stbtt_vertex* verts = nullptr;
+    const int n = stbtt_GetGlyphShape(&info, glyph, &verts);
+    if (n <= 0 || verts == nullptr) {
+        return;
+    }
+    const auto warp_s = [&fit](short v) {
+        return static_cast<short>(
+            std::lround(fit.warp(static_cast<float>(v))));
+    };
+    for (int i = 0; i < n; ++i) {
+        verts[i].y = warp_s(verts[i].y);
+        verts[i].cy = warp_s(verts[i].cy);
+        verts[i].cy1 = warp_s(verts[i].cy1);
+    }
+    stbtt__bitmap bmp;
+    bmp.w = w;
+    bmp.h = h;
+    bmp.stride = w;
+    bmp.pixels = out;
+    stbtt_Rasterize(&bmp, 0.35f, verts, n, scale_x, scale_y, 0.0f, 0.0f, x0,
+                    y0, 1, info.userdata);
+    stbtt_FreeShape(&info, verts);
+}
 
 // One glyph's rasterization, the P1 quality pass's single step (shared
 // by the primary bake and every lazy face bake): render at
@@ -205,10 +340,23 @@ BakedGlyph rasterize_glyph(const stbtt_fontinfo& info,
     int y0 = 0;
     int x1 = 0;
     int y1 = 0;
-    stbtt_GetCodepointBitmapBoxSubpixel(&info, static_cast<int>(codepoint),
-                                        scale * static_cast<float>(ox),
-                                        scale, 0.0f, 0.0f, &x0, &y0, &x1,
-                                        &y1);
+    const VerticalFit fit = make_vertical_fit(info, scale, options);
+    const int glyph_index =
+        fit.valid ? stbtt_FindGlyphIndex(&info, static_cast<int>(codepoint))
+                  : 0;
+    const bool fitted = fit.valid && glyph_index != 0;
+    if (fitted) {
+        if (!fitted_box(info, fit, glyph_index,
+                        scale * static_cast<float>(ox), scale, x0, y0, x1,
+                        y1)) {
+            return g;
+        }
+    } else {
+        stbtt_GetCodepointBitmapBoxSubpixel(
+            &info, static_cast<int>(codepoint),
+            scale * static_cast<float>(ox), scale, 0.0f, 0.0f, &x0, &y0,
+            &x1, &y1);
+    }
     const int w_over = x1 - x0;  // oversampled columns
     const int h = y1 - y0;       // final rows
     if (w_over <= 0 || h <= 0) {
@@ -226,11 +374,17 @@ BakedGlyph rasterize_glyph(const stbtt_fontinfo& info,
     const int w = (w_over + phase + ox - 1) / ox;  // final columns
     std::vector<std::uint8_t> over(
         static_cast<std::size_t>(w_over) * static_cast<std::size_t>(h), 0);
-    stbtt_MakeCodepointBitmapSubpixel(
-        &info, over.data(), w_over, h,
-        w_over,  // stride: rows are tight
-        scale * static_cast<float>(ox), scale, 0.0f, 0.0f,
-        static_cast<int>(codepoint));
+    if (fitted) {
+        fitted_render(info, fit, glyph_index,
+                      scale * static_cast<float>(ox), scale, x0, y0, w_over,
+                      h, over.data());
+    } else {
+        stbtt_MakeCodepointBitmapSubpixel(
+            &info, over.data(), w_over, h,
+            w_over,  // stride: rows are tight
+            scale * static_cast<float>(ox), scale, 0.0f, 0.0f,
+            static_cast<int>(codepoint));
+    }
 
     g.w = static_cast<std::uint32_t>(w);
     g.h = static_cast<std::uint32_t>(h);
