@@ -136,14 +136,20 @@ void main() {
     if (v_tex_index >= kTextSdfFlag) {
         const int sdf_index = int((v_tex_index - kTextSdfFlag) + 0.5);
         float dist;
+        // Mip 0 ONLY: the field is already minification-aware (the fwidth
+        // ramp below widens with zoom-out), and a trilinear blend with a
+        // downsampled distance field is not a distance field any more -
+        // it softens and shimmers every edge. textureLod pins the base
+        // level whatever the sampler's mip mode says.
 #ifdef WS_BINDLESS
-        dist = texture(u_textures[nonuniformEXT(sdf_index)], v_uv).a;
+        dist = textureLod(u_textures[nonuniformEXT(sdf_index)], v_uv, 0.0).a;
 #else
-        dist = texture(u_textures[sdf_index], v_uv).a;
+        dist = textureLod(u_textures[sdf_index], v_uv, 0.0).a;
 #endif
-        // 0..255 -> 0..1, the outline at 0.5: the field's convention
-        // (onedge_value 128, pixel_dist_scale 128/range at bake time).
-        dist = dist / 255.0;
+        // The texture is R8G8B8A8_UNORM: sampling returns 0..1 directly.
+        // The field convention: onedge_value 128, pixel_dist_scale 128/range
+        // at bake time, so the outline sits at 128/255 = 0.5 in the sampled
+        // value. No scaling needed - dist is already 0..1.
         const float aa = max(fwidth(dist), 1e-4);
         const float coverage =
             clamp((dist - 0.5) / aa + 0.5, 0.0, 1.0);
