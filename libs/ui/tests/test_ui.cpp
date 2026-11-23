@@ -302,6 +302,45 @@ TEST_CASE("quad cap splits chunks with the table carried over (u16)") {
     CHECK(core.vertices()[first_past + 4].tex_index == 1.0f);
 }
 
+TEST_CASE("push_quad_vcol: the text flag rides on top of the slot, both tiers") {
+    namespace batch = ws::ui::r2d::batch;
+    const float pos[4][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    const float uv[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    const float white[4][4] = {{1, 1, 1, 1}, {1, 1, 1, 1},
+                               {1, 1, 1, 1}, {1, 1, 1, 1}};
+    // Chunked tier: chunk-local slots 0 and 1, the second one flagged.
+    {
+        BatchCore core;
+        core.begin_frame();
+        core.open_segment(default_vp());
+        REQUIRE(core.push_quad_vcol(pos, uv, white, 40u));         // plain
+        REQUIRE(core.push_quad_vcol(pos, uv, white, 41u, true));   // glyph
+        REQUIRE(core.push_quad_vcol(pos, uv, white, 40u, true));   // glyph, slot 0
+        const auto& v = core.vertices();
+        CHECK(v[0].tex_index == 0.0f);
+        CHECK(v[4].tex_index == batch::kTextCoverageFlag + 1.0f);
+        CHECK(v[8].tex_index == batch::kTextCoverageFlag + 0.0f);
+        // The flag never touches the chunk's own table: two textures.
+        CHECK(core.chunk(0).texture_count == 2);
+    }
+    // Bindless tier: the GLOBAL registry slot (past the chunk table's 32)
+    // plus the flag - exact in float, and still below nothing else.
+    {
+        BatchCore core;
+        core.begin_frame();
+        core.use_global_texture_ids(true);
+        core.open_segment(default_vp());
+        REQUIRE(core.push_quad_vcol(pos, uv, white, 1023u, true));
+        CHECK(core.vertices()[0].tex_index ==
+              batch::kTextCoverageFlag + 1023.0f);
+        CHECK(core.chunk(0).texture_count == 0);
+    }
+    // Slots stay exactly recoverable the way the shader does it.
+    CHECK(static_cast<int>(batch::kTextCoverageFlag + 1023.0f -
+                           batch::kTextCoverageFlag + 0.5f) == 1023);
+    CHECK(batch::kTextCoverageFlag > 1023.0f);
+}
+
 TEST_CASE("global texture ids skip the chunk table (bindless mode)") {
     BatchCore core;
     core.begin_frame();
@@ -9476,7 +9515,9 @@ TEST_CASE("draw_text records one contiguous glyph run on the font's own page") {
     CHECK(chunk.texture_ids[0] == 7u);
     REQUIRE(r.batch().vertices().size() == 8);
     for (const auto& v : r.batch().vertices()) {
-        CHECK(v.tex_index == 0.0f);  // one page, one slot
+        // One page, one slot - on the GLYPH channel (the font bakes with
+        // the default shader_contrast): slot 0 + kTextCoverageFlag.
+        CHECK(v.tex_index == ws::ui::r2d::batch::kTextCoverageFlag + 0.0f);
     }
     // 'A': pen 100 + offset (1, 2) -> the quad's TL lands at (101, 42).
     CHECK(r.batch().vertices()[0].pos[0] == 101.0f);
@@ -9484,6 +9525,78 @@ TEST_CASE("draw_text records one contiguous glyph run on the font's own page") {
     // 'B': the pen advanced past 'A' (10) and the space (3) -> 113.
     CHECK(r.batch().vertices()[4].pos[0] == 113.0f);
     CHECK(r.batch().vertices()[4].pos[1] == 43.0f);
+}
+
+TEST_CASE("draw_text: glyph channel only for shader-contrast fonts, never sprites or icons") {
+    using namespace ws::ui::r2d;
+    constexpr float kFlag = batch::kTextCoverageFlag;
+    const auto run = [](const Font& font, const char* text) {
+        Renderer2D r;
+        r.register_atlas_page(Texture{7}, {{0.0f, 0.0f, 0.5f, 0.5f, 4, 5},
+                                           {0.5f, 0.0f, 1.0f, 0.5f, 2, 3}});
+        r.frame_begin(800.0f, 600.0f);
+        r.begin_screen();
+        r.draw_text(10.0f, 10.0f, text, font, rgba(235, 238, 242));
+        r.end();
+        r.frame_end();
+        std::vector<float> idx;
+        for (const auto& v : r.batch().vertices()) {
+            idx.push_back(v.tex_index);
+        }
+        return idx;
+    };
+
+    // Default options (shader contrast): every glyph vertex is flagged.
+    const Font shader_font = ab_font();
+    const std::vector<float> flagged = run(shader_font, "AB");
+    REQUIRE(flagged.size() == 8);
+    for (const float t : flagged) {
+        CHECK(t == kFlag);
+    }
+
+    // The same glyphs baked with contrast in the atlas: the plain sprite
+    // path, bit for bit what draw_text produced before shader contrast.
+    const Font baked_font = ab_font();
+    baked_font.extras_state()->options = FontBakeOptions::identity();
+    const std::vector<float> plain = run(baked_font, "AB");
+    REQUIRE(plain.size() == 8);
+    for (const float t : plain) {
+        CHECK(t == 0.0f);
+    }
+
+    // A plain draw_sprite on the very same page is never flagged.
+    {
+        Renderer2D r;
+        r.register_atlas_page(Texture{7}, {{0.0f, 0.0f, 0.5f, 0.5f, 4, 5}});
+        r.frame_begin(800.0f, 600.0f);
+        r.begin_screen();
+        r.draw_sprite(0.0f, 0.0f, 4.0f, 5.0f, rgba(255, 255, 255),
+                      Sprite{7, 0});
+        r.end();
+        r.frame_end();
+        for (const auto& v : r.batch().vertices()) {
+            CHECK(v.tex_index == 0.0f);
+        }
+    }
+
+    // A built-in icon codepoint (PRIVATE USE, U+E000) drawn through
+    // draw_text stays on the plain path even in a shader-contrast font:
+    // icons are shapes, not letters. A tofu-carrying font answers it with
+    // the visible fallback glyph; 'A' beside it is flagged as usual.
+    Font::Glyph glyphs[96]{};
+    glyphs['A' - 32].advance = 10.0f;
+    glyphs['A' - 32].width = 4.0f;
+    glyphs['A' - 32].height = 5.0f;
+    glyphs['A' - 32].sprite = Sprite{7, 0};
+    glyphs[95].advance = 8.0f;
+    glyphs[95].width = 2.0f;
+    glyphs[95].height = 3.0f;
+    glyphs[95].sprite = Sprite{7, 1};
+    const Font tofu_font(24.0f, 30.0f, glyphs, 96);
+    const std::vector<float> mixed = run(tofu_font, "A\xEE\x80\x80");
+    REQUIRE(mixed.size() == 8);
+    CHECK(mixed[0] == kFlag);   // 'A'
+    CHECK(mixed[4] == 0.0f);    // U+E000: the icon range, plain path
 }
 
 TEST_CASE("draw_text snaps to whole pixels on the axis-aligned screen camera") {
@@ -9672,8 +9785,9 @@ TEST_CASE("gui labels draw through the theme font") {
          ++i) {
         if (verts[i].tex_index < 0.0f) {
             ++face_verts;  // the SDF channel: negative is never a texture
-        } else if (verts[i].tex_index == 0.0f) {
-            ++glyph_verts;  // the page's slot 0
+        } else if (verts[i].tex_index ==
+                   ws::ui::r2d::batch::kTextCoverageFlag + 0.0f) {
+            ++glyph_verts;  // the page's slot 0, on the glyph channel
         }
     }
     CHECK(face_verts == 4);   // one rounded face quad, not nine slices

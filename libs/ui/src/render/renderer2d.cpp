@@ -136,8 +136,11 @@ void Renderer2D::frame_end() {
             // record() already proved the id's generation. Per-corner
             // colors ride the vcol push (identical rows for the plain
             // draws - the same vertices push_quad would have built).
+            // Text glyphs carry the coverage flag so the shader applies
+            // its contrast curve (see batch::kTextCoverageFlag).
             (void)batch_.push_quad_vcol(cmd.pos, cmd.uv, color,
-                                        cmd.texture.id & kSlotMask);
+                                        cmd.texture.id & kSlotMask,
+                                        cmd.text);
         }
     }
     batch_.close_segment();
@@ -259,7 +262,7 @@ void Renderer2D::stash_camera(const Camera3D& camera) {
 
 void Renderer2D::record(const char* what, const float (&pos)[4][3],
                         const float (&uv)[4][2], std::uint32_t color,
-                        Texture texture, float radius) {
+                        Texture texture, float radius, bool text) {
     if (!camera_stashed_) {
         warn_drop(what);  // outside any begin()/end() block
         return;
@@ -294,6 +297,7 @@ void Renderer2D::record(const char* what, const float (&pos)[4][3],
     cmd.color[2] = color;
     cmd.color[3] = color;
     cmd.radius = radius;
+    cmd.text = text;
     const float* clip = active_clip();
     for (int i = 0; i < 4; ++i) {
         cmd.clip[i] = clip[i];
@@ -308,7 +312,7 @@ void Renderer2D::record(const char* what, const float (&pos)[4][3],
 
 void Renderer2D::record_vcol(const char* what, const float (&pos)[4][3],
                              const float (&uv)[4][2], const float (&rgba)[4][4],
-                             Texture texture) {
+                             Texture texture, bool text) {
     if (!camera_stashed_) {
         warn_drop(what);  // outside any begin()/end() block
         return;
@@ -327,6 +331,7 @@ void Renderer2D::record_vcol(const char* what, const float (&pos)[4][3],
     cmd.sort_layer = current_layer_;
     cmd.camera_epoch = current_epoch_;
     cmd.texture = texture;
+    cmd.text = text;
     for (int i = 0; i < 4; ++i) {
         // Clamp then pack: the tessellator's weighted blends may overshoot
         // [0, 1] by an epsilon, and a negative float would pack garbage.
@@ -920,6 +925,22 @@ void Renderer2D::draw_sprite(float x, float y, float z, float w, float h,
     }
 }
 
+void Renderer2D::draw_sprite_quad(const Sprite& sprite,
+                                  const float (&pos)[4][3],
+                                  const float (&uv)[4][2],
+                                  std::uint32_t color) {
+    if (!camera_stashed_) {
+        warn_drop("draw_sprite_quad");  // outside any begin()/end() block
+        return;
+    }
+    // Record as a text glyph quad: the sprite's page supplies the texture,
+    // and text=true tags it for the shader's coverage path (alpha-channel
+    // coverage + the contrast curve - see batch.frag). Glyph pages are
+    // white-RGB/coverage-in-alpha, so this is ONLY for glyph-page sprites;
+    // a plain draw_sprite/draw_image quad must never come through here.
+    record("draw_sprite_quad", pos, uv, color, Texture{sprite.page}, 0.0f, true);
+}
+
 FrameSize Renderer2D::sprite_size(Sprite sprite) const {
     const atlas::Rect* rect =
         sprite.page == 0 ? nullptr : find_sprite_rect(sprite);
@@ -935,7 +956,7 @@ float Renderer2D::draw_text(float x, float y, const char* utf8_text,
         return 0.0f;  // measure_text(nullptr) reports the same nothing
     }
     // Text is just more sprites: one quad per visible glyph through the
-    // draw_sprite path, so a string carries the caller's layer, clip and
+    // draw_sprite_quad path, so a string carries the caller's layer, clip and
     // camera block, and its glyphs land in one batch run (one page texture
     // = one texture-table slot). (x, y) is the LINE BOX's top-left - the
     // box widgets center on their rows; glyph offsets already reach down
@@ -962,6 +983,9 @@ float Renderer2D::draw_text(float x, float y, const char* utf8_text,
     }
     const char* s = utf8_text;
     float pen_x = x;
+    // Check if this font uses shader contrast at draw time (the option can
+    // be changed after baking via font.extras_state()->options).
+    const bool use_shader_contrast = font.extras_state()->options.shader_contrast;
     for (std::uint32_t cp = font::utf8_next(s); cp != 0u;
          cp = font::utf8_next(s)) {
         const Font::Glyph* g = font.glyph(cp);
@@ -974,9 +998,32 @@ float Renderer2D::draw_text(float x, float y, const char* utf8_text,
         if (g->width > 0.0f && g->height > 0.0f && g->sprite.page != 0) {
             const float gx = pen_x + g->offset_x;
             const float gy = y + g->offset_y;
-            draw_sprite(snap ? std::roundf(gx) : gx,
-                        snap ? std::roundf(gy) : gy, g->width, g->height,
-                        color, g->sprite);
+            // Resolve the sprite's UV rect from the atlas page.
+            const atlas::Rect* rect = find_sprite_rect(g->sprite);
+            if (rect != nullptr) {
+                const float gx_snapped = snap ? std::roundf(gx) : gx;
+                const float gy_snapped = snap ? std::roundf(gy) : gy;
+                float pos[4][3];
+                batch::quad_corners(gx_snapped, gy_snapped, g->width, g->height,
+                                    0.0f, pos);
+                const float uv[4][2] = {
+                    {rect->u0, rect->v0},  // TL
+                    {rect->u1, rect->v0},  // TR
+                    {rect->u1, rect->v1},  // BR
+                    {rect->u0, rect->v1},  // BL
+                };
+                // Icons (Private Use Area U+E000-U+F8FF) are shapes, not letters:
+                // they stay on the plain sprite path even in a shader-contrast font.
+                const bool is_icon = (cp >= 0xE000 && cp <= 0xF8FF);
+                // Only flag as text glyph if shader contrast is enabled AND it's not an icon.
+                const bool is_text_glyph = use_shader_contrast && !is_icon;
+                if (is_text_glyph) {
+                    draw_sprite_quad(g->sprite, pos, uv, color);
+                } else {
+                    record("draw_text_plain", pos, uv, color, Texture{g->sprite.page},
+                           0.0f, false);
+                }
+            }
         }
         pen_x += g->advance;
     }

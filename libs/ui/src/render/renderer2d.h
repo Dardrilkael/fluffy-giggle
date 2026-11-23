@@ -63,6 +63,10 @@ struct DrawCommand {
                           // the command to push_rounded_quad, which packs it
                           // into a NEGATIVE tex_index (never a texture id:
                           // that is the shader's discriminator)
+    bool text = false;    // true = a glyph quad (draw_text): the replay
+                          // pushes it with batch::kTextCoverageFlag, so the
+                          // shader reads the texel as a coverage mask and
+                          // applies its text contrast curve
 };
 
 // One begin() block's camera state, snapshotted at stash time. The block's
@@ -236,6 +240,11 @@ public:
                      Sprite sprite, float rotation = 0.0f);
     void draw_sprite(float x, float y, float z, float w, float h,
                      std::uint32_t color, Sprite sprite);
+    // The glyph draw path's quad constructor: the sprite's rect supplies
+    // pos/uv, the color is uniform, and the quad is recorded with text=true
+    // so the replay tags it for the shader's contrast curve.
+    void draw_sprite_quad(const Sprite& sprite, const float (&pos)[4][3],
+                          const float (&uv)[4][2], std::uint32_t color);
     FrameSize sprite_size(Sprite sprite) const;
     // Installs a page's sub-rect table; Sprite::page is its key. Production
     // (load_atlas) calls this per uploaded page; tests inject synthetic
@@ -317,14 +326,14 @@ private:
     // command as draw_rounded_quad's SDF form (see DrawCommand::radius).
     void record(const char* what, const float (&pos)[4][3],
                 const float (&uv)[4][2], std::uint32_t color, Texture texture,
-                float radius = 0.0f);
+                float radius = 0.0f, bool text = false);
     // record()'s per-corner spelling (draw_vertex_quad): same guards, same
     // command list, but each corner's packed color comes from its own rgba
     // row (clamped 0..1 before packing - the canvas math may overshoot on
     // the way to a weighted average).
     void record_vcol(const char* what, const float (&pos)[4][3],
                      const float (&uv)[4][2], const float (&rgba)[4][4],
-                     Texture texture);
+                     Texture texture, bool text = false);
 
     // --- GPU half helpers ---
     // Unknown texture id, while a registry exists: once per frame.

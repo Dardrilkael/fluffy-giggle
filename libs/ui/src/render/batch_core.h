@@ -44,6 +44,16 @@ inline constexpr std::uint32_t kInitialChunkCapacity = 16;    // one clip run ea
 // Loads past it degrade to white with one warn - the failed-load contract.
 inline constexpr std::uint32_t kMaxBindlessTextures = 1024;
 
+// The GLYPH channel of Vertex::tex_index: a quad pushed with `text = true`
+// carries (texture slot + kTextCoverageFlag). The shader reads the texel
+// as a coverage mask and applies its luminance-dependent contrast curve
+// (see shaders/batch.frag) instead of the plain v_color * texel multiply.
+// 4096 sits past every legal slot in both tiers (32 chunk-local, 1024
+// bindless) and far below float's exact-integer limit, so it never
+// collides with a texture index and never loses the slot to rounding.
+// Comment-tied to `kTextFlag` in shaders/batch.frag.
+inline constexpr float kTextCoverageFlag = 4096.0f;
+
 // The "no clip pushed" rect: the whole framebuffer. The flush intersects
 // every chunk clip with the frame extent, so infinite extents mean
 // "everything". Draws recorded with this clip render unscissored.
@@ -207,9 +217,12 @@ public:
     // antialiasing fringes ramp alpha across a quad's corners. A solid
     // quad is this with four identical rows (the plain push_quad is the
     // cheaper spelling of exactly that).
+    // `text` marks a glyph quad: the vertices' tex_index carries
+    // kTextCoverageFlag on top of the slot (see its comment). Default
+    // false = every pre-existing caller, bit for bit.
     bool push_quad_vcol(const float (&pos)[4][3], const float (&uv)[4][2],
                         const float (&colors)[4][4],
-                        std::uint32_t texture_id);
+                        std::uint32_t texture_id, bool text = false);
 
     // The rounded-rect sibling: same guards and cap split, but the quad
     // names no texture. `radius` is the corner radius in WORLD units;

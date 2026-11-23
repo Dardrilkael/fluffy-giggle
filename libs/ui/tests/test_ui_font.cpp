@@ -95,10 +95,15 @@ TEST_CASE("the bake knobs move coverage, never a metric") {
         return ws::ui::r2d::font::bake_inter(
             ws::ui::r2d::font::inter_regular_ttf(), 18.0f, options);
     };
+    // The gamma LUT is the BAKED-contrast mode (shader_contrast = false);
+    // with the default shader contrast the bake stays linear and the
+    // curve runs in the shader (see the shader-contrast test below).
     const BakedFont plain = baked_at(FontBakeOptions::identity());
-    const BakedFont quality = baked_at(FontBakeOptions{});  // the defaults
+    const BakedFont quality =
+        baked_at(FontBakeOptions{}.with_baked_contrast());  // the defaults
     const BakedFont heavy = baked_at(FontBakeOptions{.gamma = 2.4f,
-                                                     .oversample_x = 2});
+                                                     .oversample_x = 2,
+                                                     .shader_contrast = false});
     REQUIRE(plain.ok);
     REQUIRE(quality.ok);
     REQUIRE(heavy.ok);
@@ -133,6 +138,38 @@ TEST_CASE("the bake knobs move coverage, never a metric") {
     CHECK(heavy_ink > quality_ink);
 }
 
+TEST_CASE("shader contrast: the bake stays linear and ignores gamma/boost") {
+    // shader_contrast (the default) moves the contrast curve into the
+    // batch shader, keyed on the text color - so the atlas must carry
+    // plain LINEAR coverage: byte-identical to a baked-contrast bake with
+    // gamma 1 / boost 1 at the same oversampling, and indifferent to
+    // whatever the (now ignored) gamma/boost knobs say.
+    const auto baked_at = [](const FontBakeOptions& options) {
+        return ws::ui::r2d::font::bake_inter(
+            ws::ui::r2d::font::inter_regular_ttf(), 18.0f, options);
+    };
+    const BakedFont shader = baked_at(FontBakeOptions{});
+    const BakedFont knobs_ignored =
+        baked_at(FontBakeOptions{.gamma = 2.4f, .boost = 3.0f});
+    const BakedFont linear = baked_at(FontBakeOptions{
+        .gamma = 1.0f, .boost = 1.0f, .oversample_x = 3,
+        .shader_contrast = false});
+    const BakedFont lut = baked_at(FontBakeOptions{}.with_baked_contrast());
+    REQUIRE(shader.ok);
+    REQUIRE(knobs_ignored.ok);
+    REQUIRE(linear.ok);
+    REQUIRE(lut.ok);
+    REQUIRE(shader.glyphs.size() == linear.glyphs.size());
+    for (std::size_t i = 0; i < shader.glyphs.size(); ++i) {
+        CHECK(shader.glyphs[i].rgba == linear.glyphs[i].rgba);
+        CHECK(shader.glyphs[i].rgba == knobs_ignored.glyphs[i].rgba);
+        CHECK(shader.glyphs[i].advance == lut.glyphs[i].advance);
+    }
+    // ...and the baked-contrast default really does differ (the LUT
+    // lifts the mids), so the two modes are not the same bake by accident.
+    CHECK(ink_of(glyph_of(lut, 'g')) > ink_of(glyph_of(shader, 'g')));
+}
+
 TEST_CASE("boost multiplies after the LUT and clamps at 255") {
     // The third knob: a straight multiplier on the LUT's output. More
     // boost, more ink; a mild boost rides byte-exact through the
@@ -145,16 +182,16 @@ TEST_CASE("boost multiplies after the LUT and clamps at 255") {
     };
     const BakedFont plain =
         baked_at(FontBakeOptions{.gamma = 1.6f, .boost = 1.0f,
-                                 .oversample_x = 1});
+                                 .oversample_x = 1, .shader_contrast = false});
     const BakedFont boosted =
         baked_at(FontBakeOptions{.gamma = 1.6f, .boost = 1.2f,
-                                 .oversample_x = 1});
+                                 .oversample_x = 1, .shader_contrast = false});
     const BakedFont mild =
         baked_at(FontBakeOptions{.gamma = 1.6f, .boost = 1.5f,
-                                 .oversample_x = 1});
+                                 .oversample_x = 1, .shader_contrast = false});
     const BakedFont absurd =
         baked_at(FontBakeOptions{.gamma = 1.6f, .boost = 40.0f,
-                                 .oversample_x = 1});
+                                 .oversample_x = 1, .shader_contrast = false});
     REQUIRE(plain.ok);
     REQUIRE(boosted.ok);
     REQUIRE(mild.ok);

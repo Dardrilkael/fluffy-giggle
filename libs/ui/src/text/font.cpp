@@ -133,6 +133,18 @@ std::vector<std::uint8_t> read_file(const char* path) {
 // monotone for any fixed g > 0), so it can never reorder coverage (a
 // darker sample cannot out-ink a brighter one) and the tofu's binary
 // 0/255 ends map to themselves.
+// A shader_contrast font bakes LINEAR coverage (identity LUT, no boost):
+// the contrast curve runs per draw in shaders/batch.frag, keyed on the
+// text color, so the atlas stays theme-independent. A baked-contrast font
+// (shader_contrast = false) applies the options' gamma/boost exactly as
+// before.
+inline float effective_gamma(const FontBakeOptions& options) {
+    return options.shader_contrast ? 1.0f : options.gamma;
+}
+inline float effective_boost(const FontBakeOptions& options) {
+    return options.shader_contrast ? 1.0f : options.boost;
+}
+
 struct CoverageLut {
     std::uint8_t v[256];
     explicit CoverageLut(float gamma) {
@@ -265,7 +277,7 @@ BakedGlyph rasterize_glyph(const stbtt_fontinfo& info,
             // order, so coverage still cannot reorder.
             const int boosted = static_cast<int>(std::lround(
                 static_cast<float>(lut.v[static_cast<std::size_t>(averaged)]) *
-                options.boost));
+                effective_boost(options)));
             dst[static_cast<std::size_t>(col) * 4u + 3u] =
                 static_cast<std::uint8_t>(boosted < 0
                                               ? 0
@@ -345,7 +357,7 @@ BakedFont bake_info(const stbtt_fontinfo& info, float pixel_height,
     if (pixel_height <= 0.0f) {
         return out;
     }
-    const CoverageLut lut{options.gamma};
+    const CoverageLut lut{effective_gamma(options)};
 
     const float scale = stbtt_ScaleForPixelHeight(&info, pixel_height);
     int ascent = 0;
@@ -697,7 +709,7 @@ BakedGlyph bake_face_glyph(const FaceBake& face, std::uint32_t codepoint,
     if (!face.ok || !face.carries(codepoint)) {
         return {};
     }
-    const CoverageLut lut{options.gamma};
+    const CoverageLut lut{effective_gamma(options)};
     return rasterize_glyph(face.info, codepoint, face.scale, baseline_y,
                            options, lut);
 }

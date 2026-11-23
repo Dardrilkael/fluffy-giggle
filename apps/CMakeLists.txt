@@ -46,6 +46,8 @@ ws_app_wants(_want circsim_editor ui circsim jobs platform app settings)
 set(ws_want_circsim_editor ${_want})
 ws_app_wants(_want schematic_test ui schematic jobs platform app settings)
 set(ws_want_schematic_test ${_want})
+ws_app_wants(_want glyph_probe ui)
+set(ws_want_glyph_probe ${_want})
 unset(_want)
 
 if(ws_want_playground)
@@ -136,4 +138,12 @@ if(ws_want_schematic_test)
   # Simple rectangular components with pins that can be wired together.
   # Uses ws::schematic (the headless routing core) + ws::ui::canvas directly.
   add_subdirectory(schematic_test)
+endif()
+
+if(ws_want_glyph_probe)
+  # glyph_probe is the text contrast acceptance view: a full-screen text
+  # rendering test that exercises the shader-based contrast curve across
+  # all theme colors (light/dark text on light/dark backgrounds) with
+  # live sliders for gamma/boost overrides. No assets: system font only.
+  add_subdirectory(glyph_probe)
 endif()

@@ -429,8 +429,20 @@ private:
 // coverage-only: no metric ever moves (advances, offsets and line
 // heights are exact whatever they say), so measure_text == draw_text's
 // return and every layout stays put while the pixels between sharpen.
+//
+// SHADER CONTRAST (the default). The blend runs in gamma space, which
+// thins light-on-dark text; the bake used to compensate with the gamma /
+// boost knobs below, so an atlas served ONE theme and every theme flip
+// needed a re-bake. With `shader_contrast` on, the bake keeps LINEAR
+// coverage and the batch shader applies the same compensation per draw,
+// as a function of the TEXT COLOR's luminance (light text: the former
+// dark_chrome() tuning, dark text: the former light_chrome() tuning,
+// smooth in between). gamma and boost are then IGNORED, and one atlas
+// serves every theme and every text color. Set it false (or use
+// with_baked_contrast()/identity()) for the old bake-time behavior.
 struct FontBakeOptions {
-    // The coverage exponent applied at bake time:
+    // The coverage exponent applied at bake time (IGNORED while
+    // shader_contrast is on - see above):
     // a' = 255 * (a/255)^(1/g). 1.0 is the identity - the pre-P1 bake
     // byte-for-byte. P1b redefined the knob's DIRECTION: the blend runs
     // in gamma (UNORM) space, which already thins light-on-dark text on
@@ -451,6 +463,7 @@ struct FontBakeOptions {
     // ~1.1 is the stock dark chrome's final step (the lifted mids read
     // right, and the last tenth adds the density small text on a dark
     // panel wants). Like gamma: coverage-only, no metric moves.
+    // IGNORED while shader_contrast is on.
     float boost = 1.0f;
     // Horizontal supersampling: the glyph rasterizes at N samples per
     // final pixel column and box-averages down (1 = off, the old
@@ -466,12 +479,26 @@ struct FontBakeOptions {
     // and 1 remains the option (the hard-snapped look, or a byte-pinned
     // bake).
     int oversample_x = 3;
+    // true (default): linear coverage at bake time, the text contrast
+    // curve in the batch shader (see the struct comment). false: the old
+    // bake-time gamma/boost LUT, drawn through the plain sprite path.
+    bool shader_contrast = true;
 
-    // The pre-P1 bake exactly: every knob at its identity. The escape
-    // hatch a byte-pinned test (or a very conservative app) wants.
+    // The same options with the contrast baked into the atlas instead
+    // (shader_contrast = false): gamma/boost apply again, and the font
+    // draws through the plain sprite path - the pre-shader-contrast look.
+    [[nodiscard]] constexpr FontBakeOptions with_baked_contrast() const {
+        FontBakeOptions copy = *this;
+        copy.shader_contrast = false;
+        return copy;
+    }
+
+    // The pre-P1 bake exactly: every knob at its identity, contrast
+    // baked (= none) so the font draws through the plain sprite path. The
+    // escape hatch a byte-pinned test (or a very conservative app) wants.
     [[nodiscard]] static constexpr FontBakeOptions identity() {
         return FontBakeOptions{.gamma = 1.0f, .boost = 1.0f,
-                               .oversample_x = 1};
+                               .oversample_x = 1, .shader_contrast = false};
     }
     // The stock dark chrome's pair (light-on-dark text): the lifted
     // mids plus a tenth of boost. Apps pick between this and

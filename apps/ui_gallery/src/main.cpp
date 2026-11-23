@@ -793,8 +793,6 @@ private:
     // the bake options; the sliders read these (and re-pick them on a
     // theme flip).
     void sync_font_knobs() {
-        font_gamma_ = font_opts_.gamma;
-        font_boost_ = font_opts_.boost;
         font_oversample_ = font_opts_.oversample_x;
     }
 
@@ -1317,8 +1315,6 @@ private:
     ws::ui::r2d::FontBakeOptions font_opts_ =
         ws::ui::r2d::FontBakeOptions::dark_chrome();  // the live bake pair
     bool font_used_override_ = false;    // WS_FONT_PATH answered?
-    float font_gamma_ = font_opts_.gamma;      // the Fonts page's mirrors
-    float font_boost_ = font_opts_.boost;
     int font_oversample_ = font_opts_.oversample_x;
     bool font_opts_dirty_ = false;       // a knob moved; the re-bake is
                                          // throttled (150 ms) then flushed
@@ -1928,27 +1924,18 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
         }
     }
 
-    // --- fonts (P1b): the bake knobs, live ----------------------------------
-    // The bake pair the theme picked, exposed: gamma lifts the mids
-    // (larger = bolder), boost multiplies after the LUT, oversample_x
-    // supersamples the stems. Every change re-bakes LIVE - throttled to
-    // one bake per 150 ms while a drag runs (a full bake is the size
-    // slider's documented ~50-200 ms), and the final value flushes the
-    // frame the drag ends.
+    // --- fonts: the bake knobs, live --------------------------------------------
+    // With shader contrast (the default), the contrast curve runs in the
+    // fragment shader keyed on the text color's luminance - the atlas
+    // bakes LINEAR coverage (identity gamma/boost). The only remaining
+    // bake knob that affects the atlas is oversample_x (glyph geometry).
+    // A baked-contrast font (shader_contrast = false) uses the old
+    // gamma/boost LUT exactly as before. Every change re-bakes LIVE -
+    // throttled to one bake per 150 ms while a drag runs, and the final
+    // value flushes the frame the drag ends.
     if (gui::collapsing_header(gui_, layout_, chrome_,
                                "fonts: the bake knobs", section_[kFonts])) {
         bool knobs_changed = false;
-        if (gui::slider_float(gui_, layout_, chrome_, "gamma", font_gamma_,
-                              0.5f, 3.0f, half)) {
-            font_opts_.gamma = font_gamma_;
-            knobs_changed = true;
-        }
-        layout_.same_line();
-        if (gui::slider_float(gui_, layout_, chrome_, "boost", font_boost_,
-                              0.5f, 2.0f, half)) {
-            font_opts_.boost = font_boost_;
-            knobs_changed = true;
-        }
         if (gui::slider_int(gui_, layout_, chrome_, "oversample x",
                             font_oversample_, 1, 4, half)) {
             font_opts_.oversample_x = font_oversample_;
@@ -1967,23 +1954,21 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
                 last_opts_bake_ = now;
                 font_opts_dirty_ = false;
                 std::snprintf(status_, sizeof status_,
-                              "font re-baked: gamma %.2f, boost %.2f, "
-                              "oversample %d",
-                              font_opts_.gamma, font_opts_.boost,
-                              font_opts_.oversample_x);
+                              "font re-baked: oversample %d, shader contrast %s",
+                              font_opts_.oversample_x,
+                              font_opts_.shader_contrast ? "on" : "off");
             }
         }
 
         // The readout: which face answered, at what pair and size.
         char bake_line[128];
-        std::snprintf(bake_line, sizeof bake_line, "face: %s   bake: gamma "
-                                                   "%.2f, boost %.2f, "
-                                                   "oversample x%d",
+        std::snprintf(bake_line, sizeof bake_line, "face: %s   bake: "
+                                                   "oversample x%d, shader contrast %s",
                       font_used_override_ ? "WS_FONT_PATH override"
                                           : "the bundled Inter (regular + "
                                             "semibold)",
-                      font_opts_.gamma, font_opts_.boost,
-                      font_opts_.oversample_x);
+                      font_opts_.oversample_x,
+                      font_opts_.shader_contrast ? "on" : "off");
         gui::text(layout_, chrome_, bake_line, -1.0f);
 
         // The bake, sampled: the same line at both weights, drawn
@@ -2003,9 +1988,12 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
                                          *chrome_.font_strong, chrome_.text);
         }
         gui::text(layout_, chrome_,
-                  "flipping the theme re-picks this pair from the chrome's "
-                  "brightness (dark: gamma 1.6 + boost 1.1, light: gamma "
-                  "1.05) and re-bakes.",
+                  "shader contrast (on by default) moves the contrast curve "
+                  "into the fragment shader - one atlas serves all themes and "
+                  "text colors without re-bake on theme flip. The oversample "
+                  "slider affects glyph geometry; gamma/boost are ignored when "
+                  "shader contrast is on. Toggle shader_contrast in code to "
+                  "compare the baked-contrast path.",
                   -1.0f);
     }
 
