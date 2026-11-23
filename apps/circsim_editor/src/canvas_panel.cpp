@@ -1698,7 +1698,7 @@ void draw_canvas_panel(Editor& ed, gui::GuiContext& gui,
     // animation switch (instant when motion is off, like every other
     // eased thing in this panel). tick() advances both by real time.
     ed.view.animate = theme.anim_enabled;
-    (void)ed.tick();
+    ed.animating = ed.tick();
     ws::circsim::Schematic& s = *ed.schem();
     s.view.zoom = ed.view.zoom;
     s.view.center = ed.view.center;

@@ -492,8 +492,22 @@ class CircsimApp final : public ws::ui::App {
         }
     }
 
+    // Idle-frame pacing's app-side input (AppConfig::idle_frame_pacing,
+    // opt-in through CIRCSIM_IDLE_FRAMES): the editor's own motion - the
+    // camera glide, the locate pulse, a playing sweep - which nothing
+    // announces with an event, the gui's animators (hover fades, panel
+    // slides), and the autorun probe's wall-clock fire.
+    [[nodiscard]] bool wants_frame() const override {
+        return editor_.animating || gui_.wants_redraw() ||
+               autorun_secs_ > 0.0f;
+    }
+
     void on_update() override {
         namespace r2d = ws::ui::r2d;
+
+        // Cleared before the panels draw: the Schematic panel sets it
+        // again if it is drawn and still moving.
+        editor_.animating = false;
 
         // The autorun probe (debug): CIRCSIM_AUTORUN_SECS fires the
         // simulate command N seconds in, so the simulate path can be
@@ -2104,6 +2118,22 @@ int main() {
     config.title = "circsim editor";
     config.width = 1360;
     config.height = 820;
+    // EXPERIMENTAL opt-in: CIRCSIM_IDLE_FRAMES=1 skips frames when
+    // nothing changed (no input, no job delivery, nothing animating) and
+    // draws a heartbeat frame every 100 ms. Off by default - the loop
+    // renders every frame as it always has. Time-driven UI the editor
+    // does not announce (toast timeouts, autosave, tooltip delays) ticks
+    // at the heartbeat rate instead of the frame rate.
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)  // the opt-in reads an env var
+#endif
+    if (const char* idle = std::getenv("CIRCSIM_IDLE_FRAMES")) {
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+        config.idle_frame_pacing = idle[0] != '\0' && idle[0] != '0';
+    }
     CircsimApp app(std::move(config));
     return app.run();
 }

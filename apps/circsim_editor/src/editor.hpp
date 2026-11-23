@@ -987,6 +987,12 @@ struct Editor {
     // view). It returns true while something is still moving - the app
     // may use that to keep requesting frames.
     [[nodiscard]] bool tick();
+    // The last tick()'s answer: true while the camera glide, the locate
+    // pulse or a playing sweep is still moving. The Schematic panel sets
+    // it each frame it draws; the app clears it at the top of on_update,
+    // so a panel that is no longer drawn cannot leave a stale "yes"
+    // behind. Idle-frame pacing reads it (CircsimApp::wants_frame).
+    bool animating = false;
 
     // The locate pulse: a ring that blooms at a world point and fades
     // (jump_to and zoom_to_selection fire it, so "where did the view

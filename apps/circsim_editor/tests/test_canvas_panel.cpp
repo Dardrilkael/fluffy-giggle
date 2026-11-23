@@ -3497,4 +3497,64 @@ TEST_CASE("overlays: no face, no overlays (nothing draws, nothing crashes)") {
     CHECK_FALSE(drew_text_containing(b, "parts"));
 }
 
+// ---- idle-frame pacing's app-side input -------------------------------
+//
+// Editor::tick() has always answered "true while something is still
+// moving - the app may use that to keep requesting frames", and the panel
+// threw the answer away. It is kept now (Editor::animating) for
+// CircsimApp::wants_frame(): the camera glide, the locate pulse and a
+// playing sweep move with no event to announce them.
+
+TEST_CASE("the canvas panel records whether the editor is still animating") {
+    Bench b;
+    b.theme.anim_enabled = false;  // no camera glide: a settled view
+    b.draw();
+    CHECK_FALSE(b.ed.animating);  // nothing moving
+
+    b.ed.pulse_at(Pos{0.0, 0.0});  // a locate pulse blooms
+    b.draw();
+    CHECK(b.ed.animating);
+
+    b.ed.pulse.age = Editor::Pulse::kLife;  // ...and has run its life
+    b.draw();
+    CHECK_FALSE(b.ed.pulse.active);
+    CHECK_FALSE(b.ed.animating);
+}
+
+TEST_CASE("a playing sweep keeps the editor animating until it is paused") {
+    Bench b;
+    b.theme.anim_enabled = false;
+    ws::circsim::Part* v = b.doc.schem.add_part(
+        ws::circsim::Part::make("v", "V1", "5", {0.0, -4.0}));
+    ws::circsim::Part* r = b.doc.schem.add_part(
+        ws::circsim::Part::make("r", "R1", "1k", {6.0, 0.0}));
+    ws::circsim::Part* g = b.doc.schem.add_part(
+        ws::circsim::Part::make("gnd", "", "", {7.0, -6.0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{v->id, 0}, ws::circsim::PinRef{r->id, 0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{r->id, 1}, ws::circsim::PinRef{g->id, 0}));
+    b.doc.schem.add_wire(ws::circsim::Wire::endpoints(
+        ws::circsim::PinRef{g->id, 0}, ws::circsim::PinRef{v->id, 1}));
+    b.doc.schem.analysis.entries.push_back(ws::circsim::TranSpec{
+        .tstep = 1e-3, .tstop = 3e-3});
+    deliver(b.ed, ws::circsim::run_schematic(b.doc.schem));
+    b.draw();
+    CHECK_FALSE(b.ed.animating);  // a parked playhead moves nothing
+
+    const editor::TransportStripLayout tl =
+        editor::transport_strip_layout(b.body);
+    const float cx = tl.button.x + tl.button.width * 0.5f;
+    const float cy = tl.button.y + tl.button.height * 0.5f;
+    b.click_screen(cx, cy);  // play
+    REQUIRE(b.ed.playback.playing);
+    b.draw();
+    CHECK(b.ed.animating);  // the clock is running: keep the frames coming
+
+    b.click_screen(cx, cy);  // pause
+    REQUIRE_FALSE(b.ed.playback.playing);
+    b.draw();
+    CHECK_FALSE(b.ed.animating);
+}
+
 }  // namespace
