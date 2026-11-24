@@ -399,8 +399,14 @@ BakedGlyph rasterize_glyph(const stbtt_fontinfo& info,
     // The downsample + tint: RGB white, coverage in alpha - the vertex
     // tint at draw time supplies the text color. Column group j spans
     // oversampled [j*ox - phase, (j + 1)*ox - phase), clamped to the
-    // rendered width; a partial group averages what it has (the ink
-    // area carries, the exact sample count does not).
+    // rendered width. A group is ALWAYS averaged over its full ox
+    // samples: the samples the clamp cuts off lie outside the glyph's
+    // ink box, so their coverage is zero by construction - dividing by
+    // the number of samples that happened to exist (the pre-fix
+    // behavior) inflated the first and last column of every glyph whose
+    // box edge fell mid-group by up to ox times (an 'H' right stem
+    // measured 170 -> 255 at 16 px / ox 3), which made right-hand stem
+    // edges visibly heavier than left-hand ones.
     g.rgba.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) *
                       4u,
                   255);
@@ -418,13 +424,10 @@ BakedGlyph rasterize_glyph(const stbtt_fontinfo& info,
             const int begin = lo < 0 ? 0 : lo;
             const int end = hi > w_over ? w_over : hi;
             int acc = 0;
-            int count = 0;
             for (int k = begin; k < end; ++k) {
                 acc += src[k];
-                ++count;
             }
-            const int averaged =
-                count > 0 ? (acc + count / 2) / count : 0;
+            const int averaged = (acc + ox / 2) / ox;
             // The boost: a straight multiplier AFTER the LUT - the last
             // word on weight, clamped at 255 (never a wrap). 1.0 is the
             // identity; a positive multiplier keeps the LUT's monotone

@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <span>
 #include <vector>
 
@@ -273,9 +274,60 @@ TEST_CASE("supersampling preserves the ink area") {
         const std::uint64_t one_ink = ink_of(one);
         if (one_ink > 0) {
             const std::uint64_t three_ink = ink_of(three);
-            // 15% either way: boundary AA is the only moving part.
-            CHECK(three_ink + three_ink / 6u > one_ink);
-            CHECK(three_ink < one_ink + one_ink / 6u);
+            // 3% either way: with the edge columns normalized by the
+            // full oversample count the downsample is an exact area
+            // average (the old 15% band hid a +4% edge inflation).
+            CHECK(three_ink * 100u > one_ink * 97u);
+            CHECK(three_ink * 100u < one_ink * 103u);
+        }
+    }
+}
+
+TEST_CASE("supersampling never inflates a glyph's edge columns") {
+    // Regression for the partial-group normalization: a column group the
+    // glyph's ink box cuts short (the first/last column when the box edge
+    // falls mid-group) must still divide by the full oversample count -
+    // the cut-off samples are outside the ink and read zero. Dividing by
+    // the number of samples that existed lifted those edge columns by up
+    // to ox times (the right stem of an 'H' saturated). stb's rasterizer
+    // already computes exact area coverage per sample, so a 3x bake
+    // averaged back down must land within byte-quantization noise of the
+    // single-sample bake, column for column.
+    for (const float px : {13.0f, 16.0f, 17.6f, 20.0f}) {
+        const BakedFont one = ws::ui::r2d::font::bake_inter(
+            ws::ui::r2d::font::inter_regular_ttf(), px,
+            FontBakeOptions{.oversample_x = 1});
+        const BakedFont three = ws::ui::r2d::font::bake_inter(
+            ws::ui::r2d::font::inter_regular_ttf(), px,
+            FontBakeOptions{.oversample_x = 3});
+        REQUIRE(one.ok);
+        REQUIRE(three.ok);
+        for (std::uint32_t c = 33; c < 127; ++c) {
+            const BakedGlyph& a = glyph_of(one, c);
+            const BakedGlyph& b = glyph_of(three, c);
+            if (a.w == 0 || b.w == 0) {
+                continue;
+            }
+            // Same footprint (the box is derived from the same outline).
+            CHECK(a.w == b.w);
+            CHECK(a.h == b.h);
+            CHECK(a.offset_x == b.offset_x);
+            if (a.w != b.w || a.h != b.h) {
+                continue;
+            }
+            // Per-pixel: only byte quantization of the 3 samples may differ.
+            int worst = 0;
+            for (std::size_t i = 0; i < a.rgba.size() / 4u; ++i) {
+                const int d = std::abs(static_cast<int>(a.rgba[i * 4u + 3u]) -
+                                       static_cast<int>(b.rgba[i * 4u + 3u]));
+                worst = std::max(worst, d);
+            }
+            CHECK(worst <= 3);
+            // And the total ink agrees to a percent.
+            const std::uint64_t ia = ink_of(a);
+            const std::uint64_t ib = ink_of(b);
+            CHECK(ib * 100u <= ia * 101u + 255u);
+            CHECK(ia * 100u <= ib * 101u + 255u);
         }
     }
 }
