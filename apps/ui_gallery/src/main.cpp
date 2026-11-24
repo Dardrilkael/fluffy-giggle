@@ -756,9 +756,20 @@ private:
         mesh_clock_ = now;
         mesh_yaw_ += dt * mesh_speed_;
 
+        // The mesh block draws at the BASE stratum, not the layer 0
+        // the toast path parks the cursor on after the gui block: the
+        // gui's own chrome (the page's panel faces at Layer::base = 10,
+        // the scroll panel's own backdrop) would paint OVER anything
+        // recorded below it. Same layer as the page, recorded after it
+        // - painter's order within the stratum keeps the meshes over
+        // the page's own backdrop and under the toasts' 50.
+        r2d::set_layer(static_cast<std::uint32_t>(gui::Layer::base));
+
         // The viewport's own backdrop: the page's dark panel face, so
         // the 3D content reads as a page region (the block below rides
-        // the same rect through the camera's look-at).
+        // the same rect through the camera's look-at). Recorded BEFORE
+        // the mesh draws at the same layer, so the same stratum's
+        // painter's order keeps it behind the meshes.
         r2d::draw_quad(mesh_view_rect_.x, mesh_view_rect_.y,
                        mesh_view_rect_.width, mesh_view_rect_.height,
                        ws::ui::r2d::rgba(14, 16, 22));
