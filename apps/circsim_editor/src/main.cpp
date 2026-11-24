@@ -269,6 +269,13 @@ class CircsimApp final : public ws::ui::App {
         declare_settings();
         ws::core::warn("circsim: declare_settings done");
 
+        // The live edit loop's armed state mirrors the PERSISTED setting
+        // from frame one (a session that ended auto-on starts auto-on),
+        // and the loop's clock origin is whatever moment setup ran - only
+        // the DIFFERENCE ever feeds the policy, so any origin is as good.
+        editor_.live.enabled = auto_run_enabled();
+        clock_start_ = std::chrono::steady_clock::now();
+
         // The shell.
         shell::ShellConfig config;
         config.app_name = "circsim editor";
@@ -445,6 +452,9 @@ class CircsimApp final : public ws::ui::App {
         editor_.export_results = [this](bool json) { export_run(json); };
         editor_.export_table_csv = [this]() { export_table_csv(); };
         editor_.export_plot_png = [this]() { export_plot_png(); };
+        // The Results header's Auto checkbox rides the one write path
+        // (persist the setting, mirror the flag, kill the countdown).
+        editor_.set_auto_run = [this](bool on) { set_auto_run(on); };
         // The Netlist panel's Copy button needs no wiring of its own:
         // it rides the gui's clipboard seam, which install_clipboard
         // above wired to this window (GLFW's set on desktop; Android's
@@ -554,6 +564,27 @@ class CircsimApp final : public ws::ui::App {
         // The active document watch (a switch re-points the editor and
         // clears every per-document surface).
         watch_active_document(false);
+
+        // --- the live edit loop's one frame tick ---------------------------
+        //
+        // The clock feed and the fire decision, before the panels draw so
+        // a fired run's status lands this same frame. The wall clock is
+        // the editor's own steady_clock (monotonic, frame-rate-agnostic -
+        // a countdown must not run faster because the GPU did), and a
+        // focused Properties field pauses the countdown instead of
+        // firing under the typing: the field's own commit (an undo push)
+        // re-arms from zero, which is exactly the settle a typing hand
+        // means.
+        {
+            const auto now = std::chrono::steady_clock::now();
+            editor_.live.now_s =
+                std::chrono::duration<double>(now - clock_start_).count();
+            if (editor_.text_field_focused) {
+                editor_.live.settle();
+            } else if (editor_.live.tick(run_job_.busy())) {
+                submit_run();
+            }
+        }
 
         // The chord loop, before the frame (the gallery's rule): the
         // rung is the text_editing one while a field held the keyboard
@@ -694,7 +725,42 @@ class CircsimApp final : public ws::ui::App {
                            "teal, emerald, amber or rose",
                            "editor"};
         (void)schema_.declare(std::move(accent));
+        // The live edit loop's arming: Results header Auto / Circuit menu
+        // Auto-Run. Off by default - the batch act (Run) is the act the
+        // stage-3 story taught, and a slow deck on a phone must not fire
+        // itself on every edit.
+        SettingDesc auto_run{"circuit.auto_run", SettingType::boolean,
+                              SettingValue::boolean(false), {},
+                              "re-run the simulation automatically after "
+                              "edits settle (the live edit loop)",
+                              "circuit"};
+        (void)schema_.declare(std::move(auto_run));
         settings_ = std::make_unique<ws::settings::SettingsStore>(schema_);
+    }
+
+    // The live loop's armed state, backed by the setting (the same read
+    // shape accent_key uses): a missing/unreadable setting reads as OFF,
+    // never as a silent default ON.
+    [[nodiscard]] bool auto_run_enabled() const {
+        if (settings_ == nullptr) {
+            return false;
+        }
+        const auto read = settings_->get<bool>("circuit.auto_run");
+        return read && read->value;
+    }
+
+    // The toggle's one write path (menu, checkbox, command - all three
+    // ride this): sets the user layer (so it persists), mirrors the
+    // editor's live.armed, and KILLS any outstanding countdown - turning
+    // auto OFF mid-burst must not fire a straggler run half a second
+    // later, and turning it ON never inherits a stale deadline.
+    void set_auto_run(bool on) {
+        if (settings_ != nullptr) {
+            (void)settings_->set(ws::settings::Layer::user,
+                                  "circuit.auto_run", on);
+        }
+        editor_.live.enabled = on;
+        editor_.live.off();
     }
 
     // The accent the View menu's picker last chose (the user layer, so it
@@ -1083,6 +1149,24 @@ class CircsimApp final : public ws::ui::App {
                                : editor_.problems.header);
         };
         add(std::move(erc_cmd));
+
+        // The live edit loop's toggle (the Results header's Auto checkbox
+        // and this menu item ride the one write path, set_auto_run). A
+        // CHECKED command: the registry's checked predicate drives the
+        // menu item's tick, so the checkbox and the menu can never
+        // disagree about which state the session is in.
+        Command auto_cmd;
+        auto_cmd.id = "circuit.auto_run";
+        auto_cmd.label = "Auto-Run Simulation";
+        auto_cmd.category = "Circuit";
+        auto_cmd.checked = [this] { return editor_.live.enabled; };
+        auto_cmd.execute = [this](std::string_view) {
+            set_auto_run(!editor_.live.enabled);
+            editor_.status(editor_.live.enabled
+                               ? "Auto-run on: edits re-run when they settle"
+                               : "Auto-run off: Run is manual again");
+        };
+        add(std::move(auto_cmd));
 
         // The problems walk's pair (F8 / Shift+F8, the IDE-standard
         // next/previous finding). The declared chords seed the GLOBAL
@@ -1545,6 +1629,18 @@ class CircsimApp final : public ws::ui::App {
             update_problems_tab();
             editor_.status(editor_.problems.header + " - F8 walks them");
         }
+        // The live loop's convergence step: an edit (or a burst) that
+        // landed while THIS run was in flight re-submits now - the
+        // delivery is the one moment a re-run is safe (the worker is
+        // free, the results are on screen, and the pending flag names
+        // the newest edit the last run could not have seen). Deliberate
+        // AFTER the delivery's whole body: the results panel's state and
+        // the toast land first, so the re-run replaces them as its own
+        // delivery in turn. A failed run re-runs all the same - the
+        // edit that landed mid-flight is usually exactly the fix.
+        if (editor_.live.delivered()) {
+            submit_run();
+        }
     }
 
     // --- the export (the Results panel's buttons and the Circuit menu) ---
@@ -1785,6 +1881,13 @@ class CircsimApp final : public ws::ui::App {
                 // An undo/redo landing (or any edit) reloads the
                 // Properties field rows next frame.
                 editor_.bump_edit_epoch();
+                // ...and arms the live loop's countdown. One listener,
+                // every edit: a push (an edit), an undo (an edit riding
+                // the same contract - the run that lands after it must
+                // reflect the undone drawing), a redo (the same). The
+                // busy answer rides the app's own run_job_ - the one
+                // flight it ever tracks.
+                editor_.live.edited(run_job_.busy());
             });
             if (listener.has_value()) {
                 undo_listener_ = *listener;
@@ -1931,6 +2034,14 @@ class CircsimApp final : public ws::ui::App {
     int autorun_fires_ = 0;
     float autorun_secs_ = -1.0f;
     std::chrono::steady_clock::time_point autorun_start_{};
+
+    // The live edit loop's clock origin: set once in on_setup(), read
+    // every frame to feed live.now_s. steady_clock (monotonic) so a
+    // system clock step or NTP jump can never look like time running
+    // backwards (a deadline the clock stepped past would fire early -
+    // benign - but one stepped back would stall the loop for the whole
+    // step's duration).
+    std::chrono::steady_clock::time_point clock_start_{};
 };
 
 }  // namespace

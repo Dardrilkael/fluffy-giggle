@@ -2464,13 +2464,33 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
         } else if (export_btn == 1 && ed.export_results) {
             ed.export_results(true);
         }
+        // The live edit loop's arming, in the header where the results it
+        // drives live: a checked box that says the panel re-runs itself
+        // after edits settle. The app installs set_auto_run (persisted
+        // settings.json); a headless bench without it still gets the
+        // in-memory flag, so the toggle reads and works everywhere.
+        bool auto_on = ed.live.enabled;
+        if (gui::checkbox(gui, layout, theme, "Auto re-run", auto_on) &&
+            auto_on != ed.live.enabled) {
+            if (ed.set_auto_run) {
+                ed.set_auto_run(auto_on);
+            } else {
+                ed.live.enabled = auto_on;
+                ed.live.off();
+            }
+        }
         if (stale) {
             gui::ChromeTheme warn = theme;
             warn.text = gui::dim(theme.toast_warning, 0.95f);
+            // With auto on, "Out of date" is a state the panel is already
+            // resolving (the countdown or the pending re-run owns it) -
+            // the notice says so instead of prescribing the manual act.
             (void)gui::text_wrapped(
                 layout, warn,
-                "Out of date - the schematic changed since the run "
-                "(Ctrl+Enter re-runs)");
+                ed.live.enabled
+                    ? "Out of date - re-running (an edit landed)"
+                    : "Out of date - the schematic changed since the run "
+                      "(Ctrl+Enter re-runs)");
         }
     }
 

@@ -199,7 +199,19 @@ CMakeLists only wire ws libraries together.
   the measurements (.tran/.op views only - the directives block authors
   the card, `.four 1k 9 v(out)`; a .op run answers the DC component
   alone, a failed series reads like a failed measurement), and CSV/JSON
-  export through the writers ws::spice already owns; stage 5 gives the plot its hands -
+  export through the writers ws::spice already owns, plus the header's
+  Auto re-run checkbox (the live edit loop: Circuit menu > Auto-Run,
+  persisted as circuit.auto_run - when armed, every edit - an undo
+  push, an undo, a redo; one listener fires for all three - re-arms a
+  0.5s settled window; when it expires the app re-submits the simulate
+  job, an edit while a run is in flight arms one pending re-run that
+  the delivery re-submits, so the loop converges on the LAST edit
+  never an intermediate one; a focused Properties field pauses the
+  countdown (the field's own commit re-arms from zero), and a stale run
+  under auto says "re-running" where the manual face says
+  "Ctrl+Enter re-runs" - the policy core is Editor::LiveRun, a
+  headless monotonic clock the app feeds, so the whole loop is unit
+  tested in tests/test_live_run.cpp); stage 5 gives the plot its hands -
   the wheel zooms both axes toward the cursor (the plot's own wheel
   claim beats the enclosing scroll panel's), a left-drag rubber band
   zooms to the box with a live dx/dy readout, dragging an axis strip

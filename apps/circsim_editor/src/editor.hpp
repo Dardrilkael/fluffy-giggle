@@ -754,6 +754,14 @@ struct Editor {
     // the buttons.
     std::function<void()> export_table_csv;
     std::function<void()> export_plot_png;
+    // The live edit loop's toggle, same install shape as the export
+    // pair: the Results header's Auto checkbox calls it (true = arm).
+    // The app owns the body because the WRITE is the persisted setting
+    // (settings.json's circuit.auto_run), and a headless bench leaves
+    // it unset the same way - the checkbox then reads live.enabled and
+    // toggles the in-memory flag alone (tests exercise the policy, not
+    // the store).
+    std::function<void(bool on)> set_auto_run;
 
     // The active document (null = none open). The app re-points this
     // on every activation change and calls document_changed().
@@ -897,6 +905,119 @@ struct Editor {
     bool problems_show_note = true;
     NetlistCache netlist;
     ResultsCache results;
+
+    // --- the live edit loop (the editor's own policy core) ---------------
+    //
+    // The batch act "draw -> Run -> read" becomes "edit and watch": when
+    // auto is on, every edit (an undo push, an undo, a redo - one
+    // listener fires for all three) re-arms a settled-window countdown;
+    // when it expires the app re-runs the simulation, and if a run is
+    // already in flight the edit only arms `pending` - the delivery
+    // re-submits, so the loop always converges on the LAST edit, never
+    // on an intermediate one. The countdown is wall-clock in the app
+    // and TICKED here (a monotonic `now_s` the caller advances), so the
+    // whole policy is headless, deterministic and unit-testable - the
+    // app's only job is to keep feeding the clock.
+    //
+    // What deliberately does NOT auto-run: a focused text field (the
+    // Properties rows; typing must settle first - the field's own
+    // commit is an undo push like any other and re-arms from there),
+    // and a run in flight with no new edit (the delivery itself never
+    // re-arms; only an edit does - otherwise a completed run would
+    // chain into the next one forever).
+    struct LiveRun {
+        // The debounce window (seconds) an edit waits before the app
+        // re-runs. 0.5s reads as "instant" to a hand on a value while
+        // still collapsing a burst of keystrokes/drag commits into one
+        // run. A test or a power user can widen it; 0 collapses to
+        // "run on the next frame after the edit".
+        double settle_s = 0.5;
+
+        // Auto-run armed (the Results header's Auto checkbox, a
+        // persisted setting - the app reads/writes it there).
+        bool enabled = false;
+
+        // The dirty half: an edit landed while armed. The countdown
+        // rides `deadline_s`; a new edit pushes it out again (every
+        // burst member joins one run).
+        bool dirty = false;
+        double deadline_s = 0.0;
+
+        // The coalescing half: an edit landed while a run was already
+        // in flight. The app sets it before the delivery lands, and
+        // re-submits at the delivery instead of the deadline - one
+        // worker, at most one queued re-run, always the newest edit.
+        bool pending = false;
+
+        // The app's clock. Fed by the app's own frame (wall clock)
+        // or a test's scripted beats; the policy never reads a clock
+        // itself - determinism is the point.
+        double now_s = 0.0;
+
+        // An edit landed. `busy` is "a run is in flight" (the app's
+        // submit site answers it; the struct never tracks the job
+        // itself). One call collapses the whole decision:
+        //   busy  -> arm `pending` (the delivery will re-submit),
+        //   idle  -> arm `dirty` with a fresh deadline.
+        void edited(bool busy) {
+            if (!enabled) {
+                return;  // not armed: the batch act (Run) stays the act
+            }
+            if (busy) {
+                pending = true;
+            } else {
+                dirty = true;
+                deadline_s = now_s + settle_s;
+            }
+        }
+
+        // The frame tick (the app calls it once per frame, before
+        // the panels draw). True = "submit now": the window expired
+        // with an edit outstanding. `busy` again answers "in flight"
+        // so a pending that raced a delivery this same frame does not
+        // double-arm (the delivery's re-submit path clears it; a
+        // tick's fire clears it here).
+        [[nodiscard]] bool tick(bool busy) {
+            if (!enabled) {
+                return false;
+            }
+            if (dirty && now_s >= deadline_s) {
+                dirty = false;
+                if (busy) {
+                    pending = true;  // raced a flight: the delivery re-submits
+                    return false;
+                }
+                return true;
+            }
+            return false;
+        }
+
+        // The delivery's half: a run just landed. True = re-submit
+        // (an edit arrived while THAT run was in flight), which the
+        // app acts on after the results are on screen - the loop's
+        // convergence step. The struct carries no opinion about the
+        // run's success; a failed run re-runs all the same (the next
+        // edit's diagnostics are often exactly the fix).
+        [[nodiscard]] bool delivered() {
+            if (pending) {
+                pending = false;
+                return true;
+            }
+            return false;
+        }
+
+        // The kill switches, each one line so the call sites stay
+        // reads: off() for the toggle (pending edits die - turning
+        // auto OFF mid-burst must not fire a straggler run later),
+        // settle() for a text field taking focus mid-burst (the
+        // countdown pauses; a focused field is mid-edit, and its own
+        // commit re-arms from zero when it lands), reset() for a
+        // document switch (another document's edits are not this
+        // one's - the same rule document_changed spells everywhere).
+        void off() { dirty = false; pending = false; }
+        void settle() { dirty = false; }
+        void reset() { off(); now_s = 0.0; deadline_s = 0.0; }
+    } live;
 
     // auto_junction_dots' answer - empty since the partition rule
     // landed (the old coincidence rules minted silent joins; the new

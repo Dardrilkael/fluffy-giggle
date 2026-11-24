@@ -214,6 +214,34 @@ ws_add_test(circsim_editor_document
   LINK ws::circsim
   DEPENDS ws::ui_gui ws::app ws::settings ws::schematic)
 
+# The live edit loop's policy gate. Editor.hpp's LiveRun core driven
+# with a scripted clock (the struct's whole design - the app feeds
+# now_s, so a test is just a stricter feeder): the debounce window,
+# the burst collapse, the busy coalesce into `pending`, the delivery
+# re-queue, the typing settle, the toggle's kill switches and the
+# document reset. An integration case rides beside the pure ones: a
+# real document + the real undo listener, proving an actual edit
+# command arms the loop exactly the way the app's wired listener
+# will. No canvas, no app TU - the same link shape the document gate
+# uses, plus editor.cpp for document_changed's reset.
+ws_add_test(circsim_editor_live_run
+  SOURCES tests/test_live_run.cpp
+          src/schematic_adapter.cpp
+          src/document.cpp
+          src/editor.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/tests/ui_gui_r2d_stub.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
+  LINK ws::circsim
+  DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic
+          ws::gestures)
+if(TARGET test_circsim_editor_live_run)
+  target_include_directories(test_circsim_editor_live_run PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${PROJECT_SOURCE_DIR}/libs/ui/src"
+    "${PROJECT_SOURCE_DIR}/libs/ui/tests")
+endif()
+
 # The adapter's lift/landing contract: several taps on one wire, a
 # dragged tap junction, and the pin exit directions the router honors.
 ws_add_test(circsim_editor_adapter

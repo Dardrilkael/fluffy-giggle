@@ -146,7 +146,7 @@ const ws::sch::Overlay* Editor::drag_overlay() {
     // no attachment, so a group skips them.
     DragViewKey key;
     key.schem = s;
-    std::vector<ws::circsim::Pos> live;
+    std::vector<ws::circsim::Pos> live_positions;
     const auto add_member = [&](std::uint32_t kind, std::uint32_t id,
                                 ws::circsim::Pos start) {
         ws::circsim::Pos now{0.0, 0.0};
@@ -166,7 +166,7 @@ const ws::sch::Overlay* Editor::drag_overlay() {
         key.kinds.push_back(kind);
         key.ids.push_back(id);
         key.starts.push_back(start);
-        live.push_back(now);
+        live_positions.push_back(now);
         return true;
     };
     if (part) {
@@ -230,15 +230,15 @@ const ws::sch::Overlay* Editor::drag_overlay() {
     }
 
     // An idle frame (the pointer held still) answers the same overlay.
-    if (live_key_valid_ && same_pos(live_key_, live)) {
+    if (live_key_valid_ && same_pos(live_key_, live_positions)) {
         overlay_valid_ = true;
         return &overlay_;
     }
     ws::sch::MoveSession session;
     if (part) {
-        session = adapter_.part_session(drag.id, live[0]);
+        session = adapter_.part_session(drag.id, live_positions[0]);
     } else if (junction) {
-        session = adapter_.junction_session(drag.id, live[0]);
+        session = adapter_.junction_session(drag.id, live_positions[0]);
     } else {
         std::vector<editor::SchematicAdapter::MemberMove> members;
         members.reserve(view_key_.ids.size());
@@ -246,13 +246,13 @@ const ws::sch::Overlay* Editor::drag_overlay() {
             editor::SchematicAdapter::MemberMove mm;
             mm.kind = view_key_.kinds[i];
             mm.id = view_key_.ids[i];
-            mm.to = live[i];
+            mm.to = live_positions[i];
             members.push_back(mm);
         }
         session = adapter_.group_session(members);
     }
     overlay_ = ws::sch::resolve_move(adapter_.doc, session);
-    live_key_ = std::move(live);
+    live_key_ = std::move(live_positions);
     live_key_valid_ = true;
     overlay_valid_ = true;
     return &overlay_;
@@ -1595,6 +1595,13 @@ void Editor::document_changed() {
     playback = Playback{};      // another document has no transient yet
     transport_scrub = false;
     results_scrub = false;      // the row's drag dies with the document
+    // The live loop's countdown dies too - another document's edits are
+    // not this one's, and its clock starts over (the app re-feeds it
+    // from its own wall clock either way). `enabled` SURVIVES the
+    // switch: it is a view preference like wire_colors, not document
+    // state - the user who armed auto on one schematic armed it on the
+    // workspace.
+    live.reset();
     join_dots_.clear();
     nets_cache_ = ws::circsim::NetList{};
     nets_valid_ = false;
