@@ -274,6 +274,7 @@ class CircsimApp final : public ws::ui::App {
         // and the loop's clock origin is whatever moment setup ran - only
         // the DIFFERENCE ever feeds the policy, so any origin is as good.
         editor_.live.enabled = auto_run_enabled();
+        editor_.live.settle_s = auto_run_settle();
         clock_start_ = std::chrono::steady_clock::now();
 
         // The shell.
@@ -455,6 +456,11 @@ class CircsimApp final : public ws::ui::App {
         // The Results header's Auto checkbox rides the one write path
         // (persist the setting, mirror the flag, kill the countdown).
         editor_.set_auto_run = [this](bool on) { set_auto_run(on); };
+        // The Simulation tab's settle row (persist
+        // circuit.auto_run_settle, mirror live.settle_s).
+        editor_.set_auto_run_settle = [this](double seconds) {
+            set_auto_run_settle(seconds);
+        };
         // The Netlist panel's Copy button needs no wiring of its own:
         // it rides the gui's clipboard seam, which install_clipboard
         // above wired to this window (GLFW's set on desktop; Android's
@@ -509,7 +515,17 @@ class CircsimApp final : public ws::ui::App {
     // announces with an event, the gui's animators (hover fades, panel
     // slides), and the autorun probe's wall-clock fire.
     [[nodiscard]] bool wants_frame() const override {
-        return editor_.animating || gui_.wants_redraw() ||
+        // The live loop's working set keeps the frames coming: an armed
+        // countdown must still be firing when its window closes (an idle
+        // app that stopped drawing would never re-run), a run in flight
+        // or queued must keep its indicator breathing. Pure view state
+        // (auto armed, nothing pending, nothing running) does NOT ask
+        // for frames - the loop is then fully reactive to edits.
+        const bool live_working = editor_.run_in_flight ||
+                                   editor_.live.pending ||
+                                   (editor_.live.enabled &&
+                                    editor_.live.dirty);
+        return editor_.animating || live_working || gui_.wants_redraw() ||
                autorun_secs_ > 0.0f;
     }
 
@@ -579,6 +595,18 @@ class CircsimApp final : public ws::ui::App {
             const auto now = std::chrono::steady_clock::now();
             editor_.live.now_s =
                 std::chrono::duration<double>(now - clock_start_).count();
+            // The indicator's pulse phase rides the same feed (one
+            // source of time, the header's dot and the policy's
+            // deadlines can never disagree about "when it is") over the
+            // LiveRun's own period constant.
+            editor_.live.pulse_t =
+                std::fmod(editor_.live.now_s,
+                          editor::Editor::LiveRun::kPulsePeriod);
+            // The editor's mirror of the flight state: the panels read
+            // Editor (they cannot see this class), so the app keeps the
+            // mirror honest at the frame's head - cheap, and the only
+            // two flip moments (submit/delivery) ride the same write.
+            editor_.run_in_flight = run_job_.busy();
             if (editor_.text_field_focused) {
                 editor_.live.settle();
             } else if (editor_.live.tick(run_job_.busy())) {
@@ -735,6 +763,19 @@ class CircsimApp final : public ws::ui::App {
                               "edits settle (the live edit loop)",
                               "circuit"};
         (void)schema_.declare(std::move(auto_run));
+        // The settle window (the Simulation tab's row): seconds an edit
+        // waits before the re-run. A real setting with a reject range -
+        // a hand-edited 0 or negative must be REFUSED at the store, not
+        // silently clamped into a busy loop. 0.1 (snappy) to 2.0 (batch)
+        // is the honest span: below 0.1 reads as instant anyway (the
+        // frame rate is the floor), above 2 the loop stops feeling live.
+        SettingDesc settle{"circuit.auto_run_settle", SettingType::real,
+                           SettingValue::real(0.5),
+                           {ws::settings::RangeConstraint{0.1, 2.0}},
+                           "how long edits settle before the auto re-run "
+                           "(seconds)",
+                           "circuit"};
+        (void)schema_.declare(std::move(settle));
         settings_ = std::make_unique<ws::settings::SettingsStore>(schema_);
     }
 
@@ -749,6 +790,21 @@ class CircsimApp final : public ws::ui::App {
         return read && read->value;
     }
 
+    // The settle window's read (the tab's row shows this): the setting
+    // is range-checked at declare, so an out-of-range value can only
+    // arrive by hand-editing settings.json under a stale schema - the
+    // read still refuses it (the store's own coerce answer) and this
+    // clamps to the 0.5 default rather than arming a nonsense window.
+    [[nodiscard]] double auto_run_settle() const {
+        if (settings_ == nullptr) {
+            return editor_.live.settle_s;
+        }
+        const auto read = settings_->get<double>("circuit.auto_run_settle");
+        return read && read->value >= 0.1 && read->value <= 2.0
+                   ? read->value
+                   : 0.5;
+    }
+
     // The toggle's one write path (menu, checkbox, command - all three
     // ride this): sets the user layer (so it persists), mirrors the
     // editor's live.armed, and KILLS any outstanding countdown - turning
@@ -761,6 +817,21 @@ class CircsimApp final : public ws::ui::App {
         }
         editor_.live.enabled = on;
         editor_.live.off();
+    }
+
+    // The settle window's one write path (the tab's drag row): persists
+    // circuit.auto_run_settle and mirrors live.settle_s. A change does
+    // NOT re-time any deadline already counting down (the in-memory
+    // deadline keeps its own arithmetic; only the NEXT edited() reads
+    // the new window) - retiming mid-countdown would fire a run the
+    // user just widened the window to avoid.
+    void set_auto_run_settle(double seconds) {
+        seconds = std::clamp(seconds, 0.1, 2.0);
+        if (settings_ != nullptr) {
+            (void)settings_->set(ws::settings::Layer::user,
+                                  "circuit.auto_run_settle", seconds);
+        }
+        editor_.live.settle_s = seconds;
     }
 
     // The accent the View menu's picker last chose (the user layer, so it
@@ -1167,6 +1238,24 @@ class CircsimApp final : public ws::ui::App {
                                : "Auto-run off: Run is manual again");
         };
         add(std::move(auto_cmd));
+
+        // The queued re-run's eject: drops the pending run (the edit
+        // that armed it stays - the NEXT run is simply the next edit's)
+        // without disarming auto. The in-flight run is not this
+        // command's to touch - the status bar's Cancel owns that (it is
+        // cooperative, the solver's stop flag, not a queue edit).
+        Command discard_cmd;
+        discard_cmd.id = "circuit.discard_pending";
+        discard_cmd.label = "Discard Pending Run";
+        discard_cmd.category = "Circuit";
+        discard_cmd.enabled = [this] { return editor_.live.pending; };
+        discard_cmd.execute = [this](std::string_view) {
+            if (editor_.live.discard_pending()) {
+                editor_.status("Pending auto-run discarded - Auto stays "
+                               "on for the next edit");
+            }
+        };
+        add(std::move(discard_cmd));
 
         // The problems walk's pair (F8 / Shift+F8, the IDE-standard
         // next/previous finding). The declared chords seed the GLOBAL

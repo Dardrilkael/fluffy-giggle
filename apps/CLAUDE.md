@@ -203,15 +203,25 @@ CMakeLists only wire ws libraries together.
   Auto re-run checkbox (the live edit loop: Circuit menu > Auto-Run,
   persisted as circuit.auto_run - when armed, every edit - an undo
   push, an undo, a redo; one listener fires for all three - re-arms a
-  0.5s settled window; when it expires the app re-submits the simulate
-  job, an edit while a run is in flight arms one pending re-run that
-  the delivery re-submits, so the loop converges on the LAST edit
-  never an intermediate one; a focused Properties field pauses the
-  countdown (the field's own commit re-arms from zero), and a stale run
-  under auto says "re-running" where the manual face says
-  "Ctrl+Enter re-runs" - the policy core is Editor::LiveRun, a
-  headless monotonic clock the app feeds, so the whole loop is unit
-  tested in tests/test_live_run.cpp); stage 5 gives the plot its hands -
+  settled window (0.5s default, the Simulation tab's "Auto re-run >
+  Settle window" row tunes it 0.1-2s as circuit.auto_run_settle, a
+  real setting with a reject range so a hand-edited 0 is refused; a
+  change never re-times a countdown already running); when it expires
+  the app re-submits the simulate job, an edit while a run is in
+  flight arms one pending re-run that the delivery re-submits, so the
+  loop converges on the LAST edit never an intermediate one; a focused
+  Properties field pauses the countdown (the field's own commit re-arms
+  from zero), and a stale run under auto says "re-running" where the
+  manual face says "Ctrl+Enter re-runs" - the working loop is visible:
+  the header's accent dot BREATHES (alpha eased over a ~1.4s period,
+  live.pulse_t, fed from the same clock the policy rides) with a
+  "running"/"1 run pending" badge beside the Auto checkbox, and a
+  Discard button (plus Circuit menu > Discard Pending Run) drops the
+  queued re-run without disarming auto - the in-flight run is the
+  status bar's Cancel, never a queue edit; Editor::run_in_flight is
+  the app's mirror of run_job_.busy() the panels read; the policy core
+  is Editor::LiveRun, a headless monotonic clock the app feeds, so the
+  whole loop is unit tested in tests/test_live_run.cpp); stage 5 gives the plot its hands -
   the wheel zooms both axes toward the cursor (the plot's own wheel
   claim beats the enclosing scroll panel's), a left-drag rubber band
   zooms to the box with a live dx/dy readout, dragging an axis strip

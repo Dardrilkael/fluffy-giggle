@@ -69,6 +69,18 @@ struct PolicyFixture {
     PolicyFixture() { ed.live.enabled = true; }
 };
 
+// The headless stand-in for the app's set_auto_run_settle write path
+// (the app persists circuit.auto_run_settle and mirrors; the bench has
+// no store, so this reproduces the app's OWN clamp - the schema's
+// honest range, the same bounds set_auto_run_settle applies).
+void ed_settle(editor::Editor& ed, double seconds) {
+    if (ed.set_auto_run_settle) {
+        ed.set_auto_run_settle(seconds);
+    } else {
+        ed.live.settle_s = std::clamp(seconds, 0.1, 2.0);
+    }
+}
+
 }  // namespace
 
 TEST_CASE("auto off: edits never arm and ticks never fire") {
@@ -324,4 +336,111 @@ TEST_CASE("document_changed resets a document's loop state (the switch)") {
     CHECK_FALSE(ed.live.dirty);
 
     (void)doc.undo().remove_listener(*listener);
+}
+
+// --- the stage's follow-ups: discard, the settle write, the pulse ----
+
+TEST_CASE("discard_pending drops the queued run, answers true once") {
+    PolicyFixture f;
+    f.ed.live.edited(true);
+    CHECK(f.ed.live.pending);
+
+    CHECK(f.ed.live.discard_pending());
+    CHECK_FALSE(f.ed.live.pending);
+    CHECK_FALSE(f.ed.live.discard_pending());  // nothing left to drop
+
+    // Auto stays armed: the NEXT edit arms a fresh window all by
+    // itself (discarding is not disarming).
+    CHECK(f.ed.live.enabled);
+    f.ed.live.edited(false);
+    CHECK(f.ed.live.dirty);
+}
+
+TEST_CASE("discard_pending leaves the in-flight run alone") {
+    PolicyFixture f;
+    // An edit lands while idle (a countdown, the in-flight run's
+    // predecessor), then the run submits and a NEW edit coalesces.
+    f.ed.live.now_s = 0.0;
+    f.ed.live.edited(false);
+    f.clock.busy = true;
+    f.ed.live.edited(true);
+    CHECK(f.ed.live.pending);
+
+    // The eject happens mid-flight: only the QUEUE dies; the busy
+    // answer (the app's run_job_) is not this call's to touch, and the
+    // delivery that follows finds no pending - it does not re-submit.
+    CHECK(f.ed.live.discard_pending());
+    CHECK_FALSE(f.ed.live.delivered());
+
+    // ...but the countdown the first edit armed is ALSO gone (the
+    // in-flight run supersedes it): the tick converts it to pending the
+    // moment it expires, which discard just prevented. (The struct
+    // deliberately leaves that to the tick's own race rule.)
+    f.clock.advance(2.0);
+    CHECK(f.clock.fired == 0);
+}
+
+TEST_CASE("the settle write path clamps and mirrors (the headless seam)") {
+    PolicyFixture f;
+    // A test stands in for the app's persisted store: the seam
+    // clamps to the schema's honest range before mirroring.
+    ed_settle(f.ed, 1.25);
+    CHECK(f.ed.live.settle_s == 1.25);
+    ed_settle(f.ed, 0.05);  // below the floor
+    CHECK(f.ed.live.settle_s == 0.1);
+    ed_settle(f.ed, 9.0);   // above the ceiling
+    CHECK(f.ed.live.settle_s == 2.0);
+
+    // The new window arms the NEXT edit only - a deadline already
+    // counting keeps its own arithmetic.
+    f.ed.live.now_s = 0.0;
+    f.ed.live.edited(false);  // deadline 2.0 (the widened window)
+    ed_settle(f.ed, 0.1);
+    f.clock.advance(0.5);
+    CHECK(f.clock.fired == 0);  // the OLD deadline still rules
+    f.clock.advance(1.6);       // past 2.0: fires
+    CHECK(f.clock.fired == 1);
+}
+
+TEST_CASE("a settle_s of 2.0 widens the next edit's window") {
+    PolicyFixture f;
+    ed_settle(f.ed, 2.0);
+    f.ed.live.now_s = 0.0;
+    f.ed.live.edited(false);
+    f.clock.advance(1.9);
+    CHECK(f.clock.fired == 0);
+    f.clock.advance(0.2);
+    CHECK(f.clock.fired == 1);
+}
+
+TEST_CASE("the pulse phase rewinds on a document switch") {
+    PolicyFixture f;
+    f.ed.live.pulse_t = 0.7;  // mid-beat, another document's dot
+    f.ed.live.edited(true);   // the switch happens mid-queue too
+
+    f.ed.document_changed();
+    CHECK(f.ed.live.pulse_t == 0.0);
+    CHECK_FALSE(f.ed.live.pending);  // (the reset's whole contract)
+}
+
+TEST_CASE("the in-flight mirror drives the indicator's two faces") {
+    // The panel reads run_in_flight / live.pending; the app writes the
+    // mirror beside the submit and the delivery. The policy core
+    // itself never touches it (the struct tracks no job) - the pair
+    // only ever agrees because both flip at the app's own two moments.
+    PolicyFixture f;
+    CHECK_FALSE(f.ed.run_in_flight);  // the Editor's resting state
+
+    // The app's submit moment: submit_run() fired, the mirror flips.
+    f.ed.run_in_flight = true;
+    CHECK(f.ed.run_in_flight != f.ed.live.pending);  // never both faces
+
+    // An edit mid-flight coalesces; the indicator may show "running"
+    // AND the queue may hold one - the badge prefers the queue's word
+    // (the panel's rule), which is why the pair is order-sensitive
+    // there and nowhere else.
+    f.ed.live.edited(true);
+    CHECK(f.ed.live.pending);
+    f.ed.run_in_flight = false;  // the delivery moment
+    CHECK(f.ed.live.delivered());  // the re-submit the app owes
 }

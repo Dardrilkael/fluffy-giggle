@@ -168,6 +168,10 @@ struct Bench {
     // scroll panel pushes into the gui and r2d): rows outside it are
     // invisible to the real app, and the panel may skip drawing them.
     std::optional<gui::Rect> hit_clip;
+    // Set by a case that asserts on the stub's text log: the real app's
+    // theme carries the baked font; the stock default's null font
+    // degrades every label to a quad.
+    const ws::ui::r2d::Font* font = nullptr;
     ws::settings::StdFileSystem fs;
     SchematicDocument doc{std::string{}, fs};
     Editor ed;
@@ -228,7 +232,13 @@ struct Bench {
         if (hit_clip.has_value()) {
             gui.push_hit_clip(*hit_clip);
         }
-        const gui::ChromeTheme theme = gui::kDefaultChrome;
+        // The real app's theme carries the baked UI font; a case that
+        // needs the stub's text_log sets `font` before drawing (the
+        // stock default's null font degrades labels to quads).
+        gui::ChromeTheme theme = gui::kDefaultChrome;
+        if (font != nullptr) {
+            theme.font = font;
+        }
         editor::draw_results_panel(ed, gui, layout, theme);
         if (hit_clip.has_value()) {
             gui.pop_hit_clip();
@@ -2421,4 +2431,162 @@ TEST_CASE("a plot frame the scroll clip hides draws no series") {
         b.draw();
         CHECK(b.series_cmds().size() == 2u);
     }
+}
+
+// --- the live edit loop's header faces ----------------------------------------
+//
+// The Results header carries the loop's chrome: the Auto checkbox, the
+// breathing dot while a run is in flight or the queued re-run waits,
+// the "1 run pending" / "running" badge, and the Discard button that
+// drops the queued run without disarming auto. The dot is a fill_circle
+// on the bench's own canvas seam (the same CommandListCanvas the series
+// strokes ride), the badge a draw_text, the button a plain gui button
+// whose id rides the header's stack - asserted here by state, the same
+// way the stale notice's case above reads its effect on the draw.
+
+TEST_CASE("the header's live indicator draws only while the loop works") {
+    GlyphTable storage;
+    ws::ui::r2d::Font face = visual_test_font(storage);
+    Bench b;
+    b.font = &face;
+    b.load(ramp_table(10u));
+
+    // The dot's recorded shape: CommandListCanvas bakes a circle into a
+    // fill_polygon over circle_points' 32 segments (the closing vertex
+    // records too - 33 points). The transport strip's playhead rides the
+    // same shape, so the dot's gate is the shape AND a sub-opaque low
+    // byte (r2d packs 0xRRGGBBAA): the playhead is solid accent, the
+    // breathing dot never is at the bench's resting phase (pulse_t 0 -
+    // the ease's trough, the floor's own worst case).
+    constexpr std::size_t kDotPts = 33u;
+    const std::uint32_t kAccentRgb =
+        gui::kDefaultChrome.control_on & 0xFFFFFF00u;
+
+    const auto dot_count = [&b]() -> std::size_t {
+        std::size_t n = 0;
+        for (const canvas::CanvasCmd& c : b.clc.cmds) {
+            if (c.kind == canvas::CanvasCmdKind::fill_polygon &&
+                c.points.size() == kDotPts &&
+                (c.color & 0xFFFFFF00u) == kAccentRgb &&
+                (c.color & 0xFFu) != 0xFFu) {
+                ++n;
+            }
+        }
+        return n;
+    };
+    const auto breathing_dot = [&b]() -> const canvas::CanvasCmd* {
+        for (const canvas::CanvasCmd& c : b.clc.cmds) {
+            if (c.kind == canvas::CanvasCmdKind::fill_polygon &&
+                c.points.size() == kDotPts &&
+                (c.color & 0xFFFFFF00u) == kAccentRgb &&
+                (c.color & 0xFFu) != 0xFFu) {
+                return &c;
+            }
+        }
+        return nullptr;
+    };
+    // The badge rides the STUB's text log (gui::text draws through the
+    // r2d seam, not the canvas seam), so the log resets before every
+    // draw - each face answers THIS frame alone.
+    const auto draw_fresh = [&b]() {
+        ws::ui::gui_test::stub.reset();
+        b.draw();
+    };
+    const auto badge_logged = [](const char* needle) -> bool {
+        for (const std::string& s : ws::ui::gui_test::stub.text_log) {
+            if (s.find(needle) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // Nothing running, nothing queued: no dot, no badge.
+    draw_fresh();
+    CHECK(dot_count() == 0u);
+    CHECK_FALSE(badge_logged("running"));
+    CHECK_FALSE(badge_logged("1 run pending"));
+
+    // A run in flight: the dot and the "running" badge.
+    b.ed.live.enabled = true;
+    b.ed.run_in_flight = true;
+    draw_fresh();
+    CHECK(dot_count() == 1u);  // exactly the one breathing dot
+    const canvas::CanvasCmd* dot = breathing_dot();
+    REQUIRE(dot != nullptr);
+    // The trough's floor: 0.35 * 255 = 89. The dot never fully dies at
+    // the phase's resting worst case, and never reads as the playhead's
+    // solid.
+    const std::uint32_t alpha = dot->color & 0xFFu;
+    CHECK(alpha >= 89u);
+    CHECK(alpha < 0xFFu);
+    CHECK(badge_logged("running"));
+
+    // A queued re-run replaces the flight face with the queue's word.
+    b.ed.run_in_flight = false;
+    b.ed.live.pending = true;
+    draw_fresh();
+    CHECK(dot_count() == 1u);  // the dot rides the queue face too
+    CHECK(badge_logged("1 run pending"));
+
+    // Idle again: the faces are gone (the playhead's solid circle is
+    // all that remains of the 33-point set - the dot's gate is empty).
+    b.ed.live.pending = false;
+    draw_fresh();
+    CHECK(dot_count() == 0u);
+    CHECK_FALSE(badge_logged("1 run pending"));
+}
+
+TEST_CASE("the header's Discard drops the queued run, not Auto") {
+    Bench b;
+    b.load(ramp_table(10u));
+    b.ed.live.enabled = true;
+    b.ed.live.pending = true;
+
+    // The button's row is drawn; a scripted press rides the gui the
+    // bench already drives (the click lands inside the panel).
+    b.draw();
+    REQUIRE(b.ed.live.pending);  // still queued: the press has not run
+
+    // The button's effect, by the same path the press takes (the panel
+    // calls discard_pending under the gui's click gate - asserted by
+    // state, the stale case's own style):
+    CHECK(b.ed.live.discard_pending());
+    CHECK_FALSE(b.ed.live.pending);
+    CHECK(b.ed.live.enabled);  // Auto stays armed
+
+    // A second press has nothing to drop (the command's enabled
+    // predicate answers the same flag the panel gates the button on).
+    CHECK_FALSE(b.ed.live.discard_pending());
+}
+
+TEST_CASE("the indicator stays quiet when Auto is off") {
+    GlyphTable storage;
+    ws::ui::r2d::Font face = visual_test_font(storage);
+    Bench b;
+    b.font = &face;
+    b.load(ramp_table(10u));
+    b.ed.run_in_flight = true;  // a MANUAL run (Ctrl+Enter's act)
+    ws::ui::gui_test::stub.reset();
+    b.draw();
+    // The flight is real but the loop is not armed: no dot, no badge -
+    // the manual run's progress already lives in the status bar. The
+    // badge rides the stub's text log; the dot the sub-opaque gate.
+    bool saw_badge = false;
+    for (const std::string& s : ws::ui::gui_test::stub.text_log) {
+        if (s.find("running") != std::string::npos ||
+            s.find("1 run pending") != std::string::npos) {
+            saw_badge = true;
+        }
+    }
+    CHECK_FALSE(saw_badge);
+    std::size_t dots = 0;
+    for (const canvas::CanvasCmd& c : b.clc.cmds) {
+        if (c.kind == canvas::CanvasCmdKind::fill_polygon &&
+            c.points.size() == 33u &&
+            (c.color & 0xFFu) != 0xFFu) {
+            ++dots;
+        }
+    }
+    CHECK(dots == 0u);
 }

@@ -2479,6 +2479,57 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
                 ed.live.off();
             }
         }
+        // The loop's live indicator, on the checkbox's own line: a dot
+        // that BREATHES (the accent, alpha riding the period's own ease
+        // over live.pulse_t) while a run is in flight or the queued
+        // re-run waits, so "it is coming" reads at a glance. The
+        // countdown itself (an edit settling) shows nothing - the work
+        // has not started, and the stale notice below already carries
+        // that story.
+        if (auto_on && (ed.run_in_flight || ed.live.pending)) {
+            // The ease: 0 -> 1 -> 0 over the period, one dot that dims
+            // and brightens. Alpha never fully dies - a 35% floor keeps
+            // the dot visible at the trough. (with_alpha takes the
+            // r2d-packed LOW byte, an int 0-255 - the 0-1 float rides
+            // only the ease's math, never the call.)
+            const double phase =
+                1.0 - std::cos(2.0 * 3.14159265358979 * ed.live.pulse_t /
+                               editor::Editor::LiveRun::kPulsePeriod);
+            const float alpha =
+                0.35f + 0.65f * static_cast<float>(0.5 * phase);
+            const auto alpha_byte = static_cast<std::uint8_t>(
+                std::lround(255.0f * alpha));
+            const gui::Rect dot = layout.next(10.0f, 14.0f);
+            canvas::Canvas2D& sw = ed.results_draw_canvas();
+            sw.set_view_scale(1.0f);
+            sw.fill_circle(
+                Point{dot.x + 5.0f,
+                      dot.y + std::max(0.0f, (theme.control_height - 8.0f) *
+                                                 0.5f)},
+                4.0f, with_alpha(theme.control_on, alpha_byte));
+            // The badge: what the loop is holding, in words. One queued
+            // re-run max (the policy's shape), "running" while the
+            // worker owns it - never both, a pending only rides a
+            // delivery gap.
+            const char* badge =
+                ed.live.pending
+                    ? "1 run pending"
+                    : (ed.run_in_flight ? "running" : nullptr);
+            if (badge != nullptr) {
+                layout.same_line(6.0f);
+                // Auto-sized (negative width): the badge is chrome, not
+                // a column - a fixed width would truncate "running" to
+                // its first glyph.
+                gui::text(layout, theme, badge, -1.0f);
+            }
+        }
+        // The queued re-run's eject (the menu item's button face):
+        // drops the pending run without disarming Auto. The in-flight
+        // run is the status bar's Cancel, never this button.
+        if (ed.live.pending && gui::button(gui, layout, theme,
+                                           "Discard##live.pending")) {
+            (void)ed.live.discard_pending();
+        }
         if (stale) {
             gui::ChromeTheme warn = theme;
             warn.text = gui::dim(theme.toast_warning, 0.95f);

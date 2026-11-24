@@ -2324,3 +2324,54 @@ TEST_CASE("problems: a stale check keeps the neutral ink") {
     CHECK(ws::ui::gui_test::stub.last_text_color !=
           editor::style::success_color(true));
 }
+
+// --- the live edit loop's settle row (the Simulation tab's Auto section) ------
+
+TEST_CASE("the settle row rides the write seam and clamps to the schema's range") {
+    Bench b;
+    b.ed.properties_tab = 2;  // Simulation tab
+    b.draw_properties();
+    // The section drew beside the run temperature, and the row's hint
+    // carries the window's honest span (the auto-sized label the D1
+    // rules name).
+    CHECK(b.ed.live.settle_s == 0.5);  // the default the row shows
+
+    // The headless stand-in for the app's set_auto_run_settle (persist
+    // + mirror): the row's widget change calls it, and the CLAMP is
+    // the seam's own (a hand-edited settings.json under a stale
+    // schema cannot arm a 0-second or negative window). The capture
+    // holds the bench by reference, so the writes land on THIS editor.
+    Bench* bench = &b;
+    b.ed.set_auto_run_settle = [bench](double seconds) {
+        bench->ed.live.settle_s = std::clamp(seconds, 0.1, 2.0);
+    };
+    b.ed.set_auto_run_settle(1.25);
+    CHECK(b.ed.live.settle_s == 1.25);
+    b.ed.set_auto_run_settle(0.05);
+    CHECK(b.ed.live.settle_s == 0.1);
+    b.ed.set_auto_run_settle(9.0);
+    CHECK(b.ed.live.settle_s == 2.0);
+
+    // A change never re-times a countdown already running: the window
+    // applies to the NEXT edit only.
+    b.ed.live.enabled = true;
+    b.ed.live.now_s = 0.0;
+    b.ed.live.edited(false);  // deadline 2.0 (the widened window)
+    b.ed.set_auto_run_settle(0.1);
+    CHECK(b.ed.live.settle_s == 0.1);
+    CHECK(b.ed.live.dirty);
+    CHECK(b.ed.live.tick(false) == false);  // the OLD deadline rules
+    b.ed.live.now_s = 2.0;
+    CHECK(b.ed.live.tick(false) == true);   // 2.0 expired, 0.1 has not armed
+}
+
+TEST_CASE("the settle row's read-only answer when Auto is off") {
+    Bench b;
+    b.ed.properties_tab = 2;  // Simulation tab
+    b.draw_properties();
+    // The row draws with Auto off too (the value is visible and
+    // editable ahead of arming it - the checkbox arms the LOOP, not
+    // the preference), and the label line spells where arming happens.
+    CHECK(b.ed.live.enabled == false);
+    CHECK(b.ed.live.settle_s == 0.5);
+}

@@ -762,6 +762,22 @@ struct Editor {
     // toggles the in-memory flag alone (tests exercise the policy, not
     // the store).
     std::function<void(bool on)> set_auto_run;
+    // The settle window's write path (the Simulation tab's row): the
+    // seconds an edit waits before the re-run. Same shape as the toggle
+    // - the app persists circuit.auto_run_settle (range-checked at the
+    // schema, clamped here too so a hand-edited settings.json cannot
+    // arm a 0-second or negative window through a stale schema); unset
+    // (headless) writes live.settle_s alone.
+    std::function<void(double seconds)> set_auto_run_settle;
+
+    // "A run is in flight" as the EDITOR's mirror of the app's
+    // run_job_.busy(). The panel layer draws from Editor (it cannot see
+    // CircsimApp), so the app writes this beside the submit and the
+    // delivery - the only two moments it flips. The Results header's
+    // live indicator (pulsing dot while in flight, "1 queued" badge
+    // while pending) reads the pair run_in_flight / live.pending; the
+    // sole WRITER is the app, the sole readers are the panels/tests.
+    bool run_in_flight = false;
 
     // The active document (null = none open). The app re-points this
     // on every activation change and calls document_changed().
@@ -1016,7 +1032,38 @@ struct Editor {
         // one's - the same rule document_changed spells everywhere).
         void off() { dirty = false; pending = false; }
         void settle() { dirty = false; }
-        void reset() { off(); now_s = 0.0; deadline_s = 0.0; }
+        void reset() { off(); now_s = 0.0; deadline_s = 0.0; pulse_t = 0.0; }
+
+        // The queued run's eject button (Circuit menu > Discard Pending
+        // Run, the Results header's Discard): drops the pending re-run
+        // WITHOUT disarming auto - the next edit arms a fresh window all
+        // by itself. True = something was dropped (the menu item's
+        // enabled predicate and the toast both answer it). The IN-FLIGHT
+        // run is not this call's to touch: cancel is the status bar's
+        // Cancel (cooperative, the solver's stop flag), not a queue
+        // edit.
+        [[nodiscard]] bool discard_pending() {
+            if (pending) {
+                pending = false;
+                return true;
+            }
+            return false;
+        }
+
+        // The live indicator's clock phase [0,1): the Results header's
+        // pulsing dot rides it while a run is in flight or queued (the
+        // dot must breathe while the loop works, so the user can tell
+        // "it is coming" from "it is done" at a glance). The app feeds it
+        // from the same wall clock it feeds now_s; a test drives it
+        // directly. reset() rewinds it (a document switch restarts the
+        // pulse, never inherits a mid-beat phase from another document).
+        double pulse_t = 0.0;
+
+        // The dot's period (seconds), shared by the feeder and the
+        // draw: slow enough to read as "working", fast enough to never
+        // look frozen. A constant of the struct (not a setting - the
+        // indicator is chrome, not a policy knob).
+        static constexpr double kPulsePeriod = 1.4;
     } live;
 
     // auto_junction_dots' answer - empty since the partition rule

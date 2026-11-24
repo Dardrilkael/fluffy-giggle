@@ -2696,6 +2696,38 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
         }
     }
 
+    // --- the live edit loop's settle window: the Auto re-run's pause
+    // between an edit and the re-run. Lives HERE (beside the run
+    // temperature) because it is the simulation setup's own pacing
+    // knob, but it is a GLOBAL preference (circuit.auto_run_settle in
+    // settings.json, clamped 0.1-2.0), NOT per-document state: the
+    // editor's hand cadence does not change with the file. The drag
+    // rides drag_float (the analysis fields' own widget) at 0.05s
+    // steps; a change never re-times a countdown already running -
+    // only the NEXT edit's window reads it.
+    panel_section(layout, theme, "Auto re-run");
+    {
+        field_label(layout, theme, "Settle window (s)");
+        float settle = static_cast<float>(ed.live.settle_s);
+        if (gui::drag_float(gui, layout, theme, "settle##live.settle_s",
+                            settle, 0.1f, 2.0f, 0.05f)) {
+            if (ed.set_auto_run_settle) {
+                ed.set_auto_run_settle(static_cast<double>(settle));
+            } else {
+                ed.live.settle_s = std::clamp(static_cast<double>(settle),
+                                              0.1, 2.0);
+            }
+        }
+        hint_line(layout, theme,
+                  "How long edits settle before Auto re-runs (0.1s = "
+                  "snappy, 2s = batch). A change applies to the NEXT "
+                  "edit's window, never one already counting");
+        if (!ed.live.enabled) {
+            label_line(layout, theme, "Auto",
+                       "off (the Results header's checkbox arms it)");
+        }
+    }
+
     // --- the directives block: one row per line
     panel_section(layout, theme,
                   "Directives (.model / .include / .nodeset, verbatim)");
