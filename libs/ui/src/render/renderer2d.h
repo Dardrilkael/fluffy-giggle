@@ -137,7 +137,17 @@ struct MeshCommand {
     Texture texture{};                // {} = untextured (white)
     r3d::Transform3D transform{};
     std::uint32_t vertex_count = 0;  // the registry entry's, snapshotted
-    std::uint32_t index_count = 0;   // (Phase 2's flush sizes its binds)
+    std::uint32_t index_count = 0;   // (the flush's indexed draw)
+    // The GPU half (Phase 2): the mesh's raw VkBuffer handle (vertices at
+    // offset 0, u32 indices at gpu_index_offset, ONE buffer per mesh) and
+    // the byte offset of the index run. Snapshotted at record time - NOT
+    // looked up through the registry at flush - because the registry slot
+    // can be destroyed AND reused between a draw's record and the flush;
+    // destroy_mesh retires the buffer for kMaxFramesInFlight + 1 flushes,
+    // so a recorded draw's handle outlives anything that could replace its
+    // slot. 0 = no GPU copy (headless): the flush has nothing to bind.
+    std::uint64_t gpu_buffer = 0;
+    std::uint64_t gpu_index_offset = 0;
 };
 
 // The texture path app.cpp's device probe picked (M9). bindless: one
@@ -356,6 +366,13 @@ public:
     const std::vector<MeshCommand>& mesh_commands() const {
         return mesh_commands_;
     }
+    // The weave's other half (Phase 2): mesh_chunk_marks()[i] is the batch
+    // chunk count at the moment mesh_commands()[i] was woven into the
+    // replay - the flush draws that mesh after chunks [0, mark) and
+    // before chunk `mark`. Parallel to mesh_commands(), non-decreasing.
+    const std::vector<std::uint32_t>& mesh_chunk_marks() const {
+        return mesh_chunk_marks_;
+    }
 
 private:
     // Per-frame warn kinds, one bit each: frame_begin() clears the mask, a
@@ -417,6 +434,18 @@ private:
     // are created and destroyed inside (they are baked into the pipeline).
     // The fragment module is the tier's variant (see TextureTier).
     bool create_pipeline(VkRenderPass render_pass);
+    // The mesh pipeline against the given render pass (the same
+    // lifecycle points as create_pipeline: init, format-drift rebake, dev
+    // reload). Non-fatal on failure: pipeline_mesh_ stays null and the
+    // flush skips mesh draws.
+    bool create_mesh_pipeline(VkRenderPass render_pass);
+    // The mesh path's layouts + per-frame scene blocks (once, at init,
+    // after the tier's set layout exists) and their teardown.
+    bool create_mesh_resources();
+    void destroy_mesh_resources();
+    // The mesh retire queue's drain at flush entry (free_retired_textures'
+    // sibling).
+    void free_retired_meshes();
     // Per-frame-slot resources: the tier's descriptor sets (bindless: one
     // global-table set per slot; chunked: one pool + kInitialChunkCapacity
     // sets per slot, grown at flush) plus one persistently-mapped vertex
@@ -492,6 +521,13 @@ private:
         std::vector<r3d::Vertex3D> vertices;
         std::vector<std::uint32_t> indices;  // whole triangles only
         std::uint32_t generation = 0;  // 0 = never used (the sentinel's)
+        // The GPU copy (Phase 2): one host-visible buffer holding the
+        // vertices, then the indices at gpu_index_offset. 0 = none (the
+        // headless renderer, or an empty index list). Raw 64-bit handles,
+        // the gfx::Gpu spelling (see TextureEntry).
+        std::uint64_t gpu_buffer = 0;
+        std::uint64_t gpu_allocation = 0;
+        std::uint64_t gpu_index_offset = 0;
     };
     // The generation check (the texture id check's mirror): false for
     // id 0, an out-of-table slot, or a generation mismatch.
@@ -503,6 +539,10 @@ private:
     void record_mesh(const r3d::MeshMaterial& material,
                       const r3d::Transform3D& transform,
                       const MeshEntry& entry);
+    // Creates the GPU buffer for one registry entry (vertices + indices,
+    // host-visible, one allocation) and fills entry.gpu_*. False on
+    // failure (logged); the entry is left GPU-less.
+    bool upload_mesh(MeshEntry& entry);
     std::vector<MeshEntry> meshes_;
     std::vector<std::uint32_t> free_mesh_slots_;
 
@@ -582,6 +622,42 @@ private:
     // shaders/layout/render pass, only the depth state differs. Created
     // and destroyed in lockstep with pipeline_.
     VkPipeline pipeline_3d_ = VK_NULL_HANDLE;
+    // --- the mesh path's device half (r3d, Phase 2) -------------------------
+    // The mesh pipeline (indexed Vertex3D triangles, depth LEQUAL + write,
+    // back-face cull, shaders/mesh.*). Its OWN pipeline layout: set 0 is
+    // the same texture-table layout the batch pipelines bind (so the one
+    // bound table serves both), set 1 the per-frame-slot scene block, and
+    // a 120-byte push range (renderer3d_math.h's MeshPush). Failure to
+    // build it is non-fatal: 2D keeps rendering, mesh draws are skipped
+    // (logged once).
+    VkDescriptorSetLayout scene_set_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout mesh_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline pipeline_mesh_ = VK_NULL_HANDLE;
+    // One persistently-mapped scene uniform block (the frame's light) +
+    // its descriptor set per frame slot: rewritten at that slot's idle
+    // flush, so it never races an in-flight submission.
+    struct SceneSlot {
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        VkBuffer buffer = VK_NULL_HANDLE;
+        std::uint64_t allocation = 0;
+        void* mapped = nullptr;
+    };
+    VkDescriptorPool scene_pool_ = VK_NULL_HANDLE;  // owns the scene sets
+    std::vector<SceneSlot> scene_slots_;            // [frame slot]
+    // destroy_mesh's pending GPU frees: due once the submission clock
+    // reaches free_at (the texture retire queue's contract).
+    struct MeshRetireEntry {
+        std::uint64_t buffer = 0;
+        std::uint64_t allocation = 0;
+        std::uint64_t free_at = 0;
+    };
+    std::vector<MeshRetireEntry> mesh_retire_queue_;
+    // frame_end's weave result, parallel to mesh_commands_ (see
+    // mesh_chunk_marks()).
+    std::vector<std::uint32_t> mesh_chunk_marks_;
+    // Dev-reload-free by design: the mesh stages always come from the
+    // committed mesh_spirv.h words (the hot-reload provider covers the
+    // batch stages only).
     // The in-memory pipeline cache every create_pipeline call funnels
     // through - init's, a format-drift rebake's, a dev hot reload's - so a
     // rebake reuses the driver's compiled stages instead of recompiling.

@@ -47,6 +47,7 @@ void Renderer2D::frame_begin(float fb_width, float fb_height) {
     batch_.begin_frame();
     commands_.clear();  // capacity kept - the frame reuses the arena
     mesh_commands_.clear();  // the mesh path's sibling arena, same rule
+    mesh_chunk_marks_.clear();
     // The epochs restart at 1, so the snapshots go with them. Capacity
     // kept, like every per-frame arena here.
     frame_cameras_.clear();
@@ -62,10 +63,10 @@ void Renderer2D::frame_begin(float fb_width, float fb_height) {
 void Renderer2D::frame_end() {
     frame_active_ = false;
     // The mesh commands ride the SAME (layer, epoch) stable sort as the
-    // quad commands - the two lists' relative order is the flush's to
-    // weave (Phase 2 batches mesh draws between the quad chunks of the
-    // same epoch; Phase 1 leaves them sorted and ready). Sorting them
-    // here keeps frame_end the single ordering authority.
+    // quad commands, and are WOVEN into the quad replay below: a mesh
+    // draw is a hard boundary in the chunk list (BatchCore::barrier), and
+    // mesh_chunk_marks_ records where. Sorting them here keeps frame_end
+    // the single ordering authority.
     std::stable_sort(mesh_commands_.begin(), mesh_commands_.end(),
                      [](const MeshCommand& a, const MeshCommand& b) {
                          if (a.sort_layer != b.sort_layer) {
@@ -73,11 +74,12 @@ void Renderer2D::frame_end() {
                          }
                          return a.camera_epoch < b.camera_epoch;
                      });
+    mesh_chunk_marks_.assign(mesh_commands_.size(), 0u);
     // Captured before the empty check: the replay clears commands_, and
     // stats() reports what the app recorded whatever the replay did.
     const std::uint32_t command_count =
         static_cast<std::uint32_t>(commands_.size());
-    if (commands_.empty()) {
+    if (commands_.empty() && mesh_commands_.empty()) {
         last_stats_ = Stats{};  // a frame that recorded nothing
         return;
     }
@@ -106,10 +108,35 @@ void Renderer2D::frame_end() {
     // so material changes never split. Runs of the same block (same camera,
     // different layers) share the segment - their sorted vertex order
     // already paints correctly.
+    //
+    // The mesh weave: the two sorted lists are merged by (layer, epoch). A
+    // mesh whose key is <= the next quad's is woven in FIRST - on a tie
+    // the mesh draws before the billboards of its own layer+epoch, so
+    // blended quads (labels, particles) composite over the opaque
+    // geometry rather than under it. Weaving = BatchCore::barrier() (the
+    // quads before and after can never share a chunk, even with an
+    // identical camera and clip) + the chunk count recorded as the mesh's
+    // mark: the flush draws it after chunks [0, mark), before chunk mark.
     std::uint32_t open_epoch = 0;  // 0 never matches a recorded block
     float open_clip[4] = {batch::kFullClip[0], batch::kFullClip[1],
                           batch::kFullClip[2], batch::kFullClip[3]};
+    std::size_t next_mesh = 0;
+    const auto weave_meshes_through = [&](std::uint32_t layer,
+                                          std::uint32_t epoch) {
+        while (next_mesh < mesh_commands_.size()) {
+            const MeshCommand& mesh = mesh_commands_[next_mesh];
+            if (mesh.sort_layer > layer ||
+                (mesh.sort_layer == layer && mesh.camera_epoch > epoch)) {
+                break;
+            }
+            batch_.barrier();
+            mesh_chunk_marks_[next_mesh] = batch_.chunk_count();
+            open_epoch = 0;  // the next quad opens a fresh segment
+            ++next_mesh;
+        }
+    };
     for (const DrawCommand& cmd : commands_) {
+        weave_meshes_through(cmd.sort_layer, cmd.camera_epoch);
         bool clip_changed = false;
         for (int i = 0; i < 4; ++i) {
             clip_changed = clip_changed || cmd.clip[i] != open_clip[i];
@@ -160,6 +187,9 @@ void Renderer2D::frame_end() {
                                         cmd.texture.id & kSlotMask, glyph);
         }
     }
+    // Meshes sorting after the last quad (or every mesh, in a frame with
+    // no quads at all).
+    weave_meshes_through(UINT32_MAX, UINT32_MAX);
     batch_.close_segment();
     commands_.clear();
     // The frame's accounting, for stats(): captured now that the whole
@@ -173,6 +203,11 @@ void Renderer2D::frame_end() {
     last_stats_.vertices =
         static_cast<std::uint32_t>(batch_.vertices().size());
     last_stats_.dropped_quads = batch_.dropped_quads();
+    last_stats_.mesh_draws =
+        static_cast<std::uint32_t>(mesh_commands_.size());
+    for (const MeshCommand& mesh : mesh_commands_) {
+        last_stats_.mesh_triangles += mesh.index_count / 3;
+    }
     // Warn once per frame with the frame's FINAL drop totals - the counts
     // are only complete after the whole replay, so the warn lives here,
     // not inside the loop.
@@ -188,6 +223,8 @@ void Renderer2D::frame_drop() {
     current_layer_ = 0;
     clip_depth_ = 0;
     commands_.clear();
+    mesh_commands_.clear();  // a mesh draw never outlives its frame either
+    mesh_chunk_marks_.clear();
     frame_cameras_.clear();
     batch_.begin_frame();
     last_stats_ = Stats{};  // an abandoned frame renders nothing

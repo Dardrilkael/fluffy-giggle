@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "render/renderer3d_math.h"
 #include "render/shader_provider.h"
 
 #include <ws/core/log.hpp>
@@ -41,12 +42,12 @@ constexpr std::uint32_t kWhiteIndex = 0;
 // a boundary pixel never falls outside the intended rect. A clip that
 // empties against the extent reports a zero dimension - flush skips the
 // chunk, nothing legitimate could have rendered anyway.
-VkRect2D chunk_scissor(const batch::Chunk& chunk, float fb_width,
-                       float fb_height) {
-    const float left = std::clamp(chunk.clip[0], 0.0f, fb_width);
-    const float top = std::clamp(chunk.clip[1], 0.0f, fb_height);
-    const float right = std::clamp(chunk.clip[0] + chunk.clip[2], 0.0f, fb_width);
-    const float bottom = std::clamp(chunk.clip[1] + chunk.clip[3], 0.0f, fb_height);
+VkRect2D clip_scissor(const float (&clip)[4], float fb_width,
+                      float fb_height) {
+    const float left = std::clamp(clip[0], 0.0f, fb_width);
+    const float top = std::clamp(clip[1], 0.0f, fb_height);
+    const float right = std::clamp(clip[0] + clip[2], 0.0f, fb_width);
+    const float bottom = std::clamp(clip[1] + clip[3], 0.0f, fb_height);
     // Empty after clamping: report a zero extent BEFORE the outward rounding
     // below, which would otherwise widen e.g. [10.5, 10.5) into a 1 px
     // sliver and leak draws through a "clip everything" scope.
@@ -59,6 +60,11 @@ VkRect2D chunk_scissor(const batch::Chunk& chunk, float fb_width,
     rect.extent.width = static_cast<uint32_t>(std::ceil(right)) - rect.offset.x;
     rect.extent.height = static_cast<uint32_t>(std::ceil(bottom)) - rect.offset.y;
     return rect;
+}
+
+VkRect2D chunk_scissor(const batch::Chunk& chunk, float fb_width,
+                       float fb_height) {
+    return clip_scissor(chunk.clip, fb_width, fb_height);
 }
 
 }  // namespace
@@ -244,6 +250,12 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
     if (!create_frame_resources() || !create_pipeline(render_pass)) {
         return false;
     }
+    // The mesh path is optional equipment: a failure here (logged inside)
+    // leaves 2D fully working and mesh draws skipped, never a startup
+    // failure.
+    if (create_mesh_resources()) {
+        (void)create_mesh_pipeline(render_pass);
+    }
     return true;
 }
 
@@ -261,10 +273,18 @@ bool Renderer2D::on_swapchain_recreated(VkRenderPass render_pass,
         vkDestroyPipeline(device_, pipeline_3d_, nullptr);
         pipeline_ = VK_NULL_HANDLE;
         pipeline_3d_ = VK_NULL_HANDLE;
+        // The mesh pipeline shares the render pass's attachment formats,
+        // so it drifts with them (null-tolerated, like the others).
+        vkDestroyPipeline(device_, pipeline_mesh_, nullptr);
+        pipeline_mesh_ = VK_NULL_HANDLE;
     }
     format_ = format;
     if (pipeline_ == VK_NULL_HANDLE && !create_pipeline(render_pass)) {
         return false;
+    }
+    if (pipeline_mesh_ == VK_NULL_HANDLE &&
+        mesh_pipeline_layout_ != VK_NULL_HANDLE) {
+        (void)create_mesh_pipeline(render_pass);  // non-fatal, logged
     }
     return true;
 }
@@ -308,6 +328,11 @@ void Renderer2D::shutdown() {
         vkDestroyPipeline(device_, pipeline_3d_, nullptr);
         pipeline_3d_ = VK_NULL_HANDLE;
     }
+    if (pipeline_mesh_ != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device_, pipeline_mesh_, nullptr);
+        pipeline_mesh_ = VK_NULL_HANDLE;
+    }
+    destroy_mesh_resources();
     if (pipeline_layout_ != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
         pipeline_layout_ = VK_NULL_HANDLE;
@@ -993,6 +1018,349 @@ bool Renderer2D::create_pipeline(VkRenderPass render_pass) {
     return true;
 }
 
+// --- Renderer2D: the mesh path's device half (r3d, Phase 2) -------------------
+
+bool Renderer2D::create_mesh_resources() {
+    // Set 1: the frame slot's scene block (the one light), fragment-only.
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    binding.descriptorCount = 1;
+    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo layout_info{};
+    layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layout_info.bindingCount = 1;
+    layout_info.pBindings = &binding;
+    if (vkCreateDescriptorSetLayout(device_, &layout_info, nullptr,
+                                    &scene_set_layout_) != VK_SUCCESS) {
+        ws::core::error("ui: r3d - mesh path disabled (scene set layout)");
+        destroy_mesh_resources();
+        return false;
+    }
+    name_object(VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
+                reinterpret_cast<std::uint64_t>(scene_set_layout_),
+                "r3d scene block layout");
+
+    // The mesh pipeline layout: set 0 = the SAME texture-table layout the
+    // batch pipelines use, set 1 = the scene block, one push range over the
+    // whole MeshPush for both stages.
+    const VkDescriptorSetLayout set_layouts[2] = {set_layout_,
+                                                  scene_set_layout_};
+    VkPushConstantRange push_range{};
+    push_range.stageFlags =
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    push_range.size = static_cast<uint32_t>(sizeof(r3d::detail::MeshPush));
+    VkPipelineLayoutCreateInfo pipeline_layout_info{};
+    pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipeline_layout_info.setLayoutCount = 2;
+    pipeline_layout_info.pSetLayouts = set_layouts;
+    pipeline_layout_info.pushConstantRangeCount = 1;
+    pipeline_layout_info.pPushConstantRanges = &push_range;
+    if (vkCreatePipelineLayout(device_, &pipeline_layout_info, nullptr,
+                               &mesh_pipeline_layout_) != VK_SUCCESS) {
+        ws::core::error("ui: r3d - mesh path disabled (pipeline layout)");
+        destroy_mesh_resources();
+        return false;
+    }
+    name_object(VK_OBJECT_TYPE_PIPELINE_LAYOUT,
+                reinterpret_cast<std::uint64_t>(mesh_pipeline_layout_),
+                "r3d mesh pipeline layout");
+
+    // One scene set + one mapped uniform buffer per frame slot.
+    VkDescriptorPoolSize pool_size{};
+    pool_size.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    pool_size.descriptorCount = kMaxFramesInFlight;
+    VkDescriptorPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_info.maxSets = kMaxFramesInFlight;
+    pool_info.poolSizeCount = 1;
+    pool_info.pPoolSizes = &pool_size;
+    if (vkCreateDescriptorPool(device_, &pool_info, nullptr, &scene_pool_) !=
+        VK_SUCCESS) {
+        ws::core::error("ui: r3d - mesh path disabled (scene pool)");
+        destroy_mesh_resources();
+        return false;
+    }
+    std::vector<VkDescriptorSetLayout> layouts(kMaxFramesInFlight,
+                                               scene_set_layout_);
+    VkDescriptorSetAllocateInfo set_info{};
+    set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    set_info.descriptorPool = scene_pool_;
+    set_info.descriptorSetCount = kMaxFramesInFlight;
+    set_info.pSetLayouts = layouts.data();
+    std::vector<VkDescriptorSet> sets(kMaxFramesInFlight);
+    if (vkAllocateDescriptorSets(device_, &set_info, sets.data()) !=
+        VK_SUCCESS) {
+        ws::core::error("ui: r3d - mesh path disabled (scene sets)");
+        destroy_mesh_resources();
+        return false;
+    }
+    scene_slots_.assign(kMaxFramesInFlight, SceneSlot{});
+    const r3d::detail::SceneBlock initial = r3d::detail::make_scene_block(light_);
+    for (uint32_t slot = 0; slot < kMaxFramesInFlight; ++slot) {
+        SceneSlot& scene = scene_slots_[slot];
+        scene.set = sets[slot];
+        gfx::BufferOut buffer{};
+        const ws::core::Status created = gpu_->create_buffer(
+            {sizeof(r3d::detail::SceneBlock),
+             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT},
+            buffer);
+        if (!created) {
+            ws::core::error("ui: r3d - mesh path disabled (scene buffer, "
+                            "frame slot {}): {}",
+                            slot, created.error().message);
+            destroy_mesh_resources();
+            return false;
+        }
+        scene.buffer = gfx::handle_from_u64<VkBuffer>(buffer.buffer);
+        scene.allocation = buffer.allocation;
+        scene.mapped = buffer.mapped;
+        std::memcpy(scene.mapped, &initial, sizeof initial);
+        gpu_->flush_buffer(scene.allocation, 0, sizeof initial);
+        const std::string name = "r3d scene block slot " + std::to_string(slot);
+        name_object(VK_OBJECT_TYPE_BUFFER,
+                    reinterpret_cast<std::uint64_t>(scene.buffer), name.c_str());
+
+        VkDescriptorBufferInfo info{};
+        info.buffer = scene.buffer;
+        info.range = sizeof(r3d::detail::SceneBlock);
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = scene.set;
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write.pBufferInfo = &info;
+        vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+    }
+    return true;
+}
+
+void Renderer2D::destroy_mesh_resources() {
+    // Null-tolerant throughout: create_mesh_resources calls this on its
+    // own partial failures. The caller (shutdown) has already waited the
+    // device idle, so nothing below is referenced by a submission.
+    for (const MeshEntry& entry : meshes_) {
+        if (entry.gpu_buffer != 0) {
+            gpu_->destroy_buffer(entry.gpu_buffer, entry.gpu_allocation);
+        }
+    }
+    for (const MeshRetireEntry& retire : mesh_retire_queue_) {
+        gpu_->destroy_buffer(retire.buffer, retire.allocation);
+    }
+    // The registry dies with its buffers: after a re-init, an old handle's
+    // slot is out of the (empty) table and fails the alive check.
+    meshes_.clear();
+    free_mesh_slots_.clear();
+    mesh_retire_queue_.clear();
+    for (const SceneSlot& scene : scene_slots_) {
+        if (scene.buffer != VK_NULL_HANDLE) {
+            gpu_->destroy_buffer(gfx::handle_to_u64(scene.buffer),
+                                 scene.allocation);
+        }
+    }
+    scene_slots_.clear();
+    if (scene_pool_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device_, scene_pool_, nullptr);
+        scene_pool_ = VK_NULL_HANDLE;
+    }
+    if (mesh_pipeline_layout_ != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device_, mesh_pipeline_layout_, nullptr);
+        mesh_pipeline_layout_ = VK_NULL_HANDLE;
+    }
+    if (scene_set_layout_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device_, scene_set_layout_, nullptr);
+        scene_set_layout_ = VK_NULL_HANDLE;
+    }
+}
+
+bool Renderer2D::create_mesh_pipeline(VkRenderPass render_pass) {
+    const spirv::ShaderWords vert_words = spirv::mesh_vert_words();
+    const spirv::ShaderWords frag_words = spirv::mesh_frag_words(tier_.bindless);
+    std::uint64_t vert_raw = 0;
+    const ws::core::Status vert_module = gpu_->create_shader_module(
+        vert_words.words, vert_words.count, &vert_raw);
+    if (!vert_module) {
+        ws::core::error("ui: r3d - mesh vertex shader module failed: {}",
+                        vert_module.error().message);
+        return false;
+    }
+    std::uint64_t frag_raw = 0;
+    const ws::core::Status frag_module = gpu_->create_shader_module(
+        frag_words.words, frag_words.count, &frag_raw);
+    if (!frag_module) {
+        gpu_->destroy_shader_module(vert_raw);
+        ws::core::error("ui: r3d - mesh fragment shader module failed: {}",
+                        frag_module.error().message);
+        return false;
+    }
+    const VkShaderModule vert = gfx::handle_from_u64<VkShaderModule>(vert_raw);
+    const VkShaderModule frag = gfx::handle_from_u64<VkShaderModule>(frag_raw);
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vert;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = frag;
+    stages[1].pName = "main";
+
+    // r3d::Vertex3D, comment-tied to shaders/mesh.vert and the 32-byte
+    // static_assert in renderer3d.hpp: pos, normal, uv.
+    VkVertexInputBindingDescription vertex_binding{};
+    vertex_binding.stride = static_cast<uint32_t>(sizeof(r3d::Vertex3D));
+    VkVertexInputAttributeDescription attributes[3] = {
+        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(r3d::Vertex3D, pos)},
+        {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(r3d::Vertex3D, normal)},
+        {2, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(r3d::Vertex3D, uv)},
+    };
+    VkPipelineVertexInputStateCreateInfo vertex_input{};
+    vertex_input.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertex_input.vertexBindingDescriptionCount = 1;
+    vertex_input.pVertexBindingDescriptions = &vertex_binding;
+    vertex_input.vertexAttributeDescriptionCount = 3;
+    vertex_input.pVertexAttributeDescriptions = attributes;
+
+    VkPipelineInputAssemblyStateCreateInfo input_assembly{};
+    input_assembly.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewport_state{};
+    viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewport_state.viewportCount = 1;
+    viewport_state.scissorCount = 1;
+    VkDynamicState dynamic_states[2] = {VK_DYNAMIC_STATE_VIEWPORT,
+                                        VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{};
+    dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamic.dynamicStateCount = 2;
+    dynamic.pDynamicStates = dynamic_states;
+
+    // Closed surfaces: back faces are never visible, so cull them. Which
+    // winding is FRONT is pinned by the suite (kMeshFrontFaceCcw) against
+    // the generators and the y-down camera matrix.
+    VkPipelineRasterizationStateCreateInfo rasterization{};
+    rasterization.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterization.cullMode = VK_CULL_MODE_BACK_BIT;
+    rasterization.frontFace = r3d::detail::kMeshFrontFaceCcw
+                                  ? VK_FRONT_FACE_COUNTER_CLOCKWISE
+                                  : VK_FRONT_FACE_CLOCKWISE;
+    rasterization.lineWidth = 1.0f;
+
+    // The 3D billboard pipeline's depth state: LEQUAL + write.
+    VkPipelineDepthStencilStateCreateInfo depth{};
+    depth.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depth.depthTestEnable = VK_TRUE;
+    depth.depthWriteEnable = VK_TRUE;
+    depth.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+    VkPipelineMultisampleStateCreateInfo multisample{};
+    multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    multisample.minSampleShading = 1.0f;
+
+    // The same attachment blend as the batch pipelines (src-alpha over).
+    // A translucent tint still writes depth - no OIT, documented.
+    VkPipelineColorBlendAttachmentState blend_attachment{};
+    blend_attachment.blendEnable = VK_TRUE;
+    blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blend_attachment.colorBlendOp = VK_BLEND_OP_ADD;
+    blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blend_attachment.alphaBlendOp = VK_BLEND_OP_ADD;
+    blend_attachment.colorWriteMask =
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo blend{};
+    blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    blend.attachmentCount = 1;
+    blend.pAttachments = &blend_attachment;
+
+    VkGraphicsPipelineCreateInfo pipeline_info{};
+    pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipeline_info.stageCount = 2;
+    pipeline_info.pStages = stages;
+    pipeline_info.pVertexInputState = &vertex_input;
+    pipeline_info.pInputAssemblyState = &input_assembly;
+    pipeline_info.pViewportState = &viewport_state;
+    pipeline_info.pRasterizationState = &rasterization;
+    pipeline_info.pMultisampleState = &multisample;
+    pipeline_info.pDepthStencilState = &depth;
+    pipeline_info.pColorBlendState = &blend;
+    pipeline_info.pDynamicState = &dynamic;
+    pipeline_info.layout = mesh_pipeline_layout_;
+    pipeline_info.renderPass = render_pass;
+    pipeline_info.subpass = 0;
+    const VkResult err = vkCreateGraphicsPipelines(
+        device_, pipeline_cache_, 1, &pipeline_info, nullptr, &pipeline_mesh_);
+    gpu_->destroy_shader_module(gfx::handle_to_u64(vert));  // baked in
+    gpu_->destroy_shader_module(gfx::handle_to_u64(frag));
+    if (err != VK_SUCCESS) {
+        pipeline_mesh_ = VK_NULL_HANDLE;
+        ws::core::error("ui: r3d - mesh pipeline creation failed ({}); mesh "
+                        "draws will be skipped",
+                        static_cast<int>(err));
+        return false;
+    }
+    name_object(VK_OBJECT_TYPE_PIPELINE,
+                reinterpret_cast<std::uint64_t>(pipeline_mesh_),
+                "r3d mesh pipeline");
+    return true;
+}
+
+bool Renderer2D::upload_mesh(MeshEntry& entry) {
+    // One host-visible buffer: the vertices at 0, the u32 indices right
+    // after (vertex bytes are a multiple of 32, so the index offset is
+    // 4-aligned). Synchronous and valid from on_setup(), like a texture
+    // load. Host-visible rather than staged: a mesh is written once and
+    // read per draw, fine for UI-scale scenes; a device-local staged copy
+    // is the obvious later upgrade behind this one function.
+    const std::size_t vertex_bytes =
+        entry.vertices.size() * sizeof(r3d::Vertex3D);
+    const std::size_t index_bytes = entry.indices.size() * sizeof(std::uint32_t);
+    gfx::BufferOut buffer{};
+    const ws::core::Status created = gpu_->create_buffer(
+        {static_cast<std::uint64_t>(vertex_bytes + index_bytes),
+         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT},
+        buffer);
+    if (!created) {
+        ws::core::error("ui: r3d - mesh buffer creation failed ({} vertices, "
+                        "{} indices): {}",
+                        entry.vertices.size(), entry.indices.size(),
+                        created.error().message);
+        return false;
+    }
+    auto* bytes = static_cast<unsigned char*>(buffer.mapped);
+    std::memcpy(bytes, entry.vertices.data(), vertex_bytes);
+    std::memcpy(bytes + vertex_bytes, entry.indices.data(), index_bytes);
+    gpu_->flush_buffer(buffer.allocation, 0, vertex_bytes + index_bytes);
+    entry.gpu_buffer = buffer.buffer;
+    entry.gpu_allocation = buffer.allocation;
+    entry.gpu_index_offset = vertex_bytes;
+    name_object(VK_OBJECT_TYPE_BUFFER, buffer.buffer, "r3d mesh");
+    return true;
+}
+
+void Renderer2D::free_retired_meshes() {
+    // free_retired_textures' contract: due once the submission clock
+    // reaches free_at (destroy_mesh stamps now + kMaxFramesInFlight + 1).
+    for (auto it = mesh_retire_queue_.begin(); it != mesh_retire_queue_.end();) {
+        if (frame_index_ < it->free_at) {
+            ++it;
+            continue;
+        }
+        gpu_->destroy_buffer(it->buffer, it->allocation);
+        it = mesh_retire_queue_.erase(it);
+    }
+}
+
 bool Renderer2D::upload_texture(const void* pixels, uint32_t width,
                                 uint32_t height, Texture* out) {
     // Bindless tier: ids index the shader's fixed 1024-slot table, so the
@@ -1299,7 +1667,15 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
     // empty frames would hold their GPU memory past safety.
     ++frame_index_;
     free_retired_textures();
-    if (pipeline_ == VK_NULL_HANDLE || batch_.empty()) {
+    free_retired_meshes();
+    // A frame can be quads, meshes, or both: the mesh draws are woven
+    // between the quad chunks (frame_end's mesh_chunk_marks_), so a frame
+    // with only meshes has an empty batch and still draws. No mesh pipeline
+    // (its creation failed, logged at init) = mesh draws are skipped.
+    const bool has_quads = !batch_.empty();
+    const bool has_meshes =
+        pipeline_mesh_ != VK_NULL_HANDLE && !mesh_commands_.empty();
+    if (pipeline_ == VK_NULL_HANDLE || (!has_quads && !has_meshes)) {
         return;
     }
     if (fb_width <= 0.0f || fb_height <= 0.0f) {
@@ -1323,8 +1699,10 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
     // vma may hand back non-coherent memory: make the frame's writes
     // visible before the submit - only the written prefix, not the
     // arena's whole (much larger) capacity.
-    gpu_->flush_buffer(arena.allocation, 0,
-                       vertices.size() * sizeof(batch::Vertex));
+    if (!vertices.empty()) {
+        gpu_->flush_buffer(arena.allocation, 0,
+                           vertices.size() * sizeof(batch::Vertex));
+    }
 
     // A full vertex arena is exactly capacity/4 quads; the index arena
     // grows in step so every chunk's pattern instance fits.
@@ -1393,39 +1771,181 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
         indices.contents_valid = true;
         // Same non-coherent visibility contract as the vertex arena above,
         // again only over the written prefix.
-        gpu_->flush_buffer(indices.allocation, 0, quads * 6 * sizeof(std::uint16_t));
+        if (quads > 0) {
+            gpu_->flush_buffer(indices.allocation, 0,
+                               quads * 6 * sizeof(std::uint16_t));
+        }
     }
 
-    // Vertex/index binds and the viewport are pipeline-independent state -
-    // bound once; the pipeline itself binds per chunk below (bind on change).
+    // The viewport is pipeline-independent dynamic state: set once. The
+    // vertex/index binds are NOT shared any more - the quad chunks draw from
+    // the frame arenas, each mesh from its own buffer - so a `geometry`
+    // tracker rebinds on change (below).
     const VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &arena.buffer, &offset);
-    vkCmdBindIndexBuffer(cmd, indices.buffer, 0, VK_INDEX_TYPE_UINT16);
-
     VkViewport viewport{};
     viewport.width = fb_width;
     viewport.height = fb_height;
     viewport.maxDepth = 1.0f;
     vkCmdSetViewport(cmd, 0, 1, &viewport);
 
-    // Descriptor side, per tier - both are idle right now. Bindless: this
-    // slot takes any pending table writes, then the ONE global table set
-    // binds for the whole frame (tex_index already carries global ids).
-    // Chunked: grow the slot's chunk sets first so every chunk below has
-    // its own set - a mid-loop growth would leave a partial frame.
-    if (tier_.bindless) {
-        apply_pending_table_writes(frame_slot);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                pipeline_layout_, 0, 1,
-                                &table_sets_[frame_slot], 0, nullptr);
-    } else if (batch_.chunk_count() > chunk_sets_[frame_slot].capacity) {
-        if (!grow_chunk_sets(frame_slot, batch_.chunk_count())) {
-            return;
+    const std::uint32_t chunk_count = batch_.chunk_count();
+
+    // A mesh draw's texture slot. A slot past the registry (a handle that
+    // slipped through headless-synthetic ids) falls back to white; stale
+    // generations were already cleared to white at record time.
+    const auto mesh_texture_slot = [this](const MeshCommand& m) {
+        const std::uint32_t slot = m.texture.id & kSlotMask;
+        return slot < textures_.size() ? slot : 0u;
+    };
+
+    // Chunked tier: every mesh draw needs a 32-slot table whose entry 0 is
+    // ITS texture. One set per DISTINCT slot (untextured draws all share
+    // white's), taken from the same per-frame-slot pool as the chunks' sets
+    // - indices [chunk_count, chunk_count + distinct) - so grow first, as
+    // the chunk path always has: a mid-loop growth would leave a partial
+    // frame.
+    std::vector<std::uint32_t> mesh_set_slots;  // distinct texture slots
+    std::vector<std::uint32_t> mesh_set_of;     // per mesh command
+    if (has_meshes && !tier_.bindless) {
+        mesh_set_of.reserve(mesh_commands_.size());
+        for (const MeshCommand& m : mesh_commands_) {
+            const std::uint32_t slot = mesh_texture_slot(m);
+            auto found =
+                std::find(mesh_set_slots.begin(), mesh_set_slots.end(), slot);
+            if (found == mesh_set_slots.end()) {
+                mesh_set_slots.push_back(slot);
+                found = mesh_set_slots.end() - 1;
+            }
+            mesh_set_of.push_back(
+                static_cast<std::uint32_t>(found - mesh_set_slots.begin()));
         }
     }
 
+    // Descriptor side, per tier - both are idle right now. Bindless: this
+    // slot takes any pending table writes, then the ONE global table set
+    // binds for the whole frame (tex_index already carries global ids).
+    // Chunked: grow the slot's chunk sets first so every chunk (and mesh
+    // table) below has its own set.
+    bool table_bound_for_quads = false;  // bindless: pipeline_layout_'s bind
+    if (tier_.bindless) {
+        apply_pending_table_writes(frame_slot);
+        if (has_quads) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    pipeline_layout_, 0, 1,
+                                    &table_sets_[frame_slot], 0, nullptr);
+            table_bound_for_quads = true;
+        }
+    } else {
+        const std::uint32_t needed =
+            chunk_count + static_cast<std::uint32_t>(mesh_set_slots.size());
+        if (needed > chunk_sets_[frame_slot].capacity &&
+            !grow_chunk_sets(frame_slot, needed)) {
+            return;
+        }
+        for (std::uint32_t i = 0; i < mesh_set_slots.size(); ++i) {
+            batch::Chunk table{};
+            table.texture_ids[0] = mesh_set_slots[i];
+            table.texture_count = 1;
+            write_chunk_set(chunk_sets_[frame_slot].sets[chunk_count + i],
+                            table);
+        }
+    }
+
+    // The frame's one light: this slot's scene block, rewritten here (its
+    // fence was waited) before any mesh draw reads it.
+    if (has_meshes) {
+        SceneSlot& scene = scene_slots_[frame_slot];
+        const r3d::detail::SceneBlock block =
+            r3d::detail::make_scene_block(light_);
+        std::memcpy(scene.mapped, &block, sizeof block);
+        gpu_->flush_buffer(scene.allocation, 0, sizeof block);
+    }
+
+    enum class Geometry { none, quads, mesh };
+    Geometry geometry = Geometry::none;
+    bool mesh_layout_bound = false;  // sets 0+1 bound through the mesh layout
     VkPipeline bound = VK_NULL_HANDLE;  // nothing bound when recording starts
-    for (uint32_t c = 0; c < batch_.chunk_count(); ++c) {
+
+    // One mesh draw. Pipeline layouts differ in their push ranges, so the
+    // sets are NOT compatible across the two layouts: the mesh path binds
+    // its own sets under its own layout, and the quad path re-establishes
+    // its bindings afterwards (table_bound_for_quads / the per-chunk bind).
+    std::uint32_t vp_epoch = 0;  // 0 = no cached matrix yet
+    batch::Mat4 mesh_vp{};
+    const auto draw_mesh_command = [&](std::size_t i) {
+        const MeshCommand& m = mesh_commands_[i];
+        if (m.gpu_buffer == 0 || m.index_count == 0) {
+            return;  // nothing to draw (headless-built, or an empty mesh)
+        }
+        const VkRect2D scissor = clip_scissor(m.clip, fb_width, fb_height);
+        if (scissor.extent.width == 0 || scissor.extent.height == 0) {
+            return;  // the clip emptied out: nowhere to land
+        }
+        if (m.camera_epoch == 0 || m.camera_epoch > frame_cameras_.size()) {
+            return;  // never recorded outside a block; a guard, not a path
+        }
+        if (pipeline_mesh_ != bound) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              pipeline_mesh_);
+            bound = pipeline_mesh_;
+        }
+        vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+        const VkDescriptorSet scene_set = scene_slots_[frame_slot].set;
+        const VkDescriptorSet texture_set =
+            tier_.bindless
+                ? table_sets_[frame_slot]
+                : chunk_sets_[frame_slot].sets[chunk_count + mesh_set_of[i]];
+        if (!mesh_layout_bound) {
+            const VkDescriptorSet sets[2] = {texture_set, scene_set};
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    mesh_pipeline_layout_, 0, 2, sets, 0,
+                                    nullptr);
+            mesh_layout_bound = true;
+        } else if (!tier_.bindless) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    mesh_pipeline_layout_, 0, 1, &texture_set,
+                                    0, nullptr);
+        }
+
+        if (m.camera_epoch != vp_epoch) {
+            mesh_vp = batch::camera_vp3d(
+                frame_cameras_[m.camera_epoch - 1].camera3d, fb_width_,
+                fb_height_);
+            vp_epoch = m.camera_epoch;
+        }
+        r3d::detail::MeshPush push{};
+        std::memcpy(push.vp, mesh_vp.m, sizeof push.vp);
+        const r3d::detail::Model3x4 model = r3d::detail::model_matrix(m.transform);
+        std::memcpy(push.model, model.rows, sizeof push.model);
+        push.tint = r3d::detail::pack_tint(m.tint);
+        push.tex_slot = tier_.bindless ? mesh_texture_slot(m) : 0u;
+        vkCmdPushConstants(
+            cmd, mesh_pipeline_layout_,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+            static_cast<uint32_t>(sizeof push), &push);
+
+        const VkBuffer buffer = gfx::handle_from_u64<VkBuffer>(m.gpu_buffer);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &buffer, &offset);
+        vkCmdBindIndexBuffer(cmd, buffer, m.gpu_index_offset,
+                             VK_INDEX_TYPE_UINT32);
+        geometry = Geometry::mesh;
+        vkCmdDrawIndexed(cmd, m.index_count, 1, 0, 0, 0);
+        table_bound_for_quads = false;
+    };
+
+    std::size_t next_mesh = 0;
+    // c == chunk_count is the tail pass: the meshes that sort after the last
+    // quad chunk (or every mesh, in a frame with no quads).
+    for (uint32_t c = 0; c <= chunk_count; ++c) {
+        // The meshes woven before chunk c (marks are non-decreasing).
+        while (has_meshes && next_mesh < mesh_commands_.size() &&
+               mesh_chunk_marks_[next_mesh] <= c) {
+            draw_mesh_command(next_mesh++);
+        }
+        if (c == chunk_count) {
+            break;
+        }
         const batch::Chunk& chunk = batch_.chunk(c);
         if (chunk.quad_count == 0) {
             continue;
@@ -1446,6 +1966,15 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
             bound = want;
         }
         vkCmdSetScissor(cmd, 0, 1, &scissor);
+        if (geometry != Geometry::quads) {
+            // First quad chunk, or the first after a mesh draw rebound the
+            // vertex/index buffers to its own.
+            vkCmdBindVertexBuffers(cmd, 0, 1, &arenas_[frame_slot].buffer,
+                                   &offset);
+            vkCmdBindIndexBuffer(cmd, index_arenas_[frame_slot].buffer, 0,
+                                 VK_INDEX_TYPE_UINT16);
+            geometry = Geometry::quads;
+        }
         if (!tier_.bindless) {
             // Chunked tier: the chunk's own 32-slot table, rewritten only
             // after this slot's fence was waited and strictly before its
@@ -1454,7 +1983,15 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
             write_chunk_set(set, chunk);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     pipeline_layout_, 0, 1, &set, 0, nullptr);
+        } else if (!table_bound_for_quads) {
+            // A mesh draw bound its sets under the mesh layout since the
+            // table last bound for the batch layout.
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    pipeline_layout_, 0, 1,
+                                    &table_sets_[frame_slot], 0, nullptr);
+            table_bound_for_quads = true;
         }
+        mesh_layout_bound = false;  // the quad layout owns the bindings now
         vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT,
                            0, static_cast<uint32_t>(sizeof(batch::Mat4)),
                            chunk.vp.m);

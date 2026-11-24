@@ -281,6 +281,7 @@ void BatchCore::begin_frame() {
     vertices_.clear();
     chunks_.clear();
     segment_open_ = false;
+    barrier_pending_ = false;  // a barrier never leaks across frames
     dropped_quads_ = 0;
     stats_ = FrameStats{};
 }
@@ -288,6 +289,9 @@ void BatchCore::begin_frame() {
 void BatchCore::open_segment(const Mat4& vp, const float (&clip)[4],
                              bool depth_test) {
     segment_open_ = false;  // opening over an open segment closes it first
+    // Consumed here, whatever path follows: a barrier splits exactly once.
+    const bool barrier = barrier_pending_;
+    barrier_pending_ = false;
     if (!chunks_.empty()) {
         Chunk& tail = chunks_.back();
         if (tail.quad_count == 0) {
@@ -301,7 +305,9 @@ void BatchCore::open_segment(const Mat4& vp, const float (&clip)[4],
         }
         // Bitwise compare: the matrices are NaN-free by construction, and a
         // false negative (-0 vs +0) only costs a chunk, never correctness.
-        if (tail.depth_test == depth_test &&
+        // A pending barrier turns the continue off: a mesh draw sits
+        // between the tail chunk and this segment.
+        if (!barrier && tail.depth_test == depth_test &&
             std::memcmp(tail.vp.m, vp.m, sizeof vp.m) == 0 &&
             std::memcmp(tail.clip, clip, sizeof tail.clip) == 0) {
             ++stats_.merged_segments;
@@ -315,6 +321,11 @@ void BatchCore::open_segment(const Mat4& vp, const float (&clip)[4],
 
 void BatchCore::close_segment() {
     segment_open_ = false;
+}
+
+void BatchCore::barrier() {
+    segment_open_ = false;
+    barrier_pending_ = true;
 }
 
 void BatchCore::split_chunk(bool keep_textures) {

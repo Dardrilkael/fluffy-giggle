@@ -106,6 +106,21 @@ if(TARGET test_ui_mesh)
   target_link_libraries(test_ui_mesh PRIVATE volk stb)
 endif()
 
+# The r3d mesh path's DEVICE half, end to end (opt-in): a real gfx::Gpu on a
+# headless surface, an offscreen render pass, the real Renderer2D::flush, the
+# pixels read back, and the validation layer counted. Needs a Vulkan device
+# (a software ICD like lavapipe is enough) - so it is OFF by default and the
+# suite skips, with a message, when no device comes up.
+option(WS_UI_GPU_TESTS "Build the headless-GPU mesh pipeline test (needs a Vulkan device)" OFF)
+if(WS_UI_GPU_TESTS)
+  ws_add_test(ui_mesh_gpu SOURCES tests/test_ui_mesh_gpu.cpp LINK ws::ui ws::gfx)
+  if(TARGET test_ui_mesh_gpu)
+    target_include_directories(test_ui_mesh_gpu PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    target_link_libraries(test_ui_mesh_gpu PRIVATE volk stb)
+  endif()
+endif()
+
 # The idle-frame pacing policy (src/app/frame_pacer.hpp): header-only and
 # pure, so its suite links nothing of the app loop (no Vulkan, no window).
 ws_add_test(ui_frame_pacer SOURCES tests/test_frame_pacer.cpp LINK ws::core)

@@ -711,6 +711,8 @@ struct Stats {
     std::uint32_t chunks = 0;          // batch chunks the replay built
     std::uint32_t vertices = 0;        // batch vertices (4 per quad)
     std::uint32_t dropped_quads = 0;   // recorded with no open segment
+    std::uint32_t mesh_draws = 0;      // r3d::draw_mesh calls the frame recorded
+    std::uint32_t mesh_triangles = 0;  // triangles across those draws
     std::uint32_t textures = 0;        // live: registry minus freed slots
     bool bindless = false;             // the device probe's texture tier
     bool update_after_bind = false;    // ...and its update-after-bind feature

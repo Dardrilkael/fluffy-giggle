@@ -34,6 +34,7 @@ constexpr int kErrEmptyMesh = 6001;  // zero vertices
 constexpr int kErrBadIndex = 6002;   // index >= vertex count
 constexpr int kErrUnknownMesh = 6003;  // destroy: not a live mesh
 constexpr int kErrBadDir = 6004;     // set_light: zero direction
+constexpr int kErrGpuUpload = 6005;  // create_mesh: the GPU buffer failed
 
 // Handle packing - the Texture contract verbatim (renderer2d.h's
 // kSlotMask/kGenShift/kGenMask): 20-bit slot, 12-bit generation.
@@ -127,6 +128,23 @@ ws::core::Result<r3d::Mesh> Renderer2D::create_mesh(const r3d::MeshData& data) {
     entry.indices = data.indices;
     // A trailing partial triangle never rides: the count rounds down.
     entry.indices.resize(entry.indices.size() / 3 * 3);
+    // The GPU copy (Phase 2), when a device is up. A mesh with no whole
+    // triangle draws nothing and needs no buffer. A failed upload fails the
+    // create whole - the slot goes back to the freelist with a bumped
+    // generation, so the half-built handle never existed.
+    if (device_ != VK_NULL_HANDLE && !entry.indices.empty() &&
+        !upload_mesh(entry)) {
+        entry.vertices.clear();
+        entry.vertices.shrink_to_fit();
+        entry.indices.clear();
+        entry.indices.shrink_to_fit();
+        entry.generation = (entry.generation + 1) & kMeshGenMask;
+        free_mesh_slots_.push_back(slot);
+        return make_error(
+            kErrGpuUpload,
+            "r3d::create_mesh - the GPU buffer for the mesh could not be "
+            "created (see the log for the allocator's answer)");
+    }
     return r3d::Mesh{(entry.generation << kMeshGenShift) | slot};
 }
 
@@ -138,6 +156,19 @@ ws::core::Status Renderer2D::destroy_mesh(r3d::Mesh mesh) {
     }
     const std::uint32_t slot = mesh_slot(mesh.id);
     MeshEntry& entry = meshes_[slot];
+    // The GPU copy retires on the submission clock (the texture retire
+    // queue's contract): a draw recorded earlier this frame - or in a
+    // frame still in flight - holds the raw buffer handle, so the buffer
+    // outlives them all. The generation bump below already rejects every
+    // LATER draw.
+    if (entry.gpu_buffer != 0) {
+        mesh_retire_queue_.push_back(
+            {entry.gpu_buffer, entry.gpu_allocation,
+             frame_index_ + kMaxFramesInFlight + 1});
+        entry.gpu_buffer = 0;
+        entry.gpu_allocation = 0;
+        entry.gpu_index_offset = 0;
+    }
     entry.vertices.clear();
     entry.vertices.shrink_to_fit();
     entry.indices.clear();
@@ -158,10 +189,25 @@ void Renderer2D::record_mesh(const r3d::MeshMaterial& material,
         cmd.clip[i] = clip[i];
     }
     cmd.tint = material.tint;
-    cmd.texture = material.texture;
+    // record()'s texture rule, verbatim: a stale or unknown handle renders
+    // white (warned once per frame) and never reaches a descriptor write.
+    // Only while a registry exists - headless, synthetic ids pass through
+    // untouched, which the CPU-side tests rely on.
+    r2d::Texture texture = material.texture;
+    if (!textures_.empty() && texture.id != 0) {
+        const std::uint32_t slot = texture.id & kSlotMask;
+        const std::uint32_t gen = (texture.id >> kGenShift) & kGenMask;
+        if (slot >= textures_.size() || textures_[slot].generation != gen) {
+            warn_unknown_texture(texture.id);
+            texture = r2d::Texture{};
+        }
+    }
+    cmd.texture = texture;
     cmd.transform = transform;
     cmd.vertex_count = static_cast<std::uint32_t>(entry.vertices.size());
     cmd.index_count = static_cast<std::uint32_t>(entry.indices.size());
+    cmd.gpu_buffer = entry.gpu_buffer;
+    cmd.gpu_index_offset = entry.gpu_index_offset;
     mesh_commands_.push_back(cmd);
 }
 
@@ -186,6 +232,36 @@ void push_tri(MeshData& out, std::uint32_t a, std::uint32_t b,
     out.indices.push_back(a);
     out.indices.push_back(b);
     out.indices.push_back(c);
+}
+
+// The generators' winding contract - every triangle counter-clockwise
+// seen from OUTSIDE (in a right-handed frame: cross(b - a, c - a) points
+// the way the surface normals do) - holds by construction here rather
+// than by each generator's hand-spelled index order. The mesh pipeline
+// culls back faces, so one stray triangle would vanish; the topology
+// loops below spell connectivity and this pass fixes the facing against
+// the authored normals. Triangles with no usable facing (zero area, or a
+// normal sum perpendicular to the face) keep their order.
+void orient_outward(MeshData& mesh) {
+    for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+        const Vertex3D& a = mesh.vertices[mesh.indices[t]];
+        const Vertex3D& b = mesh.vertices[mesh.indices[t + 1]];
+        const Vertex3D& c = mesh.vertices[mesh.indices[t + 2]];
+        const float e1[3] = {b.pos[0] - a.pos[0], b.pos[1] - a.pos[1],
+                             b.pos[2] - a.pos[2]};
+        const float e2[3] = {c.pos[0] - a.pos[0], c.pos[1] - a.pos[1],
+                             c.pos[2] - a.pos[2]};
+        const float g[3] = {e1[1] * e2[2] - e1[2] * e2[1],
+                            e1[2] * e2[0] - e1[0] * e2[2],
+                            e1[0] * e2[1] - e1[1] * e2[0]};
+        const float n[3] = {a.normal[0] + b.normal[0] + c.normal[0],
+                            a.normal[1] + b.normal[1] + c.normal[1],
+                            a.normal[2] + b.normal[2] + c.normal[2]};
+        const float facing = g[0] * n[0] + g[1] * n[1] + g[2] * n[2];
+        if (facing < 0.0f) {
+            std::swap(mesh.indices[t + 1], mesh.indices[t + 2]);
+        }
+    }
 }
 
 }  // namespace
@@ -253,6 +329,7 @@ MeshData generate_cube(float size) {
         push_tri(out, base + 0, base + 1, base + 2);
         push_tri(out, base + 2, base + 3, base + 0);
     }
+    orient_outward(out);
     return out;
 }
 
@@ -331,6 +408,7 @@ MeshData generate_sphere(float radius, int stacks, int sectors) {
         const std::uint32_t b = ring_vertex(last_ring, sector + 1);
         push_tri(out, bottom, a, b);
     }
+    orient_outward(out);
     return out;
 }
 
@@ -370,6 +448,7 @@ MeshData generate_plane(float extent, int subdivisions) {
             push_tri(out, br, tr, tl);
         }
     }
+    orient_outward(out);
     return out;
 }
 
@@ -465,6 +544,7 @@ MeshData generate_cylinder(float radius, float half_height, int slices) {
         const std::uint32_t b = bottom_center + 1 + (slice + 1) % slices;
         push_tri(out, bottom_center, a, b);
     }
+    orient_outward(out);
     return out;
 }
 

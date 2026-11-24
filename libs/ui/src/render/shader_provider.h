@@ -16,6 +16,7 @@
 // message and keeps the last good words - a dev iteration tool must never
 // crash the app or hand Vulkan a null module.
 
+#include "render/shaders/mesh_spirv.h"
 #include "render/shaders/spirv.h"
 
 #include <cstdint>
@@ -66,5 +67,20 @@ inline ShaderWords frag_words(bool bindless) {
 }
 
 #endif  // WS_UI_DEV_SHADER_RELOAD
+
+// The r3d mesh pipeline's stages: ALWAYS the committed mesh_spirv.h words,
+// dev hot reload or not (the reload provider above covers the batch stages
+// only - the mesh shaders are small and change rarely; regenerate with
+// tools/compile_shaders.ps1). Same tier split as the batch fragment stage.
+inline ShaderWords mesh_vert_words() {
+    return {kMeshVertSpv, sizeof(kMeshVertSpv) / sizeof(kMeshVertSpv[0])};
+}
+inline ShaderWords mesh_frag_words(bool bindless) {
+    if (bindless) {
+        return {kMeshFragBindlessSpv,
+                sizeof(kMeshFragBindlessSpv) / sizeof(kMeshFragBindlessSpv[0])};
+    }
+    return {kMeshFragSpv, sizeof(kMeshFragSpv) / sizeof(kMeshFragSpv[0])};
+}
 
 }  // namespace ws::ui::r2d::spirv

@@ -230,6 +230,17 @@ public:
                       bool depth_test = false);
     void close_segment();
 
+    // A hard chunk boundary: closes the open segment AND forbids the next
+    // open_segment from continuing the tail chunk, even when its state is
+    // bit-identical. This is how a non-quad draw (an r3d mesh) is woven
+    // BETWEEN two quad runs of the same camera/clip: the flush draws the
+    // mesh between chunk k-1 and chunk k, which only holds if the quads
+    // before and after it can never share a chunk. One-shot - the next
+    // open_segment consumes it. A tail chunk that recorded no quads is
+    // still recycled (that is not a merge), so back-to-back barriers cost
+    // nothing.
+    void barrier();
+
     // Appends one quad (4 vertices) to the open segment. Returns false
     // only when no segment is open - the one drop left: capacity grows
     // instead of dropping (M9).
@@ -319,6 +330,7 @@ private:
     std::vector<Vertex> vertices_;
     std::vector<Chunk> chunks_;
     bool segment_open_ = false;
+    bool barrier_pending_ = false;  // barrier(): the next open_segment starts a fresh chunk
     bool global_tex_ids_ = false;         // tex_index semantics (see above)
     std::uint32_t dropped_quads_ = 0;     // no-open-segment drops (M9)
     FrameStats stats_{};

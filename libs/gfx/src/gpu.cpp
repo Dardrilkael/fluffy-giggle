@@ -191,7 +191,7 @@ core::Status Gpu::Impl::create_instance() {
         vkEnumerateInstanceLayerProperties(&layer_count, available_layers.data());
         bool has_khronos = false;
         for (const VkLayerProperties& layer : available_layers) {
-            if (std::string_view(layer.layerName) == "VK_LAYER_KHRONOS_VALIDATION") {
+            if (std::string_view(layer.layerName) == "VK_LAYER_KHRONOS_validation") {
                 has_khronos = true;
                 break;
             }
@@ -210,7 +210,7 @@ core::Status Gpu::Impl::create_instance() {
             }
         }
         if (has_khronos && has_debug_utils) {
-            layers.push_back("VK_LAYER_KHRONOS_VALIDATION");
+            layers.push_back("VK_LAYER_KHRONOS_validation");
             enabled_extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
             validation_on = true;
         } else {

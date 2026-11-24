@@ -10,7 +10,9 @@
 #include <doctest/doctest.h>
 
 #include "render/renderer2d.h"
+#include "render/renderer3d_math.h"
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -392,4 +394,352 @@ TEST_CASE("set_light: the scene state, the zero-dir refusal") {
     REQUIRE(!refused);
     CHECK(refused.error().code == 6004);
     CHECK(r.light().dir[0] == 0.5f);  // unchanged
+}
+
+// --- winding: the mesh pipeline culls back faces -----------------------------------
+//
+// Two contracts meet at the cull mode. (1) The generators wind every
+// triangle counter-clockwise seen from OUTSIDE (right-handed: cross(b-a,
+// c-a) points along the surface normal). (2) batch::camera_vp3d, whose NDC
+// +y points down, maps a world-CCW triangle that faces the eye to a
+// triangle with POSITIVE Vulkan polygon area, a = -1/2 * sum(x_i*y_{i+1} -
+// x_{i+1}*y_i) - i.e. COUNTER_CLOCKWISE in Vulkan's own terms, which is
+// what the pipeline's frontFace (kMeshFrontFaceCcw) says is the front.
+
+namespace {
+
+struct Ndc {
+    float x = 0.0f;
+    float y = 0.0f;
+    float w = 0.0f;
+};
+
+Ndc project(const ws::ui::r2d::batch::Mat4& vp, const float p[3]) {
+    // Column-major: clip = vp * (p, 1).
+    float clip[4];
+    for (int row = 0; row < 4; ++row) {
+        clip[row] = vp.m[0 + row] * p[0] + vp.m[4 + row] * p[1] +
+                    vp.m[8 + row] * p[2] + vp.m[12 + row];
+    }
+    return {clip[0] / clip[3], clip[1] / clip[3], clip[3]};
+}
+
+// cross(b - a, c - a) of one triangle's positions.
+void geometric_normal(const MeshData& m, std::size_t t, float out[3]) {
+    const Vertex3D& a = m.vertices[m.indices[t]];
+    const Vertex3D& b = m.vertices[m.indices[t + 1]];
+    const Vertex3D& c = m.vertices[m.indices[t + 2]];
+    const float e1[3] = {b.pos[0] - a.pos[0], b.pos[1] - a.pos[1],
+                         b.pos[2] - a.pos[2]};
+    const float e2[3] = {c.pos[0] - a.pos[0], c.pos[1] - a.pos[1],
+                         c.pos[2] - a.pos[2]};
+    out[0] = e1[1] * e2[2] - e1[2] * e2[1];
+    out[1] = e1[2] * e2[0] - e1[0] * e2[2];
+    out[2] = e1[0] * e2[1] - e1[1] * e2[0];
+}
+
+const MeshData& wound_meshes(int index) {
+    static const MeshData meshes[] = {
+        generate_cube(100.0f),
+        generate_sphere(60.0f, 12, 16),
+        generate_plane(50.0f, 4),
+        generate_cylinder(40.0f, 50.0f, 16),
+        generate_sphere(10.0f, 2, 3),   // the smallest legal sphere
+        generate_cylinder(5.0f, 5.0f, 3),
+    };
+    return meshes[index];
+}
+constexpr int kWoundMeshCount = 6;
+
+}  // namespace
+
+TEST_CASE("winding: every generator triangle is CCW seen from outside") {
+    for (int m = 0; m < kWoundMeshCount; ++m) {
+        const MeshData& mesh = wound_meshes(m);
+        REQUIRE_FALSE(mesh.indices.empty());
+        for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+            float g[3];
+            geometric_normal(mesh, t, g);
+            float n[3] = {0.0f, 0.0f, 0.0f};
+            for (int k = 0; k < 3; ++k) {
+                for (int axis = 0; axis < 3; ++axis) {
+                    n[axis] += mesh.vertices[mesh.indices[t + k]].normal[axis];
+                }
+            }
+            const float facing = g[0] * n[0] + g[1] * n[1] + g[2] * n[2];
+            // Strictly positive: a zero-area or edge-on triangle would
+            // make the check vacuous, and no generator emits one.
+            CHECK_MESSAGE(facing > 0.0f, "mesh " << m << " triangle " << t / 3);
+        }
+    }
+}
+
+TEST_CASE("winding: camera_vp3d maps eye-facing world-CCW to Vulkan-CCW") {
+    // The pipeline's frontFace choice, pinned.
+    REQUIRE(ws::ui::r3d::detail::kMeshFrontFaceCcw);
+
+    ws::ui::r2d::Camera3D cameras[4]{};
+    cameras[0].eye[0] = 30.0f;  cameras[0].eye[1] = -40.0f; cameras[0].eye[2] = -200.0f;
+    cameras[1].eye[0] = 200.0f; cameras[1].eye[1] = -60.0f; cameras[1].eye[2] = 0.0f;
+    cameras[2].eye[0] = 0.0f;   cameras[2].eye[1] = -250.0f; cameras[2].eye[2] = -40.0f;
+    cameras[3].eye[0] = -150.0f; cameras[3].eye[1] = 90.0f; cameras[3].eye[2] = 120.0f;
+    int checked = 0;
+    for (const ws::ui::r2d::Camera3D& camera : cameras) {
+        const ws::ui::r2d::batch::Mat4 vp =
+            ws::ui::r2d::batch::camera_vp3d(camera, 800.0f, 600.0f);
+        for (int m = 0; m < kWoundMeshCount; ++m) {
+            const MeshData& mesh = wound_meshes(m);
+            for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+                const Vertex3D& a = mesh.vertices[mesh.indices[t]];
+                const Vertex3D& b = mesh.vertices[mesh.indices[t + 1]];
+                const Vertex3D& c = mesh.vertices[mesh.indices[t + 2]];
+                float g[3];
+                geometric_normal(mesh, t, g);
+                // Facing the eye by the GEOMETRIC normal (the vertex
+                // normals can disagree with it at a silhouette).
+                const float to_eye[3] = {camera.eye[0] - a.pos[0],
+                                         camera.eye[1] - a.pos[1],
+                                         camera.eye[2] - a.pos[2]};
+                const float facing =
+                    g[0] * to_eye[0] + g[1] * to_eye[1] + g[2] * to_eye[2];
+                const Ndc pa = project(vp, a.pos);
+                const Ndc pb = project(vp, b.pos);
+                const Ndc pc = project(vp, c.pos);
+                if (pa.w <= 0.0f || pb.w <= 0.0f || pc.w <= 0.0f) {
+                    continue;  // behind the camera
+                }
+                const float area =
+                    -0.5f * ((pa.x * pb.y - pb.x * pa.y) +
+                             (pb.x * pc.y - pc.x * pb.y) +
+                             (pc.x * pa.y - pa.x * pc.y));
+                if (std::fabs(area) < 1e-9f || std::fabs(facing) < 1e-3f) {
+                    continue;  // a sliver / edge-on: the sign is noise
+                }
+                ++checked;
+                CHECK_MESSAGE((facing > 0.0f) == (area > 0.0f),
+                              "mesh " << m << " triangle " << t / 3);
+            }
+        }
+    }
+    CHECK(checked > 500);  // the loop above really ran
+}
+
+// --- the placement math ------------------------------------------------------------
+
+namespace {
+
+using Mat3 = std::array<std::array<float, 3>, 3>;
+
+Mat3 mul(const Mat3& l, const Mat3& r) {
+    Mat3 out{};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            for (int k = 0; k < 3; ++k) {
+                out[i][j] += l[i][k] * r[k][j];
+            }
+        }
+    }
+    return out;
+}
+
+// Standard right-hand-rule rotations, spelled independently of
+// model_matrix's multiplied-out form.
+Mat3 rot_x(float a) {
+    return {{{1, 0, 0}, {0, std::cos(a), -std::sin(a)}, {0, std::sin(a), std::cos(a)}}};
+}
+Mat3 rot_y(float a) {
+    return {{{std::cos(a), 0, std::sin(a)}, {0, 1, 0}, {-std::sin(a), 0, std::cos(a)}}};
+}
+Mat3 rot_z(float a) {
+    return {{{std::cos(a), -std::sin(a), 0}, {std::sin(a), std::cos(a), 0}, {0, 0, 1}}};
+}
+
+}  // namespace
+
+TEST_CASE("model_matrix: scale * Ry(yaw) * Rx(pitch) * Rz(roll), translation in col 3") {
+    const float angles[][3] = {{0, 0, 0},       {0.5f, 0, 0},      {0, 0.7f, 0},
+                               {0, 0, -1.1f},   {0.3f, -0.8f, 1.9f}, {3.0f, 1.2f, -2.5f}};
+    for (const auto& a : angles) {
+        Transform3D t;
+        t.yaw = a[0];
+        t.pitch = a[1];
+        t.roll = a[2];
+        t.scale = 2.5f;
+        t.translation[0] = 4.0f;
+        t.translation[1] = -5.0f;
+        t.translation[2] = 6.0f;
+        const auto m = ws::ui::r3d::detail::model_matrix(t);
+        const Mat3 r = mul(rot_y(a[0]), mul(rot_x(a[1]), rot_z(a[2])));
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                CHECK(m.rows[i][j] == doctest::Approx(r[i][j] * 2.5f).epsilon(1e-5f));
+            }
+            CHECK(m.rows[i][3] == t.translation[i]);
+        }
+    }
+    // The headline meaning: yaw a quarter turn about +Y carries +Z to +X.
+    Transform3D quarter;
+    quarter.yaw = 1.57079632679f;
+    const auto m = ws::ui::r3d::detail::model_matrix(quarter);
+    CHECK(m.rows[0][2] == doctest::Approx(1.0f).epsilon(1e-5f));  // x of local +Z
+    CHECK(m.rows[2][2] == doctest::Approx(0.0f).epsilon(1e-5f));  // z of local +Z
+}
+
+TEST_CASE("pack_tint / scene block / push layouts") {
+    using namespace ws::ui::r3d::detail;
+    // 0xRRGGBBAA -> the word unpackUnorm4x8 reads back as (r, g, b, a).
+    CHECK(pack_tint(0x11223344u) == 0x44332211u);
+    CHECK(pack_tint(0xFFFFFFFFu) == 0xFFFFFFFFu);
+    CHECK(pack_tint(0xFF000080u) == 0x800000FFu);
+
+    Light3D light;
+    light.dir[0] = 0.0f;
+    light.dir[1] = -3.0f;
+    light.dir[2] = 4.0f;  // length 5
+    light.color[0] = 2.0f;
+    light.color[1] = -1.0f;  // nonsense: clamps to 0
+    light.color[2] = 0.5f;
+    light.ambient = 1.7f;  // clamps to 1
+    const SceneBlock block = make_scene_block(light);
+    CHECK(block.light_dir[0] == doctest::Approx(0.0f));
+    CHECK(block.light_dir[1] == doctest::Approx(-0.6f));
+    CHECK(block.light_dir[2] == doctest::Approx(0.8f));
+    CHECK(block.light_color_ambient[0] == doctest::Approx(2.0f));
+    CHECK(block.light_color_ambient[1] == 0.0f);
+    CHECK(block.light_color_ambient[2] == doctest::Approx(0.5f));
+    CHECK(block.light_color_ambient[3] == 1.0f);
+    CHECK(make_scene_block(Light3D{}).light_color_ambient[3] == doctest::Approx(0.25f));
+
+    CHECK(sizeof(MeshPush) == 120u);
+    CHECK(sizeof(SceneBlock) == 32u);
+}
+
+// --- the weave: mesh draws between quad chunks --------------------------------------
+
+namespace {
+
+constexpr std::uint32_t kWhite = 0xFFFFFFFFu;
+
+// One billboard in the open 3D block. (The z form: five floats + color.)
+void billboard(Renderer2D& r) {
+    r.draw_quad(0.0f, 0.0f, 0.0f, 10.0f, 10.0f, kWhite);
+}
+
+}  // namespace
+
+TEST_CASE("weave: a frame of only meshes keeps them, with mark 0 and stats") {
+    Renderer2D r;
+    const auto cube = r.create_mesh(generate_cube(1.0f));
+    REQUIRE(cube);
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(ws::ui::r2d::Camera3D{});
+    r.draw_mesh(*cube, Transform3D{}, MeshMaterial{});
+    r.draw_mesh(*cube, Transform3D{}, MeshMaterial{});
+    r.frame_end();
+    REQUIRE(r.mesh_commands().size() == 2u);
+    REQUIRE(r.mesh_chunk_marks().size() == 2u);
+    CHECK(r.mesh_chunk_marks()[0] == 0u);
+    CHECK(r.mesh_chunk_marks()[1] == 0u);
+    CHECK(r.batch().chunk_count() == 0u);
+    const auto stats = r.stats();
+    CHECK(stats.mesh_draws == 2u);
+    CHECK(stats.mesh_triangles == 24u);  // 2 cubes x 12
+    CHECK(stats.quads == 0u);
+}
+
+TEST_CASE("weave: a mesh between two quad runs of one camera splits the chunk") {
+    Renderer2D r;
+    const auto cube = r.create_mesh(generate_cube(1.0f));
+    REQUIRE(cube);
+
+    // Control: the same two billboards (layers 0 and 2, one block) with no
+    // mesh between them merge into ONE chunk.
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(ws::ui::r2d::Camera3D{});
+    r.set_layer(0u);
+    billboard(r);
+    r.set_layer(2u);
+    billboard(r);
+    r.frame_end();
+    CHECK(r.batch().chunk_count() == 1u);
+
+    // With a layer-1 mesh between them: two chunks, the mesh after chunk 0.
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(ws::ui::r2d::Camera3D{});
+    r.set_layer(0u);
+    billboard(r);
+    r.set_layer(1u);
+    r.draw_mesh(*cube, Transform3D{}, MeshMaterial{});
+    r.set_layer(2u);
+    billboard(r);
+    r.frame_end();
+    REQUIRE(r.batch().chunk_count() == 2u);
+    CHECK(r.batch().chunk(0).quad_count == 1u);
+    CHECK(r.batch().chunk(1).quad_count == 1u);
+    REQUIRE(r.mesh_chunk_marks().size() == 1u);
+    CHECK(r.mesh_chunk_marks()[0] == 1u);
+    CHECK(r.batch().chunk(0).depth_test);  // the 3D block's chunks
+}
+
+TEST_CASE("weave: ties draw the mesh first; epochs and layers order the rest") {
+    Renderer2D r;
+    const auto cube = r.create_mesh(generate_cube(1.0f));
+    REQUIRE(cube);
+
+    // Same layer, same epoch: the mesh is woven BEFORE the billboards (they
+    // blend over opaque geometry), so its mark is 0 and the quads share one
+    // chunk.
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(ws::ui::r2d::Camera3D{});
+    billboard(r);
+    r.draw_mesh(*cube, Transform3D{}, MeshMaterial{});
+    billboard(r);
+    r.frame_end();
+    REQUIRE(r.mesh_chunk_marks().size() == 1u);
+    CHECK(r.mesh_chunk_marks()[0] == 0u);
+    CHECK(r.batch().chunk_count() == 1u);
+    CHECK(r.batch().chunk(0).quad_count == 2u);
+
+    // A mesh in epoch 2 sorts after a layer-0 quad of epoch 1 and before a
+    // layer-1 quad of epoch 1: the marks follow the sorted order.
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(ws::ui::r2d::Camera3D{});  // epoch 1
+    billboard(r);                      // layer 0
+    r.set_layer(1u);
+    billboard(r);                      // layer 1
+    r.begin(ws::ui::r2d::Camera3D{});  // epoch 2
+    r.set_layer(0u);
+    r.draw_mesh(*cube, Transform3D{}, MeshMaterial{});  // (0, 2)
+    r.set_layer(1u);
+    r.draw_mesh(*cube, Transform3D{}, MeshMaterial{});  // (1, 2)
+    r.frame_end();
+    // Sorted by (layer, epoch): quad(0,1), mesh(0,2), quad(1,1), mesh(1,2).
+    REQUIRE(r.mesh_chunk_marks().size() == 2u);
+    CHECK(r.mesh_chunk_marks()[0] == 1u);  // after the first quad's chunk
+    CHECK(r.mesh_chunk_marks()[1] == 2u);  // after the second quad's chunk
+    CHECK(r.batch().chunk_count() == 2u);
+    CHECK(r.mesh_chunk_marks()[0] <= r.mesh_chunk_marks()[1]);
+}
+
+TEST_CASE("weave: meshes after the last quad mark the chunk count; drops reset") {
+    Renderer2D r;
+    const auto cube = r.create_mesh(generate_cube(1.0f));
+    REQUIRE(cube);
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(ws::ui::r2d::Camera3D{});
+    billboard(r);
+    r.set_layer(5u);
+    r.draw_mesh(*cube, Transform3D{}, MeshMaterial{});
+    r.frame_end();
+    REQUIRE(r.mesh_chunk_marks().size() == 1u);
+    CHECK(r.mesh_chunk_marks()[0] == r.batch().chunk_count());
+    CHECK(r.batch().chunk_count() == 1u);
+
+    // An abandoned frame keeps nothing: no stale mesh to draw next time.
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(ws::ui::r2d::Camera3D{});
+    r.draw_mesh(*cube, Transform3D{}, MeshMaterial{});
+    r.frame_drop();
+    CHECK(r.mesh_commands().empty());
+    CHECK(r.mesh_chunk_marks().empty());
 }
