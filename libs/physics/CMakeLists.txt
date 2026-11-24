@@ -49,7 +49,8 @@ ws_add_test(physics
           tests/test_world_2d_box2d.cpp tests/test_world_3d_jolt.cpp
           tests/test_mass_properties.cpp tests/test_material.cpp
           tests/test_reference_2d.cpp tests/test_conformance.cpp
-          tests/test_reference_3d.cpp tests/test_conformance_3d.cpp)
+          tests/test_reference_3d.cpp tests/test_conformance_3d.cpp
+          tests/test_voxel_proto.cpp)
 # tests drive the internal machinery directly (the net pattern: src/ never
 # reaches apps, but tests reach it through this PRIVATE path).
 if(TARGET test_physics)

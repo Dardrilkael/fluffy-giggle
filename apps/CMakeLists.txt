@@ -26,6 +26,8 @@ ws_app_wants(_want chatter ui net)
 set(ws_want_chatter ${_want})
 ws_app_wants(_want bounce physics audio ui)
 set(ws_want_bounce ${_want})
+ws_app_wants(_want voxel_game ui physics audio)
+set(ws_want_voxel_game ${_want})
 ws_app_wants(_want ui_gallery ui jobs platform app)
 set(ws_want_ui_gallery ${_want})
 ws_app_wants(_want shell_example ui jobs platform app)
@@ -63,6 +65,13 @@ if(ws_want_bounce)
   # bounce is the first windowed example to compose three libs: a
   # ws::physics2d pit drawn through ws::ui, with ws::audio thuds on impact.
   add_subdirectory(bounce)
+endif()
+if(ws_want_voxel_game)
+  # voxel_game is the four-lib composition: a first-person voxel sandbox -
+  # ws::ui's r3d mesh path draws the chunk meshes, ws::physics3d drives the
+  # player against a sparse static grid of surface blocks, ws::audio
+  # synthesizes the place/break one-shots.
+  add_subdirectory(voxel_game)
 endif()
 if(ws_want_ui_gallery AND NOT (UNIX AND NOT APPLE))
   # ui_gallery is the gui widget set's acceptance view: one screen with every
