@@ -275,6 +275,30 @@ struct Rig {
         in.dt_seconds = dt;
         frame(in);
     }
+
+    // The touch twin, a touch-only device's frame: ONE contact, the
+    // mouse never present - the Android shape. The rig holds the
+    // input layer's own accumulator (the platform's shape: raw events
+    // accumulate between frames, one InputFrame published per frame,
+    // next_frame() clearing the edges and dropping the lifted contact)
+    // so a carry frame's touch_move finds the contact the press frame
+    // began - a fresh table per frame would no-op the move and the
+    // drag would die on its second frame.
+    ws::input::InputFrame touch_acc;
+    void touch(float x, float y, bool down, bool pressed, bool released,
+               float dt = 0.0f) {
+        const ws::input::PointerId finger{7u};
+        if (pressed) {
+            (void)touch_acc.touch_down(finger, x, y);
+        } else if (down) {
+            touch_acc.touch_move(finger, x, y);
+        } else if (released) {
+            touch_acc.touch_up(finger, x, y, false);
+        }
+        touch_acc.dt_seconds = dt;
+        frame(touch_acc);
+        touch_acc.next_frame();
+    }
 };
 
 }  // namespace
@@ -2152,5 +2176,160 @@ TEST_CASE("F3: request_quit runs the stop callback only when clean") {
     rig.frame();
     CHECK_FALSE(stopped);
     CHECK(rig.shell->documents().active()->path() == "/q.txt");
+    (void)rig.shell->shutdown();
+}
+
+// The touch-only frame is the Android dock's own shape: mouse_present
+// false, the primary finger bridged into the mouse fields by the input
+// layer, and the shell reading the flat pointer list instead of the
+// mouse's half. The same three drag grammar tests as above, one
+// finger's spelling - the drag layer must answer both identically.
+TEST_CASE("a touch drag re-docks a tab with no mouse present") {
+    Rig rig;
+    rig.build();
+    CHECK(rig.shell->startup());
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "editor");
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "plot");
+
+    const float chrome = ws::ui::gui::kDefaultChrome.control_height;
+    const ws::ui::gui::Rect dock{0.0f, chrome, 1280.0f, 720.0f - chrome};
+    DockTree& tree = rig.shell->panel_host().dock();
+    const DockTree::Layout laid = tree.resolve(dock);
+    const float strip_y = laid.leaves[0].rect.y + chrome * 0.5f;
+    const float editor_tab_x = laid.leaves[0].rect.x + 20.0f;
+    const float plot_cx = laid.leaves[1].rect.x +
+                          laid.leaves[1].rect.width * 0.5f;
+    const float plot_cy = laid.leaves[1].rect.y +
+                          laid.leaves[1].rect.height * 0.5f;
+
+    // The retab drop, one finger: press editor's tab, carry onto
+    // plot's body, release. The touch threshold is the slop radius
+    // (24px), and the carry crosses it whole.
+    rig.touch(editor_tab_x, strip_y, true, true, false);
+    rig.touch(plot_cx, plot_cy, true, false, false);
+    rig.touch(plot_cx, plot_cy, false, false, true);
+    CHECK(tree.leaf_count() == 1);
+    CHECK(tree.tab_index("plot") == 0);
+    CHECK(tree.tab_index("editor") == 1);
+    CHECK(rig.shell->panel_host().active()->id == "editor");
+
+    // A finger's tap on the tab that never crosses slop is the
+    // strip's click, not a tear-off: the selection moves, the tree
+    // stays one leaf, nothing floats.
+    PanelHost& host = rig.shell->panel_host();
+    rig.touch(dock.x + 20.0f, strip_y, true, true, false);
+    rig.touch(dock.x + 20.0f, strip_y, false, false, true);
+    CHECK(tree.leaf_count() == 1);
+    CHECK(host.floating().empty());
+    CHECK(host.active()->id == "plot");  // the tap selected plot's tab
+
+    // The tear-off outside every leaf: a finger carrying the tab over
+    // the menu bar and lifting there makes the floating window - the
+    // same window the mouse's drag tears, the same size hint.
+    rig.touch(dock.x + 20.0f, strip_y, true, true, false);
+    rig.touch(600.0f, 10.0f, true, false, false);  // the menu bar's band
+    rig.touch(600.0f, 10.0f, false, false, true);
+    REQUIRE(host.floating().size() == 1);
+    CHECK(host.floating()[0].panel == "plot");
+    CHECK(!tree.contains("plot"));
+    (void)rig.shell->shutdown();
+}
+
+TEST_CASE("a touch drag moves and re-docks a floating window") {
+    Rig rig;
+    rig.build();
+    CHECK(rig.shell->startup());
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "editor");
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "plot");
+
+    const float chrome = ws::ui::gui::kDefaultChrome.control_height;
+    const ws::ui::gui::Rect dock{0.0f, chrome, 1280.0f, 720.0f - chrome};
+    PanelHost& host = rig.shell->panel_host();
+    DockTree& tree = host.dock();
+
+    host.float_panel(rig.shell->panels(), "editor",
+                     ws::ui::gui::Rect{100.0f, 100.0f, 300.0f, 200.0f});
+    rig.frame();  // the window is on screen
+    const float bar_x = 250.0f;
+    const float bar_y = 100.0f + chrome * 0.5f;
+    const float drop_x = dock.x + dock.width * 0.5f;
+    const float drop_y = dock.y + dock.height * 0.5f;
+
+    // A finger TAP on the bar (no carry past slop) is the raise +
+    // focus alone: the window neither moves nor docks.
+    rig.touch(bar_x, bar_y, true, true, false);
+    rig.touch(bar_x, bar_y, false, false, true);
+    CHECK(host.floating().size() == 1);
+    CHECK(host.floating()[0].rect.x == doctest::Approx(100.0f));
+    CHECK(host.active()->id == "editor");
+
+    // The drag: carry the bar over the plot leaf's center and lift -
+    // the window leaves the floating layer, the tab joins the leaf.
+    rig.touch(bar_x, bar_y, true, true, false);
+    rig.touch(drop_x, drop_y, true, false, false);
+    rig.touch(drop_x, drop_y, false, false, true);
+    CHECK(host.floating().empty());
+    CHECK(tree.contains("editor"));
+    CHECK(tree.leaf_count() == 1);
+    CHECK(tree.tab_index("editor") == 1);
+    CHECK(host.active()->id == "editor");
+
+    // The nowhere drop: torn off again, carried outside every leaf,
+    // lifted - the window stays floating where the carry seated it.
+    host.float_panel(rig.shell->panels(), "editor",
+                     ws::ui::gui::Rect{100.0f, 100.0f, 300.0f, 200.0f});
+    rig.frame();
+    rig.touch(bar_x, bar_y, true, true, false);
+    rig.touch(600.0f, 10.0f, true, false, false);
+    rig.touch(600.0f, 10.0f, false, false, true);
+    REQUIRE(host.floating().size() == 1);
+    CHECK(host.floating()[0].rect.x == doctest::Approx(450.0f));
+    CHECK(host.floating()[0].rect.y >= dock.y);
+    (void)rig.shell->shutdown();
+}
+
+TEST_CASE("a touch drag pulls a splitter and a grip resizes the window") {
+    Rig rig;
+    rig.build();
+    CHECK(rig.shell->startup());
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "editor");
+    (void)rig.shell->panel_host().open(rig.shell->panels(), "plot");
+
+    const float chrome = ws::ui::gui::kDefaultChrome.control_height;
+    const ws::ui::gui::Rect dock{0.0f, chrome, 1280.0f, 720.0f - chrome};
+    DockTree& tree = rig.shell->panel_host().dock();
+
+    // The splitter between the halves: the drawn band is 6px, the
+    // finger's grab reaches 24 (the pad), and the carry lands mid-left
+    // - the boundary follows the finger through the widened TESTED
+    // rect, the drawn band stays 6.
+    const DockTree::Layout laid = tree.resolve(dock);
+    REQUIRE(!laid.splitters.empty());
+    const float band_x = laid.splitters[0].rect.x;  // the boundary's x
+    rig.touch(band_x, dock.y + dock.height * 0.5f, true, true, false);
+    rig.touch(dock.x + dock.width * 0.25f, dock.y + dock.height * 0.5f,
+              true, false, false);
+    rig.touch(dock.x + dock.width * 0.25f, dock.y + dock.height * 0.5f,
+              false, false, true);
+    const DockTree::Layout moved = tree.resolve(dock);
+    // apply_drag answers the carry's position directly: leaf0 spans
+    // 0.25 * dock.width - the same 320 the mouse's drag lands at.
+    CHECK(moved.leaves[0].rect.width ==
+          doctest::Approx(dock.width * 0.25f));
+    // The resize grip under a finger: press, carry down-right, lift -
+    // the window grows by the carry, the origin unmoved.
+    PanelHost& host = rig.shell->panel_host();
+    host.float_panel(rig.shell->panels(), "editor",
+                     ws::ui::gui::Rect{100.0f, 100.0f, 300.0f, 200.0f});
+    rig.frame();
+    const float grip_x = 100.0f + 300.0f - 7.0f;
+    const float grip_y = 100.0f + 200.0f - 7.0f;
+    rig.touch(grip_x, grip_y, true, true, false);
+    rig.touch(grip_x + 80.0f, grip_y + 60.0f, true, false, false);
+    rig.touch(grip_x + 80.0f, grip_y + 60.0f, false, false, true);
+    REQUIRE(host.floating().size() == 1);
+    CHECK(host.floating()[0].rect.width == doctest::Approx(380.0f));
+    CHECK(host.floating()[0].rect.height == doctest::Approx(260.0f));
+    CHECK(host.floating()[0].rect.x == doctest::Approx(100.0f));
     (void)rig.shell->shutdown();
 }

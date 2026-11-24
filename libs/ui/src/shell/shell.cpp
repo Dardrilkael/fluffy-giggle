@@ -12,7 +12,7 @@
 #include <ws/ui/shell/shell.hpp>
 
 #include <algorithm>
-#include <cstdio>
+#include <array>
 #include <cstring>
 #include <functional>
 #include <utility>
@@ -66,6 +66,60 @@ constexpr float kZoomHit = 12.0f;
 // corner (three diagonal strokes, the classic grip mark). Big enough
 // to hit at a glance, small enough to stay out of the scroll bars.
 constexpr float kFloatGripPx = 14.0f;
+// The touch drag threshold: a finger wanders far further than a mouse
+// jiggle before a touch stops being a tap - the gestures arbiter's own
+// touch_slop rule (ViewConfiguration's ~8dp intent, 24px spelling).
+// A touch-armed drag (tab tear-off, float move) arms at this radius,
+// never the mouse's 6; a mouse that walks 6..24px still drags, so the
+// slop costs the mouse nothing it had.
+constexpr float kTouchDragPx = 24.0f;
+// The splitter's touch reach: the band's own 6px is a mouse's target;
+// a finger grabs the SAME band through hit padding (HitShape::pad's
+// "grows the TESTED rect outward for touch targets" - the drawn band
+// and the drag geometry stay the mouse's, only the grab widens).
+constexpr float kSplitterTouchPad = 9.0f;  // pad grows each side: 6+2*9=24px grab
+
+// The dock view's pointer: the frame's primary, read the gui's own way
+// (gather_pointers' one flat list - [0] is the mouse while present, the
+// first touch otherwise; the shell never special-cases where a pointer
+// came from, the input layer's contract). Carries the touch flag the
+// slop/pad rules need: absent mouse + present primary = a touch-driven
+// frame, whatever platform filled it. This is the seam the drag layer
+// was missing - every mouse_* field read directly spelled "mouse
+// only", and a touch-only Android device lists touches, never a mouse.
+struct DockPointer {
+    bool present = false;
+    bool touch = false;
+    bool down = false;
+    bool pressed = false;
+    bool released = false;
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
+// One frame's primary pointer, mouse-first (a present mouse outranks
+// the first touch - the bridge mirrors a finger into the mouse fields,
+// so slot order alone already spells the intended winner: the mouse
+// when there is one, else the finger doing the dragging).
+[[nodiscard]] DockPointer dock_pointer(
+    const ws::input::InputFrame& in) {
+    DockPointer out;
+    std::array<ws::input::PointerView, ws::input::InputFrame::kMaxPointers>
+        flat{};
+    const int count = in.gather_pointers(flat);
+    if (count <= 0) {
+        return out;  // no pointer at all this frame
+    }
+    const ws::input::PointerView& primary = flat[0];
+    out.present = true;
+    out.touch = primary.id != ws::input::kMousePointerId;
+    out.down = primary.down;
+    out.pressed = primary.pressed;
+    out.released = primary.released;
+    out.x = primary.x;
+    out.y = primary.y;
+    return out;
+}
 
 // The drop preview's geometry, shared by the tab drag and the
 // floating title-bar drag: the veil over where the drop would land -
@@ -1325,12 +1379,13 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
     // needs (a hand-built test frame reports 0 - every press then
     // lands "instantly", and the window still needs TWO of them).
     const ws::input::InputFrame& in = gui.input();
+    const DockPointer ptr = dock_pointer(in);
     splitter_clock_ += in.dt_seconds;
 
     // The splitters first: their hit claims land before any leaf
     // widget's, so a boundary grab always wins over content under it.
-    // The fill is the bar face - a visible recessed gutter between
-    // the panels, not a 1-px color change nobody can find.
+    // The fill is the bar face - a visible recessed gutter between the
+    // panels, not a 1-px color change nobody can find.
     for (const DockTree::SplitterRect& splitter : resolved.splitters) {
         r2d::draw_quad(splitter.rect.x, splitter.rect.y, splitter.rect.width,
                        splitter.rect.height, theme.bar_bg);
@@ -1346,7 +1401,13 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
         }
         gui.ids().push(static_cast<int>(splitter.first_child));
         const gui::WidgetId id = gui.ids().id("shell.splitter");
-        const gui::HitTest hit = gui.hit_test(id, splitter.rect);
+        // The grab's shape: the drawn band, grown for a finger through
+        // HitShape::pad (the TESTED rect widens, the drawn band and the
+        // drag geometry stay the mouse's - one band, two reaches).
+        gui::HitShape splitter_shape;
+        splitter_shape.pad = ptr.touch ? kSplitterTouchPad : 0.0f;
+        const gui::HitTest hit =
+            gui.hit_test(id, splitter.rect, splitter_shape);
         for (std::size_t popped = 0;
              popped < splitter.path.size() + 1; ++popped) {
             gui.ids().pop();
@@ -1358,7 +1419,7 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
             // the window even the split - the splitter's reset, the
             // gesture every dock ships. The same hold must not then
             // also drag the boundary it just evened under the pointer.
-            if (in.mouse_pressed[0]) {
+            if (ptr.pressed) {
                 const bool same_band =
                     splitter_last_press_.path == splitter.path &&
                     splitter_last_press_.first_child ==
@@ -1381,7 +1442,7 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
         }
     }
     if (splitter_drag_.active) {
-        if (in.mouse_down[0] && in.mouse_present) {
+        if (ptr.down) {
             if (!splitter_drag_.consumed) {
                 // Mouse and splitter spans share the frame's own
                 // coordinates: resolve() answers absolute leaf/splitter
@@ -1389,8 +1450,8 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
                 // position needs no conversion.
                 const float position =
                     splitter_drag_.splitter.dir == DockDir::horizontal
-                        ? in.mouse_x
-                        : in.mouse_y;
+                        ? ptr.x
+                        : ptr.y;
                 panel_host_.dock().apply_drag(splitter_drag_.splitter,
                                               position);
             }
@@ -1403,10 +1464,9 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
     // front tab (the tab strip's own selection does the same on click).
     // The leaf rects are absolute (resolve() works in the dock bounds'
     // own coordinates), so the pointer is compared as-is.
-    const bool pressed = in.mouse_present && in.mouse_pressed[0];
-    if (pressed) {
+    if (ptr.pressed) {
         for (const DockTree::LeafRect& leaf : resolved.leaves) {
-            if (point_in(leaf.rect, in.mouse_x, in.mouse_y) &&
+            if (point_in(leaf.rect, ptr.x, ptr.y) &&
                 leaf.tabs != nullptr && !leaf.tabs->empty()) {
                 const int index = std::clamp(
                     leaf.active, 0, static_cast<int>(leaf.tabs->size()) - 1);
@@ -1506,8 +1566,8 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
             tab_drag_.armed = true;
             tab_drag_.dragging = false;
             tab_drag_.panel = (*leaf.tabs)[static_cast<std::size_t>(held_tab)];
-            tab_drag_.press_x = in.mouse_x;
-            tab_drag_.press_y = in.mouse_y;
+            tab_drag_.press_x = ptr.x;
+            tab_drag_.press_y = ptr.y;
             tab_drag_.origin_rect = leaf.rect;
         }
 
@@ -1591,12 +1651,16 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
     // strips above armed it off their held claim; the tree answers
     // where a drop lands (dock_hit over THIS frame's resolve - the
     // tree has not moved since the drag began, so the answer is the
-    // one the release sees).
+    // one the release sees). The threshold itself is the pointer's
+    // own: the mouse's jiggle radius, a finger's slop (the gestures
+    // arbiter's rule - a touch that has not carried past slop is still
+    // the strip's tap, never a tear-off).
+    const float drag_arm_px = ptr.touch ? kTouchDragPx : kTabDragPx;
     if (tab_drag_.armed) {
-        if (!(in.mouse_present && in.mouse_down[0])) {
+        if (!ptr.present || !ptr.down) {
             if (tab_drag_.dragging) {
                 const DockHit drop =
-                    dock_hit(resolved, in.mouse_x, in.mouse_y,
+                    dock_hit(resolved, ptr.x, ptr.y,
                              kDockDropBandPx);
                 if (drop.leaf >= 0) {
                     DockPlacement placement;
@@ -1617,8 +1681,8 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
                     const float max_h = std::max(kFloatingMinH, bounds.height);
                     tear.width = std::clamp(tear.width, kFloatingMinW, max_w);
                     tear.height = std::clamp(tear.height, kFloatingMinH, max_h);
-                    tear.x = in.mouse_x - tear.width * 0.5f;
-                    tear.y = in.mouse_y - tear.height * 0.5f;
+                    tear.x = ptr.x - tear.width * 0.5f;
+                    tear.y = ptr.y - tear.height * 0.5f;
                     panel_host_.float_panel(panel_registry_,
                                             tab_drag_.panel,
                                             seat_in_bounds(tear, bounds));
@@ -1626,18 +1690,18 @@ void AppShell::draw_dock(GuiContext& gui, LayoutCursor& layout,
             }
             tab_drag_ = TabDrag{};  // the hold ended: dropped or torn off
         } else {
-            const float dx = in.mouse_x - tab_drag_.press_x;
-            const float dy = in.mouse_y - tab_drag_.press_y;
+            const float dx = ptr.x - tab_drag_.press_x;
+            const float dy = ptr.y - tab_drag_.press_y;
             if (!tab_drag_.dragging &&
-                dx * dx + dy * dy >= kTabDragPx * kTabDragPx) {
+                dx * dx + dy * dy >= drag_arm_px * drag_arm_px) {
                 tab_drag_.dragging = true;
             }
             if (tab_drag_.dragging) {
                 // The drop preview: the shared veil over where the
                 // panel would land (the whole leaf for a retab, the
                 // half-leaf for a split).
-                const DockHit over = dock_hit(resolved, in.mouse_x,
-                                              in.mouse_y, kDockDropBandPx);
+                const DockHit over = dock_hit(resolved, ptr.x,
+                                              ptr.y, kDockDropBandPx);
                 const Rect preview = drop_preview_rect(resolved, over);
                 if (preview.width > 0.0f && preview.height > 0.0f) {
                     r2d::draw_quad(preview.x, preview.y, preview.width,
@@ -1657,6 +1721,7 @@ void AppShell::draw_floating(GuiContext& gui, LayoutCursor& layout,
                              const ChromeTheme& theme, const Rect& bounds,
                              const DockTree::Layout& resolved) {
     const ws::input::InputFrame& in = gui.input();
+    const DockPointer ptr = dock_pointer(in);
     const std::vector<FloatingPanel>& windows = panel_host_.floating();
     if (windows.empty() && !float_drag_.active) {
         return;  // nothing torn off, nothing dragging
@@ -1673,9 +1738,9 @@ void AppShell::draw_floating(GuiContext& gui, LayoutCursor& layout,
     // The press's raise + focus: the TOPMOST window under the pointer
     // (the z walk, back to front - a press on an overlap must pick
     // exactly one window, the one the eye sees on top).
-    if (in.mouse_present && in.mouse_pressed[0]) {
+    if (ptr.pressed) {
         for (std::size_t i = windows.size(); i-- > 0;) {
-            if (point_in(seat(windows[i]), in.mouse_x, in.mouse_y)) {
+            if (point_in(seat(windows[i]), ptr.x, ptr.y)) {
                 panel_host_.raise_floating(windows[i].panel);
                 panel_host_.activate(panel_registry_, windows[i].panel);
                 break;
@@ -1689,7 +1754,7 @@ void AppShell::draw_floating(GuiContext& gui, LayoutCursor& layout,
     // window: a held click paints nothing.
     if (float_drag_.active && float_drag_.dragging &&
         !float_drag_.resizing) {
-        const DockHit over = dock_hit(resolved, in.mouse_x, in.mouse_y,
+        const DockHit over = dock_hit(resolved, ptr.x, ptr.y,
                                       kDockDropBandPx);
         const Rect preview = drop_preview_rect(resolved, over);
         if (preview.width > 0.0f && preview.height > 0.0f) {
@@ -1747,13 +1812,13 @@ void AppShell::draw_floating(GuiContext& gui, LayoutCursor& layout,
         // window is just the raise + focus the press already did.
         const gui::WidgetId bar_id = gui.ids().id("shell.float.bar");
         const gui::HitTest bar_hit = gui.hit_test(bar_id, bar);
-        if (bar_hit.pressed && in.mouse_pressed[0] && !float_drag_.active &&
-            !tab_drag_.armed && !point_in(close_rect, in.mouse_x, in.mouse_y)) {
+        if (bar_hit.pressed && ptr.pressed && !float_drag_.active &&
+            !tab_drag_.armed && !point_in(close_rect, ptr.x, ptr.y)) {
             float_drag_.active = true;
             float_drag_.resizing = false;
             float_drag_.panel = panel;
-            float_drag_.grab_x = in.mouse_x;
-            float_drag_.grab_y = in.mouse_y;
+            float_drag_.grab_x = ptr.x;
+            float_drag_.grab_y = ptr.y;
             float_drag_.base_x = rect.x;
             float_drag_.base_y = rect.y;
             float_drag_.start = rect;
@@ -1812,15 +1877,20 @@ void AppShell::draw_floating(GuiContext& gui, LayoutCursor& layout,
 
         // The resize grip: the bottom-right corner, three diagonal
         // strokes. A press there arms the resize; the drag frame below
-        // grows the rect by the pointer's delta.
+        // grows the rect by the pointer's delta. The grip's own reach
+        // grows for a finger through the shape's pad - the corner is
+        // the smallest target the dock ships, and the smallest mouse
+        // luxury a touch build can keep.
         const gui::WidgetId grip_id = gui.ids().id("shell.float.grip");
-        const gui::HitTest grip_hit = gui.hit_test(grip_id, grip);
-        if (grip_hit.pressed && in.mouse_pressed[0] && !float_drag_.active) {
+        gui::HitShape grip_shape;
+        grip_shape.pad = ptr.touch ? kSplitterTouchPad : 0.0f;
+        const gui::HitTest grip_hit = gui.hit_test(grip_id, grip, grip_shape);
+        if (grip_hit.pressed && ptr.pressed && !float_drag_.active) {
             float_drag_.active = true;
             float_drag_.resizing = true;
             float_drag_.panel = panel;
-            float_drag_.grab_x = in.mouse_x;
-            float_drag_.grab_y = in.mouse_y;
+            float_drag_.grab_x = ptr.x;
+            float_drag_.grab_y = ptr.y;
             float_drag_.base_x = rect.x;
             float_drag_.base_y = rect.y;
             float_drag_.start = rect;
@@ -1870,15 +1940,18 @@ void AppShell::draw_floating(GuiContext& gui, LayoutCursor& layout,
     // click never moves the window - the raise + focus the press did
     // is the whole click), and the release decides the home - over a
     // leaf, back into the tree; anywhere else, the floating rect the
-    // move already left behind.
+    // move already left behind. The threshold is the pointer's own
+    // (the tab drag's rule): a mouse's jiggle radius, a finger's
+    // slop - a tap on the bar is the raise, never a dock.
+    const float float_arm_px = ptr.touch ? kTouchDragPx : kTabDragPx;
     if (!float_drag_.active) {
         return;
     }
-    if (in.mouse_present && in.mouse_down[0]) {
-        const float dx = in.mouse_x - float_drag_.grab_x;
-        const float dy = in.mouse_y - float_drag_.grab_y;
+    if (ptr.present && ptr.down) {
+        const float dx = ptr.x - float_drag_.grab_x;
+        const float dy = ptr.y - float_drag_.grab_y;
         if (!float_drag_.dragging &&
-            dx * dx + dy * dy >= kTabDragPx * kTabDragPx) {
+            dx * dx + dy * dy >= float_arm_px * float_arm_px) {
             float_drag_.dragging = true;
         }
         if (!float_drag_.dragging) {
@@ -1902,7 +1975,7 @@ void AppShell::draw_floating(GuiContext& gui, LayoutCursor& layout,
     if (float_drag_.dragging && !float_drag_.resizing) {
         DockTree& dock = panel_host_.dock();
         const std::string zoomed{dock.maximized()};
-        const DockHit drop = dock_hit(resolved, in.mouse_x, in.mouse_y,
+        const DockHit drop = dock_hit(resolved, ptr.x, ptr.y,
                                       kDockDropBandPx);
         if (drop.leaf >= 0) {
             DockPlacement placement;
