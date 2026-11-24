@@ -31,11 +31,21 @@ struct SurfaceSource {
 // `bindless_descriptor_limit` slots, and reports what landed via
 // descriptor_indexing() - a miss is the documented chunked fallback,
 // never a failure.
+//
+// `want_msaa` (Phase 4) carries the multisample request to the
+// swapchain: an MSAA-rendered pass (color+depth sampled, a resolve
+// subpass target) instead of the single-sample one. It is a REQUEST -
+// the sample count is chosen from the device's own limits
+// (choose_sample_count, swapchain_choice.h: 8, 4, 2, else 1) and read
+// back through Swapchain::sample_count(); a device that supports none
+// of the useful counts silently runs the single-sample pass, the same
+// degrade-never-fail shape.
 struct DeviceOptions {
     const char* application_name = "ws";  // read once, during init()
     bool enable_validation = false;  // opt-in; warns + runs without when the SDK is absent
     bool want_bindless = false;
     uint32_t bindless_descriptor_limit = 0;  // sampled-image slots the table must cover
+    bool want_msaa = false;  // opt-in MSAA pass; count from limits, 1-bit fallback
 };
 
 // The probe's answer: what the device can actually do.
@@ -104,6 +114,9 @@ struct ImageDesc {
     uint32_t format = 0;  // VkFormat
     uint32_t usage = 0;   // VkImageUsageFlags
     uint32_t mip_levels = 1;
+    uint32_t samples = 1;  // VkSampleCountFlagBits, numeric (Phase 4: the
+                            // MSAA color/depth targets; 1 is every image
+                            // create_image ever made before them)
 };
 
 // create_image's answer: the device-local image plus its allocation pair

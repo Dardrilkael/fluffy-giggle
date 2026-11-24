@@ -185,6 +185,10 @@ struct App::Impl {
     // semaphores - behind gfx::Swapchain's opaque handles; the accessors
     // below are this file's unwrap point for its per-swapchain state.
     gfx::Swapchain swapchain_;
+    // Phase 4: the MSAA opt-in read once in init_gpu (WS_UI_MSAA), fed
+    // to both the DeviceOptions and the swapchain create below - one
+    // member so the two reads cannot drift.
+    bool want_msaa_ = false;
     // A resize (the WindowResizeEvent path) or Vulkan itself
     // (out-of-date/suboptimal at acquire or present) raised this: the
     // loop top recreates the swapchain before the next frame. There is
@@ -512,6 +516,14 @@ struct App::Impl {
             validation_env != nullptr && std::string_view(validation_env) != "0";
         options.want_bindless = true;
         options.bindless_descriptor_limit = r2d::batch::kMaxBindlessTextures;
+        // Phase 4: MSAA behind the same env opt-in shape (an app-level
+        // request, not gfx's business - the count itself is the device's
+        // own answer, walked from the limits by gfx's chooser and read
+        // back through the swapchain).
+        const char* msaa_env = env_probe("WS_UI_MSAA");
+        options.want_msaa =
+            msaa_env != nullptr && std::string_view(msaa_env) != "0";
+        want_msaa_ = options.want_msaa;  // carried to the swapchain create
 
         const core::Status started = gpu_.init(source, options);
         if (!started) {
@@ -582,7 +594,8 @@ struct App::Impl {
         // at init), so only format drift matters - it rebuilds the pipeline.
         // A plain resize is render-pass compatible - the viewport and
         // scissor are dynamic and arrive per flush.
-        if (!renderer2d_.on_swapchain_recreated(render_pass(), format())) {
+        if (!renderer2d_.on_swapchain_recreated(render_pass(), format(),
+                                                swapchain_.sample_count())) {
             return false;
         }
         return true;
@@ -601,7 +614,11 @@ struct App::Impl {
         info.RenderPass = render_pass();
         info.MinImageCount = kMinImageCount;  // never changes: the backend cannot
         info.ImageCount = swapchain_.image_count();  // update it after init
-        info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+        // Phase 4: the backend's pipeline must match the pass's sample
+        // count like every other pipeline (VK_SAMPLE_COUNT_1_BIT when
+        // MSAA is off or unsupported - the swapchain's own answer).
+        info.MSAASamples =
+            static_cast<VkSampleCountFlagBits>(swapchain_.sample_count());
         info.CheckVkResultFn = &imgui_vk_check;
         if (!ImGui_ImplVulkan_Init(&info)) {
             core::error("ui: ImGui Vulkan backend failed to initialize");
@@ -997,10 +1014,17 @@ struct App::Impl {
         // The window stage's presentation half: the swapchain (with the
         // render pass + framebuffers it carries) against the Gpu the
         // surface attach above brought up. A failure cleans up after
-        // itself inside gfx - the Status carries the diagnostic.
+        // itself inside gfx - the Status carries the diagnostic. The
+        // MSAA opt-in rides the same options the DeviceOptions flag fed
+        // (want_msaa survives device selection; the swapchain's own
+        // copy decides the pass shape - see SwapchainOptions).
         core::warn("ui: creating swapchain...");
-        const core::Status created =
-            swapchain_.create(gpu_, fb_width, fb_height, {config.vsync});
+        gfx::SwapchainOptions swapchain_options{};
+        swapchain_options.vsync = config.vsync;
+        swapchain_options.want_msaa = want_msaa_;
+        const core::Status created = swapchain_.create(gpu_, fb_width,
+                                                       fb_height,
+                                                       swapchain_options);
         core::warn("ui: swapchain.create() returned {}", created.has_value());
         if (!created) {
             core::log_error(created.error());
@@ -1024,7 +1048,7 @@ struct App::Impl {
             core::warn("ui: calling renderer2d_.init()");
             if (!renderer2d_.init(device(), physical_device(), gpu_, queue(),
                                   queue_family(), render_pass(), format(),
-                                  texture_tier_)) {
+                                  texture_tier_, swapchain_.sample_count())) {
                 core::warn("ui: renderer2d_.init() failed");
                 return false;
             }

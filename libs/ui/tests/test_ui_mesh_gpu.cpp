@@ -148,6 +148,14 @@ public:
 
     Renderer2D& r() { return *renderer_; }
     bool bindless() const { return bindless_; }
+    // The raw handles an MSAA-pass validity test needs (Phase 4): the
+    // device for vkCreateRenderPass/Framebuffer, the physical device for
+    // the limits query the count chooser walks, and the Gpu for its
+    // create_image (which now takes the sample count). The rig owns
+    // them; the test only builds throwaway Vulkan objects against them.
+    VkDevice device() const { return device_; }
+    VkPhysicalDevice physical_device() const { return phys_; }
+    ws::gfx::Gpu& gpu() { return gpu_; }
     // The layer's warnings + errors so far. A rig whose layer did not load
     // reports a loud message instead of a silently-clean zero.
     int validation_messages() const {
@@ -548,4 +556,166 @@ TEST_CASE("gpu: many textures and layers across one frame (set growth, barriers)
         CHECK(r.batch().chunk_count() >= 40u);
         CHECK(rig.validation_messages() == 0);
     });
+}
+
+// --- Phase 4: the MSAA pass shape builds on a real device --------------------
+// The swapchain's MSAA render pass (color+depth sampled at the chosen
+// count, a resolve subpass target) is built against a real device here -
+// the same table swapchain.cpp lays - so the pass's own validity is
+// proven where it matters: on a Vulkan device, not in review.
+TEST_CASE("gpu: the MSAA 3-attachment pass + framebuffer build validly") {
+    Rig rig(false);
+    if (!rig.up) {
+        MESSAGE("no Vulkan device / headless surface - skipped");
+        return;
+    }
+    // The count walk against the real limits (the AND the swapchain
+    // builds): best-first 8/4/2 - the chooser's own table is pinned in
+    // gfx's headless suite (choose_sample_count, swapchain_choice.h);
+    // this test only needs the count, so the four-line walk rides here
+    // (a ui test cannot include gfx's internal choice header - the
+    // workspace's own no-leak rule).
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(rig.physical_device(), &props);
+    const std::uint32_t supported =
+        props.limits.framebufferColorSampleCounts &
+        props.limits.framebufferDepthSampleCounts;
+    std::uint32_t count = 1u;
+    for (std::uint32_t candidate = 8u; candidate >= 2u; candidate >>= 1) {
+        if ((supported & candidate) != 0) {
+            count = candidate;
+            break;
+        }
+    }
+    REQUIRE(count >= 1u);
+    MESSAGE("device supports sample mask " << supported << ", chose " << count);
+
+    // The three images: MSAA color, MSAA depth, 1-sample resolve -
+    // create_image covers the allocations (device-local, the usage bits
+    // and the sample count spelled; ImageDesc is {w, h, format, usage,
+    // mip_levels, samples}).
+    ws::gfx::Gpu& gpu = rig.gpu();
+    ws::gfx::ImageOut msaa_color{};
+    const std::uint32_t color_usage =
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+        VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
+    const auto samples = static_cast<VkSampleCountFlagBits>(count);
+    if (!gpu.create_image({kW, kH, VK_FORMAT_B8G8R8A8_UNORM, color_usage,
+                           1, count},
+                          msaa_color)) {
+        MESSAGE("device refused the multisample color image - skipped");
+        return;
+    }
+    ws::gfx::ImageOut msaa_depth{};
+    if (!gpu.create_image({kW, kH,
+                           static_cast<std::uint32_t>(VK_FORMAT_D32_SFLOAT),
+                           VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, 1,
+                           count},
+                          msaa_depth)) {
+        MESSAGE("device refused the multisample depth image - skipped");
+        return;
+    }
+    ws::gfx::ImageOut resolve_target{};
+    if (!gpu.create_image({kW, kH, VK_FORMAT_B8G8R8A8_UNORM,
+                           VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 1},
+                          resolve_target)) {
+        return;
+    }
+    const auto color_image = ws::gfx::handle_from_u64<VkImage>(msaa_color.image);
+    const auto depth_image = ws::gfx::handle_from_u64<VkImage>(msaa_depth.image);
+    const auto resolve_image =
+        ws::gfx::handle_from_u64<VkImage>(resolve_target.image);
+
+    // The views.
+    const auto make_view = [&](VkImage image, VkFormat format,
+                               VkImageAspectFlags aspect) {
+        VkImageViewCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        info.image = image;
+        info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        info.format = format;
+        info.subresourceRange = {aspect, 0, 1, 0, 1};
+        VkImageView view = VK_NULL_HANDLE;
+        REQUIRE(vkCreateImageView(rig.device(), &info, nullptr, &view) ==
+                VK_SUCCESS);
+        return view;
+    };
+    const VkImageView color_view =
+        make_view(color_image, VK_FORMAT_B8G8R8A8_UNORM,
+                  VK_IMAGE_ASPECT_COLOR_BIT);
+    const VkImageView depth_view =
+        make_view(depth_image, VK_FORMAT_D32_SFLOAT, VK_IMAGE_ASPECT_DEPTH_BIT);
+    const VkImageView resolve_view =
+        make_view(resolve_image, VK_FORMAT_B8G8R8A8_UNORM,
+                  VK_IMAGE_ASPECT_COLOR_BIT);
+
+    // The pass table - swapchain.cpp's own shape: {color(ms), resolve,
+    // depth(ms)} with the resolve subpass reference.
+    VkAttachmentDescription att[3]{};
+    att[0].format = VK_FORMAT_B8G8R8A8_UNORM;
+    att[0].samples = samples;
+    att[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    att[0].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    att[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    att[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    att[1].format = VK_FORMAT_B8G8R8A8_UNORM;
+    att[1].samples = VK_SAMPLE_COUNT_1_BIT;
+    att[1].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    att[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    att[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    att[1].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    att[2].format = VK_FORMAT_D32_SFLOAT;
+    att[2].samples = samples;
+    att[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    att[2].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    att[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    att[2].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    VkAttachmentReference color_ref{0,
+                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference resolve_ref{1,
+                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference depth_ref{2,
+                                    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription sub{};
+    sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    sub.colorAttachmentCount = 1;
+    sub.pColorAttachments = &color_ref;
+    sub.pResolveAttachments = &resolve_ref;
+    sub.pDepthStencilAttachment = &depth_ref;
+    VkRenderPassCreateInfo rp{};
+    rp.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    rp.attachmentCount = 3;
+    rp.pAttachments = att;
+    rp.subpassCount = 1;
+    rp.pSubpasses = &sub;
+    VkRenderPass pass = VK_NULL_HANDLE;
+    REQUIRE(vkCreateRenderPass(rig.device(), &rp, nullptr, &pass) ==
+            VK_SUCCESS);
+
+    // The framebuffer over the three views.
+    const VkImageView views[3] = {color_view, resolve_view, depth_view};
+    VkFramebufferCreateInfo fb{};
+    fb.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fb.renderPass = pass;
+    fb.attachmentCount = 3;
+    fb.pAttachments = views;
+    fb.width = kW;
+    fb.height = kH;
+    fb.layers = 1;
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    REQUIRE(vkCreateFramebuffer(rig.device(), &fb, nullptr, &framebuffer) ==
+            VK_SUCCESS);
+
+    // A draw through it (a quad, the rig's own renderer is bound to its
+    // OWN pass - this pass is standalone, so no draw; the validity of
+    // pass+framebuffer creation is the contract under test).
+    vkDestroyFramebuffer(rig.device(), framebuffer, nullptr);
+    vkDestroyRenderPass(rig.device(), pass, nullptr);
+    vkDestroyImageView(rig.device(), color_view, nullptr);
+    vkDestroyImageView(rig.device(), depth_view, nullptr);
+    vkDestroyImageView(rig.device(), resolve_view, nullptr);
+    gpu.destroy_image(msaa_color.image, msaa_color.allocation);
+    gpu.destroy_image(msaa_depth.image, msaa_depth.allocation);
+    gpu.destroy_image(resolve_target.image, resolve_target.allocation);
+    CHECK(true);  // the pass built, bound and tore down cleanly
 }

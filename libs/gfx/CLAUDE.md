@@ -125,6 +125,21 @@ ABI-class rule above.
   stages) are what make the single shared depth image safe across
   frames in flight. `wait_frames()` waits every slot fence — the
   consumer's dev-only pipeline-rebake drain seam.
+- **MSAA (Phase 4)**: `SwapchainOptions.want_msaa` (fed from
+  `DeviceOptions.want_msaa`, an app opt-in) renders into a multisample
+  color+depth pair and resolves to the swapchain image — the pass
+  becomes `{color(ms), resolve, depth(ms)}` with the resolve subpass
+  reference; the flag-off shape stays the classic two-attachment pass
+  verbatim. The count is `choose_sample_count` (swapchain_choice.h)
+  walking the limits' AND of framebufferColor/DepthSampleCounts
+  best-first 8/4/2 with the 1-bit fallback — a device that supports
+  none of them runs single-sample, never a failure. The answer crosses
+  through `sample_count()` so the consumer's pipelines match it, and
+  count drift rides the same pipeline-rebuild path format drift does.
+  The MSAA color target is `TRANSIENT_ATTACHMENT` (tile memory, lazily
+  allocated, never leaves the GPU). `Gpu::create_image` takes the
+  sample count through `ImageDesc.samples` (1 = every image it made
+  before Phase 4).
 - **Choices**: the decision tables live in `src/swapchain_choice.h` as
   pure Vulkan-free helpers — surface format (the first preferred format
   offered in the required color space, else the surface's first entry),

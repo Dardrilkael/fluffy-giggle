@@ -122,6 +122,10 @@ core::Status Gpu::create_image(const ImageDesc& desc, ImageOut& out) const {
         return core::fail(kErrInvalid, "gfx",
                           "image create with zero mip levels");
     }
+    if (desc.samples == 0) {
+        return core::fail(kErrInvalid, "gfx",
+                          "image create with a zero sample count");
+    }
     const VmaAllocator alloc = static_cast<VmaAllocator>(allocator());
     if (alloc == nullptr) {
         return core::fail(kErrOrder, "gfx",
@@ -131,7 +135,9 @@ core::Status Gpu::create_image(const ImageDesc& desc, ImageOut& out) const {
     // (AUTO with no host flags lands device-local in practice). The
     // boilerplate below is every texture's - one layer, one sample,
     // optimal tiling, exclusive, starting undefined - except the mip
-    // count, which is the descriptor's.
+    // count and (Phase 4) the sample count, which are the
+    // descriptor's (an MSAA render target is the same shape at n
+    // samples; 1 is every image create_image made before them).
     VkImageCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     info.imageType = VK_IMAGE_TYPE_2D;
@@ -141,7 +147,7 @@ core::Status Gpu::create_image(const ImageDesc& desc, ImageOut& out) const {
     info.extent.depth = 1;
     info.mipLevels = desc.mip_levels;
     info.arrayLayers = 1;
-    info.samples = VK_SAMPLE_COUNT_1_BIT;
+    info.samples = static_cast<VkSampleCountFlagBits>(desc.samples);
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
     info.usage = desc.usage;
     info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;

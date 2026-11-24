@@ -202,13 +202,18 @@ public:
     bool init(VkDevice device, VkPhysicalDevice physical_device,
               const gfx::Gpu& gpu, VkQueue queue, uint32_t queue_family,
               VkRenderPass render_pass, VkFormat format,
-              const TextureTier& tier);
+              const TextureTier& tier,
+              uint32_t sample_count = 1u);
     // Swapchain drift. The per-frame-slot resources are swapchain-
     // independent, so only format drift matters: it rebuilds the pipeline (a
     // same-format resize needs nothing - that is the render-pass
     // compatibility the ImGui backend relies on). Extents are per-flush
-    // (dynamic viewport/scissor).
-    bool on_swapchain_recreated(VkRenderPass render_pass, VkFormat format);
+    // (dynamic viewport/scissor). Phase 4: sample-count drift (an MSAA
+    // request that lands a different count on the rebuilt swapchain)
+    // rides the same rebuild as the format - the pipelines must always
+    // match the pass they draw into.
+    bool on_swapchain_recreated(VkRenderPass render_pass, VkFormat format,
+                                uint32_t sample_count = 1u);
     // Dev-only (WS_UI_DEV_SHADER_RELOAD): destroys both pipelines and
     // rebakes them from the provider's current words. Call only after every
     // in-flight frame retired - the shell waits its frame-slot fences, which
@@ -613,6 +618,11 @@ private:
 
     VkRenderPass render_pass_ = VK_NULL_HANDLE;  // last seen (rebuild input)
     VkFormat format_ = VK_FORMAT_UNDEFINED;     // drift sentinel
+    // Phase 4: the pass's sample count (VkSampleCountFlagBits numeric;
+    // 1 = the classic single-sample pass). Every pipeline's
+    // rasterizationSamples reads it, and on_swapchain_recreated treats a
+    // change as the same rebuild-worthy drift the format is.
+    uint32_t sample_count_ = 1u;
 
     VkSampler sampler_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;  // the tier's layout

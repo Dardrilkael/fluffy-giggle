@@ -67,6 +67,7 @@ constexpr std::int32_t kErrDepthImage = 405;      // vmaCreateImage (depth)
 constexpr std::int32_t kErrRenderPass = 406;      // vkCreateRenderPass
 constexpr std::int32_t kErrFramebuffer = 407;     // vkCreateFramebuffer
 constexpr std::int32_t kErrSlotObjects = 408;      // pool/buffer/fence/semaphore
+constexpr std::int32_t kErrMsaaImage = 409;        // Phase 4: the multisample target
 
 // Swapchain format preference, most preferred first (VkFormat values as
 // plain uint32 for the Vulkan-free choice helper, swapchain_choice.h).
@@ -128,6 +129,19 @@ struct Swapchain::Impl {
     VkImage depth_image = VK_NULL_HANDLE;
     VmaAllocation depth_allocation = VK_NULL_HANDLE;
     VkImageView depth_view = VK_NULL_HANDLE;
+    // Phase 4 (MSAA): the multisample color target the subpass renders
+    // into (extent == color; VMA owns the image, the view is ours) and
+    // the sample count chosen from the device limits (1 when the flag
+    // is off or nothing useful is supported - the single-sample pass
+    // below renders unchanged, no resolve attachment, no extra image).
+    // The swapchain images become the pass's RESOLVE targets: same
+    // extent, same format, single-sample - the framebuffers bind all
+    // three views and the pass's resolve subpass lands the averaged
+    // pixels into the presentable image at end of render.
+    VkImage msaa_image = VK_NULL_HANDLE;
+    VmaAllocation msaa_allocation = VK_NULL_HANDLE;
+    VkImageView msaa_view = VK_NULL_HANDLE;
+    VkSampleCountFlagBits sample_count = VK_SAMPLE_COUNT_1_BIT;
     std::vector<VkFramebuffer> framebuffers;
     std::array<FrameSlot, kMaxFramesInFlight> frame_slots{};
     // Render-finished semaphores are per IMAGE, not per slot: the present
@@ -340,22 +354,113 @@ core::Status Swapchain::Impl::build(int fb_width, int fb_height) {
         return core::fail(kErrView, "gfx", "vkCreateImageView (depth) failed");
     }
 
+    // --- Phase 4: the sample-count decision, before any pass geometry ---
+    // A pass that samples BOTH the color and depth attachments only runs
+    // at a count both support, so the mask is the limits' AND. The pure
+    // chooser (swapchain_choice.h) walks 8/4/2 against it, flag-gated -
+    // a count the flag could not get is the device's own answer, not an
+    // error (the bindless probe's shape). The depth image above was
+    // created at 1 sample: an MSAA pass needs it at the chosen count, so
+    // it is destroyed and recreated when the count is useful.
+    VkPhysicalDeviceProperties device_properties{};
+    vkGetPhysicalDeviceProperties(physical(), &device_properties);
+    const VkPhysicalDeviceLimits& limits = device_properties.limits;
+    const uint32_t supported =
+        limits.framebufferColorSampleCounts & limits.framebufferDepthSampleCounts;
+    const uint32_t chosen_count = choose_sample_count(
+        options.want_msaa, supported,
+        static_cast<uint32_t>(VK_SAMPLE_COUNT_1_BIT));
+    sample_count = static_cast<VkSampleCountFlagBits>(chosen_count);
+    const bool msaa =
+        chosen_count != static_cast<uint32_t>(VK_SAMPLE_COUNT_1_BIT);
+    if (msaa) {
+        // The depth attachment recreated at the pass's count (the pass
+        // samples it; the 1-sample image above was the flag-off shape).
+        if (depth_image != VK_NULL_HANDLE) {
+            vmaDestroyImage(allocator(), depth_image, depth_allocation);
+            depth_image = VK_NULL_HANDLE;
+            depth_allocation = VK_NULL_HANDLE;
+        }
+        VkImageCreateInfo depth_msaa_info = depth_info;
+        depth_msaa_info.samples = sample_count;
+        VmaAllocationCreateInfo depth_msaa_alloc{};
+        depth_msaa_alloc.usage = VMA_MEMORY_USAGE_AUTO;
+        if (vmaCreateImage(allocator(), &depth_msaa_info, &depth_msaa_alloc,
+                           &depth_image, &depth_allocation, nullptr) !=
+            VK_SUCCESS) {
+            return core::fail(kErrDepthImage, "gfx",
+                              "vmaCreateImage (depth, msaa) failed");
+        }
+        // The MSAA color target: extent == color, format == color,
+        // samples == the chosen count, one view. The swapchain images
+        // keep their single-sample views - they become the pass's
+        // RESOLVE targets, written by the resolve at end of subpass and
+        // read at present. TRANSIENT keeps the tile memory lazily
+        // allocated (the image never leaves the GPU).
+        VkImageCreateInfo msaa_info{};
+        msaa_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        msaa_info.imageType = VK_IMAGE_TYPE_2D;
+        msaa_info.format = format;
+        msaa_info.extent.width = extent.width;
+        msaa_info.extent.height = extent.height;
+        msaa_info.extent.depth = 1;
+        msaa_info.mipLevels = 1;
+        msaa_info.arrayLayers = 1;
+        msaa_info.samples = sample_count;
+        msaa_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        msaa_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                           VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
+        VmaAllocationCreateInfo msaa_alloc{};
+        msaa_alloc.usage = VMA_MEMORY_USAGE_AUTO;
+        if (vmaCreateImage(allocator(), &msaa_info, &msaa_alloc, &msaa_image,
+                           &msaa_allocation, nullptr) != VK_SUCCESS) {
+            return core::fail(kErrMsaaImage, "gfx", "vmaCreateImage (msaa) failed");
+        }
+        VkImageViewCreateInfo msaa_view_info{};
+        msaa_view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        msaa_view_info.image = msaa_image;
+        msaa_view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        msaa_view_info.format = format;
+        msaa_view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        msaa_view_info.subresourceRange.levelCount = 1;
+        msaa_view_info.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(device(), &msaa_view_info, nullptr, &msaa_view) !=
+            VK_SUCCESS) {
+            return core::fail(kErrView, "gfx", "vkCreateImageView (msaa) failed");
+        }
+    }
+
     VkAttachmentDescription color{};
     color.format = format;
-    color.samples = VK_SAMPLE_COUNT_1_BIT;
+    color.samples = sample_count;
     color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    color.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    // The resolve target: the swapchain image, single-sample, presented
+    // after the pass. DONT_CARE ops (the resolve writes it, nothing
+    // loads), UNDEFINED initial (the resolve is the first write), and
+    // PRESENT as the final layout - the one the presentation engine
+    // reads.
+    VkAttachmentDescription resolve{};
+    resolve.format = format;
+    resolve.samples = VK_SAMPLE_COUNT_1_BIT;
+    resolve.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    resolve.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    resolve.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    resolve.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    resolve.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    resolve.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
     // Cleared to 1.0 each frame, never read after the pass (only the
     // subpass's own test/write touches it) - DONT_CARE keeps the store
     // free, and the pass's UNDEFINED transition puts it into layout.
     VkAttachmentDescription depth{};
     depth.format = depth_format();
-    depth.samples = VK_SAMPLE_COUNT_1_BIT;
+    depth.samples = sample_count;
     depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     depth.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -364,15 +469,29 @@ core::Status Swapchain::Impl::build(int fb_width, int fb_height) {
     depth.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     VkAttachmentReference color_ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkAttachmentReference depth_ref{1,
-                                    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    // depth_ref's INDEX differs per shape: slot 2 in the MSAA table
+    // (color 0, resolve 1, depth 2), slot 1 in the classic two-slot
+    // pass. One reference per shape, spelled below beside the tables.
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &color_ref;
-    subpass.pDepthStencilAttachment = &depth_ref;
+    VkAttachmentReference resolve_ref{1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference depth_ref_msaa{2,
+                                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference depth_ref_plain{
+        1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    subpass.pDepthStencilAttachment =
+        msaa ? &depth_ref_msaa : &depth_ref_plain;
+    subpass.pResolveAttachments = msaa ? &resolve_ref : nullptr;
 
-    VkAttachmentDescription attachments[2] = {color, depth};
+    VkAttachmentDescription attachments_msaa[3] = {color, resolve, depth};
+    VkAttachmentDescription attachments_plain[2] = {color, depth};
+    attachments_plain[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments_plain[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    VkAttachmentDescription* const attachment_table =
+        msaa ? attachments_msaa : attachments_plain;
+    const uint32_t attachment_count = msaa ? 3u : 2u;
 
     // External dependencies, the frames-in-flight contract spelled out
     // for the driver. Without them the pass is a WAW hazard: consecutive
@@ -414,8 +533,8 @@ core::Status Swapchain::Impl::build(int fb_width, int fb_height) {
 
     VkRenderPassCreateInfo render_pass_info{};
     render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    render_pass_info.attachmentCount = 2;
-    render_pass_info.pAttachments = attachments;
+    render_pass_info.attachmentCount = attachment_count;
+    render_pass_info.pAttachments = attachment_table;
     render_pass_info.subpassCount = 1;
     render_pass_info.pSubpasses = &subpass;
     render_pass_info.dependencyCount = 2;
@@ -427,14 +546,19 @@ core::Status Swapchain::Impl::build(int fb_width, int fb_height) {
 
     framebuffers.resize(image_count);
     for (uint32_t i = 0; i < image_count; ++i) {
-        // Every framebuffer pairs its color view with the one depth
-        // view - the pass has two attachments, so each must supply both.
-        VkImageView framebuffer_views[2] = {views[i], depth_view};
+        // Every framebuffer binds the pass's attachments in table order:
+        // the multisample color target and the resolve view (the
+        // swapchain image's own view) in the MSAA shape, or the classic
+        // color-plus-depth pair at one sample - the table's own count.
+        VkImageView framebuffer_views_msaa[3] = {msaa_view, views[i],
+                                                 depth_view};
+        VkImageView framebuffer_views_plain[2] = {views[i], depth_view};
         VkFramebufferCreateInfo framebuffer_info{};
         framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         framebuffer_info.renderPass = render_pass;
-        framebuffer_info.attachmentCount = 2;
-        framebuffer_info.pAttachments = framebuffer_views;
+        framebuffer_info.attachmentCount = attachment_count;
+        framebuffer_info.pAttachments =
+            msaa ? framebuffer_views_msaa : framebuffer_views_plain;
         framebuffer_info.width = extent.width;
         framebuffer_info.height = extent.height;
         framebuffer_info.layers = 1;
@@ -534,6 +658,12 @@ void Swapchain::Impl::destroy_objects() {
             // every window-stage teardown, including this one.
             vmaDestroyImage(allocator(), depth_image, depth_allocation);
         }
+        if (msaa_view != VK_NULL_HANDLE) {
+            vkDestroyImageView(device(), msaa_view, nullptr);
+        }
+        if (msaa_image != VK_NULL_HANDLE) {
+            vmaDestroyImage(allocator(), msaa_image, msaa_allocation);
+        }
         if (swapchain != VK_NULL_HANDLE) {
             vkDestroySwapchainKHR(device(), swapchain, nullptr);
         }
@@ -549,6 +679,9 @@ void Swapchain::Impl::destroy_objects() {
     depth_view = VK_NULL_HANDLE;
     depth_image = VK_NULL_HANDLE;
     depth_allocation = VK_NULL_HANDLE;
+    msaa_view = VK_NULL_HANDLE;
+    msaa_image = VK_NULL_HANDLE;
+    msaa_allocation = VK_NULL_HANDLE;
     render_pass = VK_NULL_HANDLE;
     swapchain = VK_NULL_HANDLE;
     image_count = 0;
@@ -794,6 +927,10 @@ uint32_t Swapchain::width() const {
 
 uint32_t Swapchain::height() const {
     return impl_->extent.height;
+}
+
+uint32_t Swapchain::sample_count() const {
+    return static_cast<uint32_t>(impl_->sample_count);  // VkSampleCountFlagBits, numeric
 }
 
 }  // namespace ws::gfx

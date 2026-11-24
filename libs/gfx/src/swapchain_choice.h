@@ -112,4 +112,31 @@ inline uint32_t choose_composite_alpha(uint32_t supported_bits, uint32_t opaque_
     return opaque_bit;
 }
 
+// The MSAA sample-count choice (Phase 4): the render pass's `samples`
+// bits and every pipeline's rasterizationSamples share the one answer.
+// `want_msaa` is the opt-in flag (SwapchainOptions, fed from
+// DeviceOptions); `supported_bits` is the device's limits mask, ANDed
+// from framebufferColorSampleCounts | framebufferDepthSampleCounts - a
+// pass that samples BOTH attachments only runs at a count both sides
+// support. The walk is best-first (8, 4, 2) with the one-bit fallback:
+// the count the flag could not get is not an error, it is the device's
+// own answer (the bindless probe's degrade-never-fail shape). Flag off
+// answers the one bit directly - no query needed, none made.
+inline uint32_t choose_sample_count(bool want_msaa, uint32_t supported_bits,
+                                    uint32_t one_bit) {
+    if (!want_msaa) {
+        return one_bit;
+    }
+    // VkSampleCountFlagBits' VALUE is the count itself for every useful
+    // count (1 -> 0x1, 2 -> 0x2, 4 -> 0x4, 8 -> 0x8), so the mask's
+    // count bit IS the numeric count. Walk the useful counts high to
+    // low and answer the first whose own value is set in the mask.
+    for (uint32_t count = 8u; count >= 2u; count >>= 1) {
+        if ((supported_bits & count) != 0) {
+            return count;
+        }
+    }
+    return one_bit;
+}
+
 }  // namespace ws::gfx

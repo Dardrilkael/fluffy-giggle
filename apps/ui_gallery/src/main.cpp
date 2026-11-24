@@ -81,6 +81,7 @@
 #include <ws/ui/gui/theme_data.hpp>
 #include <ws/ui/gui/widgets.hpp>
 #include <ws/ui/renderer2d.hpp>
+#include <ws/ui/renderer3d.hpp>
 #include <ws/ui/canvas/canvas2d.hpp>
 #include <ws/ui/canvas/view.hpp>
 
@@ -102,6 +103,7 @@ namespace {
 
 namespace gui = ws::ui::gui;
 namespace canvas = ws::ui::canvas;
+namespace r3d = ws::ui::r3d;
 
 // The past-ASCII carrier faces - the PRIMARY bake is the bundled
 // Inter (load_ui_font below); these stack under it as faces 0/1 so
@@ -258,6 +260,7 @@ enum Section {
     kPlatform,
     kCommands,
     kCanvas,
+    kMeshes,
     kSectionCount
 };
 
@@ -479,6 +482,19 @@ protected:
         sync_chrome();
         install_clipboard(gui_);  // Ctrl+C/X/V in the text inputs
         install_ime_rect(gui_);  // Android soft keyboard for every text field
+        // The r3d meshes page's two meshes (create_mesh = the
+        // load_texture contract: valid from on_setup onward). A create
+        // failure keeps the handles dead and the section's draw gates
+        // on them - the headless stub answers the failures, so the
+        // gallery stays open there too (the page says so in its hint).
+        if (const ws::core::Result<r3d::Mesh> cube =
+                r3d::create_mesh(r3d::generate_cube(1.0f))) {
+            mesh_cube_ = cube.value();
+        }
+        if (const ws::core::Result<r3d::Mesh> sphere =
+                r3d::create_mesh(r3d::generate_sphere(0.7f, 24, 32))) {
+            mesh_sphere_ = sphere.value();
+        }
         // The drain seat: once per frame, between the events and
         // on_update, the shell drains this system - every progress
         // report and completion below lands on the main thread, where
@@ -709,9 +725,124 @@ protected:
         r2d::end();
         r2d::set_layer(0);
         gui_.end_frame();
+
+        // The r3d meshes page's 3D block, still inside this frame's
+        // recording (a begin(Camera3D) block of its own - the mesh
+        // commands weave into the same replay). Dead handles (a
+        // headless stub, a failed create) leave the block drawing
+        // nothing but the viewport's own backdrop quad.
+        draw_mesh_page();
     }
 
 private:
+    // The 3D meshes section's recorded draws (see draw_gallery's
+    // kMeshes section for the knobs and the reserved viewport rect).
+    void draw_mesh_page() {
+        namespace r2d = ws::ui::r2d;
+        namespace r3d = ws::ui::r3d;
+        if (mesh_cube_.id == 0u && mesh_sphere_.id == 0u) {
+            return;  // no meshes ever came up (headless / failed create)
+        }
+        // The shared spin, integrated on the steady clock: the yaw runs
+        // forever at the knob's speed (0 parks it, a negative spins it
+        // back). The first frame seeds the origin.
+        const std::chrono::steady_clock::time_point now =
+            std::chrono::steady_clock::now();
+        if (mesh_clock_.time_since_epoch().count() == 0) {
+            mesh_clock_ = now;
+        }
+        const float dt =
+            std::chrono::duration<float>(now - mesh_clock_).count();
+        mesh_clock_ = now;
+        mesh_yaw_ += dt * mesh_speed_;
+
+        // The viewport's own backdrop: the page's dark panel face, so
+        // the 3D content reads as a page region (the block below rides
+        // the same rect through the camera's look-at).
+        r2d::draw_quad(mesh_view_rect_.x, mesh_view_rect_.y,
+                       mesh_view_rect_.width, mesh_view_rect_.height,
+                       ws::ui::r2d::rgba(14, 16, 22));
+        // The clip keeps the meshes inside the viewport (a rotate-
+        // past-the-edge sphere still composites against the backdrop).
+        r2d::push_clip(mesh_view_rect_.x, mesh_view_rect_.y,
+                       mesh_view_rect_.width, mesh_view_rect_.height);
+
+        // The camera: a perspective block looking down the world's -z
+        // from the -y "up" the 2D space shares (world +y points DOWN
+        // on screen, the r3d doc's own note), parked so the viewport's
+        // center is the look-at target. far_z covers the ring's radius.
+        r2d::Camera3D camera;
+        camera.eye[0] = mesh_view_rect_.x + mesh_view_rect_.width * 0.5f;
+        camera.eye[1] = mesh_view_rect_.y + mesh_view_rect_.height * 0.5f;
+        camera.eye[2] = -6.0f;
+        camera.target[0] = camera.eye[0];
+        camera.target[1] = camera.eye[1];
+        camera.target[2] = 0.0f;
+        r2d::begin(camera);
+
+        // The light, orbiting the scene on the knob's angle: the
+        // direction TO the light turns about world +y, always a bit
+        // overhead so the tops of both rotators catch the term.
+        r3d::Light3D light;
+        light.dir[0] = std::cos(mesh_light_yaw_);
+        light.dir[1] = -0.65f;
+        light.dir[2] = std::sin(mesh_light_yaw_);
+        light.color[0] = light.color[1] = light.color[2] = 1.0f;
+        light.ambient = 0.25f;
+        (void)r3d::set_light(light);
+
+        // The tint pair: solid, or the "x-ray" translucent one (the
+        // known r3d limit spelled live - no OIT, so a translucent tint
+        // still writes depth).
+        const std::uint32_t cube_tint =
+            mesh_wire_ ? ws::ui::r2d::rgba(120, 160, 255, 140)
+                       : ws::ui::r2d::rgba(235, 159, 90);
+        const std::uint32_t sphere_tint =
+            mesh_wire_ ? ws::ui::r2d::rgba(120, 160, 255, 140)
+                       : ws::ui::r2d::rgba(130, 180, 235);
+
+        // The two rotators: the cube spins on all three axes (the
+        // yaw/pitch/roll triple's own demo), the sphere on one (its
+        // smooth normals read the light alone).
+        r3d::Transform3D at_center;
+        at_center.translation[0] = camera.target[0] - 1.6f;
+        at_center.translation[1] = camera.target[1] - 0.5f;
+        at_center.yaw = mesh_yaw_;
+        at_center.pitch = mesh_yaw_ * 0.7f;
+        at_center.roll = mesh_yaw_ * 0.35f;
+        r3d::draw_mesh(mesh_cube_, at_center, {cube_tint, {}});
+        r3d::Transform3D sphere_at;
+        sphere_at.translation[0] = camera.target[0] + 1.6f;
+        sphere_at.translation[1] = camera.target[1] + 0.5f;
+        sphere_at.yaw = mesh_yaw_ * 0.5f;
+        r3d::draw_mesh(mesh_sphere_, sphere_at, {sphere_tint, {}});
+
+        // The instance ring: the SAME cube handle eight times around
+        // the pair, each copy scaled small and banked to face the
+        // center - one recorded draw per copy (the r3d v1 shape: the
+        // instancing is cheap RECORDED draws, not a GPU instance
+        // buffer; the ring is the proof it stays smooth).
+        if (mesh_instances_) {
+            constexpr int kRingCount = 8;
+            constexpr float kRingRadius = 3.4f;
+            constexpr float kRingPhase = 6.2831853f / kRingCount;
+            for (int i = 0; i < kRingCount; ++i) {
+                r3d::Transform3D ring_at;
+                ring_at.translation[0] =
+                    camera.target[0] + kRingRadius * std::cos(i * kRingPhase);
+                ring_at.translation[1] =
+                    camera.target[1] + kRingRadius * std::sin(i * kRingPhase);
+                ring_at.translation[2] = 0.0f;
+                ring_at.scale = 0.22f;
+                ring_at.yaw = -i * kRingPhase;  // face the center
+                ring_at.pitch = mesh_yaw_ * 0.3f + i * kRingPhase * 0.5f;
+                r3d::draw_mesh(mesh_cube_, ring_at, {cube_tint, {}});
+            }
+        }
+
+        r2d::end();     // the camera block
+        r2d::pop_clip();
+    }
     // Opens the shared dialog as the about box (the menu items and the
     // context menu both land here).
     void open_about() {
@@ -1352,6 +1483,27 @@ private:
     canvas::CanvasView canvas_view_{};
     canvas::Renderer2DCanvas canvas_renderer_{};
     float canvas_frame_ms_ = 0.0f;  // the stress test's frame-time readout
+
+    // ---- the 3D meshes page (r3d) ----
+    // Two meshes created once in on_setup (the load_texture contract:
+    // valid from there on): a cube and a sphere, drawn every frame of
+    // the section below. The instance ring reuses the SAME cube handle
+    // eight times - the r3d model is one draw call per copy, so
+    // "instancing" here is eight cheap recorded draws, not a GPU-side
+    // instance buffer (the known v1 shape, spelled in the page's own
+    // hint).
+    r3d::Mesh mesh_cube_{};
+    r3d::Mesh mesh_sphere_{};
+    float mesh_yaw_ = 0.0f;      // the pair's shared spin (radians)
+    float mesh_speed_ = 1.0f;    // the spin knob's value (rad/s)
+    bool mesh_instances_ = true;  // the ring's toggle
+    bool mesh_wire_ = false;      // translucent "x-ray" tint toggle
+    float mesh_light_yaw_ = 0.6f; // the light direction's orbit angle
+    // The viewport the section reserved this frame (the 3D block draws
+    // into it in on_update; a closed section parks it off-screen).
+    gui::Rect mesh_view_rect_{-10000.0f, -10000.0f, 0.0f, 0.0f};
+    // The spin's clock origin (yaw integrates (now - origin) * speed).
+    std::chrono::steady_clock::time_point mesh_clock_{};
     int clicks_ = 0;
     bool checked_ = false;
     bool dead_check_ = true;  // starts checked: a dimmed-on box reads too
@@ -3251,6 +3403,44 @@ void GalleryApp::draw_gallery(const ws::ui::r2d::FrameSize& frame) {
         gui::text(layout_, chrome_, ms_line, page.width);
         gui::text(layout_, chrome_,
                   "wheel: zoom toward cursor | middle-drag (or space+drag): pan",
+                  page.width);
+    }
+
+    // --- 3d meshes: the r3d path ------------------------------------------------
+    if (gui::collapsing_header(gui_, layout_, chrome_,
+                               "3d meshes: lit, rotating, instanced",
+                               section_[kMeshes])) {
+        // The knobs first (they read left of the viewport in the row's
+        // remaining width - the page is one narrow column, so the
+        // viewport takes the whole line and the knobs wrap under it).
+        gui::text(layout_, chrome_,
+                  "one directional light + ambient, Lambert shading, depth-"
+                  "tested meshes - a third pipeline beside the 2D one",
+                  page.width);
+        {
+            gui::slider_float(gui_, layout_, chrome_, "spin speed",
+                              mesh_speed_, 0.0f, 3.0f, page.width);
+            gui::slider_float(gui_, layout_, chrome_, "light orbit",
+                              mesh_light_yaw_, -3.1416f, 3.1416f,
+                              page.width);
+            (void)gui::checkbox(gui_, layout_, chrome_,
+                                "instance ring (8 copies)", mesh_instances_);
+            (void)gui::checkbox(gui_, layout_, chrome_, "x-ray tint",
+                                mesh_wire_);
+        }
+
+        // The viewport rect: the meshes draw inside it in the on_update
+        // r2d block below (draw_gallery runs INSIDE begin()/end(), so
+        // the 3D block rides this same recorded frame). Sizing matches
+        // the canvas page's own 600x400.
+        constexpr float kViewW = 600.0f;
+        constexpr float kViewH = 400.0f;
+        mesh_view_rect_ = {layout_.cursor_x(), layout_.cursor_y(), kViewW,
+                           kViewH};
+        (void)layout_.next(kViewW, kViewH);  // the reserved rect
+        gui::text(layout_, chrome_,
+                  "the two rotators + the ring live in the viewport; a "
+                  "dead-handle page (headless stub) keeps this space calm",
                   page.width);
     }
 

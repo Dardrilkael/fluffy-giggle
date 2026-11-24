@@ -21,6 +21,14 @@ inline constexpr uint32_t kMaxFramesInFlight = 2;
 // tear-free), then immediate, then FIFO.
 struct SwapchainOptions {
     bool vsync = true;
+    // Phase 4: render into a multisample color+depth pair and resolve
+    // to the swapchain image (a resolve subpass target). The count is
+    // chosen from the device limits (best-first 8/4/2, else the
+    // single-sample fallback) and read back through sample_count() so
+    // the consumer's pipelines can match it. Fed from DeviceOptions'
+    // own want_msaa by the app shell, the way the tier flag feeds the
+    // bindless probe.
+    bool want_msaa = false;
 };
 
 // acquire()'s answer. Any other failure - device loss mid-frame and the
@@ -120,6 +128,12 @@ public:
     uint32_t image_count() const;
     uint32_t width() const;   // the current extent
     uint32_t height() const;
+    // The render pass's sample count (Phase 4), numeric
+    // VkSampleCountFlagBits: the bit the pipelines' rasterizationSamples
+    // must match. 1 (VK_SAMPLE_COUNT_1_BIT's value) when MSAA was not
+    // asked for or the device supports none of the useful counts - the
+    // single-sample pass renders identically.
+    uint32_t sample_count() const;
 
 private:
     struct Impl;

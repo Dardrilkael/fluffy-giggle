@@ -74,7 +74,8 @@ VkRect2D chunk_scissor(const batch::Chunk& chunk, float fb_width,
 bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
                       const gfx::Gpu& gpu, VkQueue queue,
                       uint32_t queue_family, VkRenderPass render_pass,
-                      VkFormat format, const TextureTier& tier) {
+                      VkFormat format, const TextureTier& tier,
+                      uint32_t sample_count) {
     device_ = device;
     physical_device_ = physical_device;
     gpu_ = &gpu;
@@ -83,6 +84,10 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
     render_pass_ = render_pass;
     format_ = format;
     tier_ = tier;
+    // Phase 4: the pass's sample count, carried to every pipeline's
+    // rasterizationSamples below (1 = the classic single-sample pass,
+    // the pre-Phase-4 shape verbatim).
+    sample_count_ = sample_count;
     // The tier decides which id a vertex's tex_index carries (chunk-local
     // slot vs global registry id), so the batch must know before the first
     // frame records.
@@ -260,15 +265,19 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
 }
 
 bool Renderer2D::on_swapchain_recreated(VkRenderPass render_pass,
-                                        VkFormat format) {
+                                        VkFormat format,
+                                        uint32_t sample_count) {
     render_pass_ = render_pass;
-    if (pipeline_ != VK_NULL_HANDLE && format != format_) {
-        // Format drift invalidates the pipelines (both depth modes - they
-        // share every other byte of state). A same-format resize needs
-        // nothing: render passes stay compatible, viewport/scissor are
-        // dynamic, extents arrive per flush. The per-frame-slot resources
-        // (arenas, descriptor sets) are swapchain-independent and ride
-        // through every rebuild untouched.
+    if ((pipeline_ != VK_NULL_HANDLE && format != format_) ||
+        (pipeline_ != VK_NULL_HANDLE && sample_count != sample_count_)) {
+        // Format or sample-count drift invalidates the pipelines (both
+        // depth modes - they share every other byte of state, and the
+        // pass's sample count IS the pipelines' rasterizationSamples).
+        // A same-format, same-count resize needs nothing: render passes
+        // stay compatible, viewport/scissor are dynamic, extents arrive
+        // per flush. The per-frame-slot resources (arenas, descriptor
+        // sets) are swapchain-independent and ride through every rebuild
+        // untouched.
         vkDestroyPipeline(device_, pipeline_, nullptr);
         vkDestroyPipeline(device_, pipeline_3d_, nullptr);
         pipeline_ = VK_NULL_HANDLE;
@@ -279,6 +288,7 @@ bool Renderer2D::on_swapchain_recreated(VkRenderPass render_pass,
         pipeline_mesh_ = VK_NULL_HANDLE;
     }
     format_ = format;
+    sample_count_ = sample_count;
     if (pipeline_ == VK_NULL_HANDLE && !create_pipeline(render_pass)) {
         return false;
     }
@@ -944,7 +954,7 @@ bool Renderer2D::create_pipeline(VkRenderPass render_pass) {
     VkPipelineMultisampleStateCreateInfo multisample{};
     multisample.sType =
         VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    multisample.rasterizationSamples = static_cast<VkSampleCountFlagBits>(sample_count_);
     multisample.minSampleShading = 1.0f;
 
     // Classic src-alpha blend; the alpha channel itself composites over
@@ -1262,7 +1272,7 @@ bool Renderer2D::create_mesh_pipeline(VkRenderPass render_pass) {
 
     VkPipelineMultisampleStateCreateInfo multisample{};
     multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    multisample.rasterizationSamples = static_cast<VkSampleCountFlagBits>(sample_count_);
     multisample.minSampleShading = 1.0f;
 
     // The same attachment blend as the batch pipelines (src-alpha over).

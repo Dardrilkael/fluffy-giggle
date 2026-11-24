@@ -234,6 +234,33 @@ TEST_CASE("choose_composite_alpha prefers opaque, else the lowest bit") {
     CHECK(ws::gfx::choose_composite_alpha(0, opaque) == opaque);
 }
 
+// --- Phase 4: the MSAA sample-count choice -----------------------------------
+
+TEST_CASE("choose_sample_count answers 1 directly when not asked") {
+    const uint32_t one = 1;  // VK_SAMPLE_COUNT_1_BIT
+    // No mask can change the answer without the flag - and no query is
+    // ever made (the swapchain skips the limits read entirely).
+    CHECK(ws::gfx::choose_sample_count(false, 0b1111, one) == one);
+    CHECK(ws::gfx::choose_sample_count(false, 0, one) == one);
+}
+
+TEST_CASE("choose_sample_count walks best-first 8/4/2 against the mask") {
+    const uint32_t one = 1;  // VK_SAMPLE_COUNT_1_BIT
+    // Full support: 8 wins (the count bits VALUE equals the count).
+    CHECK(ws::gfx::choose_sample_count(true, 0b1111, one) == 8u);
+    // No 8x: 4x is the best of what is left.
+    CHECK(ws::gfx::choose_sample_count(true, 0b0111, one) == 4u);
+    // 4x and 8x out: 2x.
+    CHECK(ws::gfx::choose_sample_count(true, 0b0011, one) == 2u);
+    // Nothing useful (the 1-bit alone, or nothing): the single-sample
+    // fallback - the device's own answer, never a failure.
+    CHECK(ws::gfx::choose_sample_count(true, 0b0001, one) == one);
+    CHECK(ws::gfx::choose_sample_count(true, 0, one) == one);
+    // A sparse mask (8x and 2x but no 4x): the walk is mask-driven, not
+    // a table - 8x wins.
+    CHECK(ws::gfx::choose_sample_count(true, 0b1011, one) == 8u);
+}
+
 // --- Gpu's null-state contract (no loader, no device) ------------------------
 
 TEST_CASE("a default-constructed Gpu reports the null state") {
