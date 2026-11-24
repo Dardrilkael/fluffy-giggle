@@ -118,6 +118,7 @@ if(WS_UI_GPU_TESTS)
     target_include_directories(test_ui_mesh_gpu PRIVATE
       "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/tests")
     target_link_libraries(test_ui_mesh_gpu PRIVATE volk stb)
+    target_compile_definitions(test_ui_mesh_gpu PRIVATE _CRT_SECURE_NO_WARNINGS)
   endif()
 endif()
 
