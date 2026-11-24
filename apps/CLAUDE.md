@@ -221,7 +221,23 @@ CMakeLists only wire ws libraries together.
   status bar's Cancel, never a queue edit; Editor::run_in_flight is
   the app's mirror of run_job_.busy() the panels read; the policy core
   is Editor::LiveRun, a headless monotonic clock the app feeds, so the
-  whole loop is unit tested in tests/test_live_run.cpp); stage 5 gives the plot its hands -
+  whole loop is unit tested in tests/test_live_run.cpp); stage 5+ the
+  sound effects: four PROCEDURAL cues (sound.hpp's synth - the
+  playground's arpeggio rule, no asset files) - the edit tick (every
+  edit commit, one swallow of a burst via a 0.12s cooldown), the
+  run-done chime (a delivery with results, 0.8s cooldown so a
+  converging loop stays polite), the run-failed buzz (a delivery
+  without), and the error ding (ERROR toasts only - warnings stay
+  silent, a ding per advisory is a nag); the cooldown policy is
+  Editor::Sound (the LiveRun shape again: injected clock, per-cue
+  windows, mutable so the const toast path can fire), the device is
+  the app's SoundHost (the ONE ws::audio engine, loaded at setup,
+  silent warn on a machine with no audio - the same graceful silence
+  the headless suites run under), Circuit menu > Sound Effects +
+  Low/Medium/High volume chords persist sound.enabled / sound.volume
+  (0..1, live at every play, no re-synthesis); tests/test_sound.cpp
+  is the headless gate (synth bounds, click-free ends, distinct cues,
+  the WAV round-trip, the cooldown cadence); stage 5 gives the plot its hands -
   the wheel zooms both axes toward the cursor (the plot's own wheel
   claim beats the enclosing scroll panel's), a left-drag rubber band
   zooms to the box with a live dx/dy readout, dragging an axis strip

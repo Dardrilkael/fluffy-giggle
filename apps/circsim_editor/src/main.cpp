@@ -56,6 +56,7 @@
 
 #include "canvas_panel.hpp"
 #include "editor.hpp"
+#include "sound.hpp"
 #include "results_panel.hpp"
 #include "side_panels.hpp"
 
@@ -275,6 +276,13 @@ class CircsimApp final : public ws::ui::App {
         // the DIFFERENCE ever feeds the policy, so any origin is as good.
         editor_.live.enabled = auto_run_enabled();
         editor_.live.settle_s = auto_run_settle();
+        // The sound effects' arming rides the same shape: the setting's
+        // mirror, and the host's device attempt. The host sets up even
+        // when disabled (the device probe is once, not per toggle; a
+        // machine with no audio simply runs silent and the toggle
+        // still works as the preference for the next machine).
+        editor_.sound.enabled = sound_enabled();
+        sound_.setup();
         clock_start_ = std::chrono::steady_clock::now();
 
         // The shell.
@@ -461,6 +469,13 @@ class CircsimApp final : public ws::ui::App {
         editor_.set_auto_run_settle = [this](double seconds) {
             set_auto_run_settle(seconds);
         };
+        // The sound effects' play seam: the editor's policy answered a
+        // moment, the host owns the speaker. The cue's index arrives as
+        // an int (the seam's shape), the gain is the persisted volume's
+        // live read (a volume change needs no restart).
+        editor_.play_sound = [this](int cue) {
+            sound_.play(cue, static_cast<float>(sound_volume()));
+        };
         // The Netlist panel's Copy button needs no wiring of its own:
         // it rides the gui's clipboard seam, which install_clipboard
         // above wired to this window (GLFW's set on desktop; Android's
@@ -602,6 +617,13 @@ class CircsimApp final : public ws::ui::App {
             editor_.live.pulse_t =
                 std::fmod(editor_.live.now_s,
                           editor::Editor::LiveRun::kPulsePeriod);
+            // The sound cooldowns ride the SAME clock too (the policy
+            // is a sibling of the live loop's, not a second citizen:
+            // one source of time, the tick and the chime can never
+            // disagree about "when it is") - and the host reaps its
+            // finished one-shots here, the wavplayer's own cadence.
+            editor_.sound.now_s = editor_.live.now_s;
+            sound_.update();
             // The editor's mirror of the flight state: the panels read
             // Editor (they cannot see this class), so the app keeps the
             // mirror honest at the frame's head - cheap, and the only
@@ -776,7 +798,44 @@ class CircsimApp final : public ws::ui::App {
                            "(seconds)",
                            "circuit"};
         (void)schema_.declare(std::move(settle));
+        // The sound effects' pair: enabled (the Circuit menu's Sound
+        // command, off by default - a quiet editor is the default
+        // editor) and volume (0..1, the host's gain). The sounds are
+        // synthesized at load (no asset files), so the setting pair is
+        // all the user owns.
+        SettingDesc sound_on{"sound.enabled", SettingType::boolean,
+                             SettingValue::boolean(false), {},
+                             "play sound effects (edits, run results)",
+                             "sound"};
+        (void)schema_.declare(std::move(sound_on));
+        SettingDesc sound_vol{"sound.volume", SettingType::real,
+                              SettingValue::real(0.7),
+                              {ws::settings::RangeConstraint{0.0, 1.0}},
+                              "the sound effects' loudness (0..1)",
+                              "sound"};
+        (void)schema_.declare(std::move(sound_vol));
         settings_ = std::make_unique<ws::settings::SettingsStore>(schema_);
+    }
+
+    // Sound settings' reads, the auto_run read's own shape: a missing
+    // or unreadable value reads as OFF / the default, never as a
+    // silent default ON.
+    [[nodiscard]] bool sound_enabled() const {
+        if (settings_ == nullptr) {
+            return false;
+        }
+        const auto read = settings_->get<bool>("sound.enabled");
+        return read && read->value;
+    }
+
+    [[nodiscard]] double sound_volume() const {
+        if (settings_ == nullptr) {
+            return 0.7;
+        }
+        const auto read = settings_->get<double>("sound.volume");
+        return (read && read->value >= 0.0 && read->value <= 1.0)
+                   ? read->value
+                   : 0.7;
     }
 
     // The live loop's armed state, backed by the setting (the same read
@@ -832,6 +891,108 @@ class CircsimApp final : public ws::ui::App {
                                   "circuit.auto_run_settle", seconds);
         }
         editor_.live.settle_s = seconds;
+    }
+
+    // The sound effects' device half: owns the ONE engine (ws::audio's
+    // context is process-global, so nothing else may hold one), the
+    // four synthesized cues loaded at setup, and the gain. A failure
+    // anywhere in setup is a warned no-op - the editor runs silent on
+    // a machine with no audio device (a headless bench, a CI runner, a
+    // server session), never louder than a log line.
+    class SoundHost {
+    public:
+        // Synthesizes the cues and opens the device. Idempotent: a
+        // second call on a ready host is a no-op, a failed host keeps
+        // its warned state (retrying per fire would spam the log).
+        void setup() {
+            if (ready_ || failed_) {
+                return;
+            }
+            if (auto init = engine_.init(); !init) {
+                ws::core::warn("circsim: audio device unavailable - "
+                               "sound effects stay silent ({})",
+                               init.error().message);
+                failed_ = true;
+                return;
+            }
+            bool all_loaded = true;
+            for (int i = 0;
+                 i < static_cast<int>(editor::SoundCue::error) + 1; ++i) {
+                const editor::CueData pcm =
+                    editor::synth_cue(static_cast<editor::SoundCue>(i));
+                const ws::audio::SoundDesc desc{
+                    pcm.samples.data(), pcm.frame_count(), 1,
+                    pcm.sample_rate};
+                auto sound = engine_.load_sound(desc);
+                if (!sound) {
+                    ws::core::warn("circsim: sound cue {} failed to load "
+                                   "({})",
+                                   i, sound.error().message);
+                    all_loaded = false;
+                    break;
+                }
+                cues_[static_cast<std::size_t>(i)] = *sound;
+            }
+            if (!all_loaded) {
+                (void)engine_.shutdown();
+                failed_ = true;
+                return;
+            }
+            ready_ = true;
+            ws::core::info("circsim: sound effects ready");
+        }
+
+        ~SoundHost() { (void)engine_.shutdown(); }
+
+        // Plays a cue at the given gain. The editor's policy already
+        // gated the moment (cooldowns); this is just the speaker.
+        void play(int cue_i, float gain) {
+            if (!ready_ || cue_i < 0 || cue_i > 3) {
+                return;
+            }
+            (void)engine_.play(cues_[static_cast<std::size_t>(cue_i)],
+                               gain);
+        }
+
+        // The main loop's reap (the wavplayer's own cadence): frees
+        // finished one-shots' slots.
+        void update() {
+            if (ready_) {
+                (void)engine_.update();
+            }
+        }
+
+        [[nodiscard]] bool ready() const { return ready_; }
+
+    private:
+        ws::audio::AudioEngine engine_;
+        ws::audio::SoundHandle cues_[4]{};
+        bool ready_ = false;
+        bool failed_ = false;
+    };
+
+    // The sound toggle's one write path (the Circuit menu's Sound
+    // command): persists sound.enabled and mirrors editor_.sound.
+    // Unlike set_auto_run there is no countdown to kill - the
+    // cooldowns are view-state the policy owns per document anyway.
+    void set_sound(bool on) {
+        if (settings_ != nullptr) {
+            (void)settings_->set(ws::settings::Layer::user,
+                                  "sound.enabled", on);
+        }
+        editor_.sound.enabled = on;
+    }
+
+    // The volume's one write path (the three-chord ladder): persists
+    // sound.volume. No in-memory mirror to hold - the host reads the
+    // setting live at every play (a volume change needs no restart
+    // and no re-synthesis, the cues are PCM copies in the engine).
+    void set_sound_volume(double v) {
+        v = std::clamp(v, 0.0, 1.0);
+        if (settings_ != nullptr) {
+            (void)settings_->set(ws::settings::Layer::user,
+                                  "sound.volume", v);
+        }
     }
 
     // The accent the View menu's picker last chose (the user layer, so it
@@ -1257,6 +1418,71 @@ class CircsimApp final : public ws::ui::App {
         };
         add(std::move(discard_cmd));
 
+        // The sound effects' toggle (Circuit menu > Sound Effects, a
+        // CHECKED command like Auto-Run's). Off by default - a quiet
+        // editor is the default editor - and the toggle is a
+        // preference, never a diagnostic: on a machine with no audio
+        // device the host already warned once at setup, the toggle
+        // still flips (it persists, and the next machine honors it).
+        Command sound_cmd;
+        sound_cmd.id = "circuit.sound";
+        sound_cmd.label = "Sound Effects";
+        sound_cmd.category = "Circuit";
+        sound_cmd.checked = [this] { return editor_.sound.enabled; };
+        sound_cmd.execute = [this](std::string_view) {
+            set_sound(!editor_.sound.enabled);
+            editor_.status(editor_.sound.enabled
+                               ? (sound_.ready()
+                                      ? "Sound effects on"
+                                      : "Sound effects on (no audio "
+                                        "device - running silent)")
+                               : "Sound effects off");
+        };
+        add(std::move(sound_cmd));
+
+        // The volume ladder: three chords beside the toggle so the
+        // user never opens settings.json to be quieter. The write is
+        // set_sound_volume's one path (persist + no mirror to hold -
+        // the host reads the setting live at every play).
+        Command vol_low_cmd;
+        vol_low_cmd.id = "circuit.sound_volume_low";
+        vol_low_cmd.label = "Sound Volume: Low";
+        vol_low_cmd.category = "Circuit";
+        vol_low_cmd.checked = [this] {
+            return sound_volume() < 0.34;
+        };
+        vol_low_cmd.execute = [this](std::string_view) {
+            set_sound_volume(0.15);
+            editor_.status("Sound volume low (15%)");
+        };
+        add(std::move(vol_low_cmd));
+
+        Command vol_med_cmd;
+        vol_med_cmd.id = "circuit.sound_volume_medium";
+        vol_med_cmd.label = "Sound Volume: Medium";
+        vol_med_cmd.category = "Circuit";
+        vol_med_cmd.checked = [this] {
+            return sound_volume() >= 0.34 && sound_volume() <= 0.67;
+        };
+        vol_med_cmd.execute = [this](std::string_view) {
+            set_sound_volume(0.7);
+            editor_.status("Sound volume medium (70%)");
+        };
+        add(std::move(vol_med_cmd));
+
+        Command vol_high_cmd;
+        vol_high_cmd.id = "circuit.sound_volume_high";
+        vol_high_cmd.label = "Sound Volume: High";
+        vol_high_cmd.category = "Circuit";
+        vol_high_cmd.checked = [this] {
+            return sound_volume() > 0.67;
+        };
+        vol_high_cmd.execute = [this](std::string_view) {
+            set_sound_volume(1.0);
+            editor_.status("Sound volume high (100%)");
+        };
+        add(std::move(vol_high_cmd));
+
         // The problems walk's pair (F8 / Shift+F8, the IDE-standard
         // next/previous finding). The declared chords seed the GLOBAL
         // rung through install_defaults, so they answer in every
@@ -1621,6 +1847,15 @@ class CircsimApp final : public ws::ui::App {
                     editor_.status("Simulation cancelled");
                 }
             } else {
+                // The job itself failed (the map never ran): the low
+                // buzz answers THIS, and the error toast's own ding
+                // rides toast() - two different failures, two
+                // different cues, never both for one moment.
+                if (same_doc && editor_.sound.enabled &&
+                    editor_.sound.run_failed() && editor_.play_sound) {
+                    editor_.play_sound(
+                        static_cast<int>(editor::SoundCue::run_failed));
+                }
                 editor_.toast("Simulation job failed: " + err.message,
                               gui::ToastSeverity::error);
             }
@@ -1642,6 +1877,24 @@ class CircsimApp final : public ws::ui::App {
         editor_.problems.map = outcome.map;
         editor_.problems.map_valid = true;
         const std::size_t count = outcome.problems.size();
+        // The delivery's sound half, one cue for the whole delivery:
+        // the chime when the run CARRIED results (the loop's
+        // convergence step, "the numbers are on screen"), the buzz
+        // when it ran but produced none (the netlist never solved).
+        // The chime's cooldown (0.8s) keeps a fast converging loop
+        // polite - run after run reads as a chime per second, not a
+        // chime per run.
+        if (editor_.sound.enabled && editor_.play_sound) {
+            if (outcome.run.has_value()) {
+                if (editor_.sound.run_done()) {
+                    editor_.play_sound(
+                        static_cast<int>(editor::SoundCue::run_done));
+                }
+            } else if (editor_.sound.run_failed()) {
+                editor_.play_sound(
+                    static_cast<int>(editor::SoundCue::run_failed));
+            }
+        }
         editor_.refresh_problems(
             true, std::move(outcome.problems),
             outcome.run.has_value() ? "run" : "run (failed)",
@@ -1977,6 +2230,15 @@ class CircsimApp final : public ws::ui::App {
                 // busy answer rides the app's own run_job_ - the one
                 // flight it ever tracks.
                 editor_.live.edited(run_job_.busy());
+                // ...and the edit tick rides the same single listener
+                // (one sound per edit, whatever edit it is). The cue's
+                // own cooldown collapses a burst of drag commits -
+                // the tick answers "something landed", not "how many".
+                if (editor_.sound.enabled && editor_.sound.edited() &&
+                    editor_.play_sound) {
+                    editor_.play_sound(
+                        static_cast<int>(editor::SoundCue::edit));
+                }
             });
             if (listener.has_value()) {
                 undo_listener_ = *listener;
@@ -2131,6 +2393,13 @@ class CircsimApp final : public ws::ui::App {
     // benign - but one stepped back would stall the loop for the whole
     // step's duration).
     std::chrono::steady_clock::time_point clock_start_{};
+
+    // The sound effects' device half (the editor's Sound struct holds
+    // the policy; this owns the one process-global engine and the
+    // loaded cues). Set up once in on_setup() whatever the enabled
+    // setting says - the device probe is once, and a machine without
+    // audio runs silent without a word beyond one warn.
+    SoundHost sound_;
 };
 
 }  // namespace

@@ -14,7 +14,7 @@
 # archive PRIVATEly, so the app lists the libs it names itself).
 ws_add_app(circsim_editor DEPENDS ws::ui ws::circsim ws::jobs ws::platform
                                ws::app ws::settings ws::schematic
-                               ws::gestures)
+                               ws::gestures ws::audio)
 
 # The stage-4 headless gate: the Results panel driven the way the shell
 # drives it (a GuiContext frame + a panel rect), with a
@@ -45,7 +45,8 @@ if(TARGET test_circsim_editor_plot_parity)
   target_include_directories(test_circsim_editor_plot_parity PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${PROJECT_SOURCE_DIR}/libs/ui/src"
-    "${PROJECT_SOURCE_DIR}/libs/ui/tests")
+    "${PROJECT_SOURCE_DIR}/libs/ui/tests"
+    "${PROJECT_SOURCE_DIR}/libs/audio/include")
 endif()
 
 # The PNG/live consistency suite (the E3 export's own gate): the
@@ -66,12 +67,13 @@ ws_add_test(circsim_editor_plot_png
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
   LINK ws::circsim
   DEPENDS ws::ui_gui ws::plotmath stb ws::schematic
-          ws::gestures)
+          ws::gestures ws::audio)
 if(TARGET test_circsim_editor_plot_png)
   target_include_directories(test_circsim_editor_plot_png PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${PROJECT_SOURCE_DIR}/libs/ui/src"
-    "${PROJECT_SOURCE_DIR}/libs/ui/tests")
+    "${PROJECT_SOURCE_DIR}/libs/ui/tests"
+    "${PROJECT_SOURCE_DIR}/libs/audio/include")
 endif()
 
 ws_add_test(circsim_editor_panel
@@ -86,7 +88,7 @@ ws_add_test(circsim_editor_panel
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
   LINK ws::circsim
   DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic
-          ws::gestures)
+          ws::gestures ws::audio)
 if(TARGET test_circsim_editor_panel)
   # "editor.hpp"/"results_panel.hpp" from the app's src, the stub's
   # "ui_gui_stub.hpp" and font.cpp's "text/font.h" from libs/ui's src
@@ -95,7 +97,8 @@ if(TARGET test_circsim_editor_panel)
   target_include_directories(test_circsim_editor_panel PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${PROJECT_SOURCE_DIR}/libs/ui/src"
-    "${PROJECT_SOURCE_DIR}/libs/ui/tests")
+    "${PROJECT_SOURCE_DIR}/libs/ui/tests"
+    "${PROJECT_SOURCE_DIR}/libs/audio/include")
 endif()
 
 # The Schematic panel's headless gate: the camera mapping. The panel
@@ -117,7 +120,7 @@ ws_add_test(circsim_editor_canvas
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
   LINK ws::circsim
   DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic
-          ws::gestures)
+          ws::gestures ws::audio)
 if(TARGET test_circsim_editor_canvas)
   target_include_directories(test_circsim_editor_canvas PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -137,7 +140,7 @@ ws_add_test(circsim_editor_canvas_cost
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
   LINK ws::circsim
   DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic
-          ws::gestures)
+          ws::gestures ws::audio)
 if(TARGET test_circsim_editor_canvas_cost)
   target_include_directories(test_circsim_editor_canvas_cost PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -170,12 +173,13 @@ ws_add_test(circsim_editor_side_panels
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
   LINK ws::circsim
   DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic
-          ws::gestures)
+          ws::gestures ws::audio)
 if(TARGET test_circsim_editor_side_panels)
   target_include_directories(test_circsim_editor_side_panels PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${PROJECT_SOURCE_DIR}/libs/ui/src"
-    "${PROJECT_SOURCE_DIR}/libs/ui/tests")
+    "${PROJECT_SOURCE_DIR}/libs/ui/tests"
+    "${PROJECT_SOURCE_DIR}/libs/audio/include")
 endif()
 
 # The waveform render profiling gate: the Results panel's series loop
@@ -197,12 +201,13 @@ ws_add_test(circsim_editor_waveform_prof
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
   LINK ws::circsim
   DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic
-          ws::gestures)
+          ws::gestures ws::audio)
 if(TARGET test_circsim_editor_waveform_prof)
   target_include_directories(test_circsim_editor_waveform_prof PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${PROJECT_SOURCE_DIR}/libs/ui/src"
-    "${PROJECT_SOURCE_DIR}/libs/ui/tests")
+    "${PROJECT_SOURCE_DIR}/libs/ui/tests"
+    "${PROJECT_SOURCE_DIR}/libs/audio/include")
 endif()
 
 # The document undo regression gate. These tests exercise deletion snapshots
@@ -234,12 +239,13 @@ ws_add_test(circsim_editor_live_run
           ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
   LINK ws::circsim
   DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic
-          ws::gestures)
+          ws::gestures ws::audio)
 if(TARGET test_circsim_editor_live_run)
   target_include_directories(test_circsim_editor_live_run PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${PROJECT_SOURCE_DIR}/libs/ui/src"
-    "${PROJECT_SOURCE_DIR}/libs/ui/tests")
+    "${PROJECT_SOURCE_DIR}/libs/ui/tests"
+    "${PROJECT_SOURCE_DIR}/libs/audio/include")
 endif()
 
 # The adapter's lift/landing contract: several taps on one wire, a
@@ -257,3 +263,30 @@ ws_add_test(circsim_editor_style
   SOURCES tests/test_ui_style.cpp
   LINK ws::ui_gui
   DEPENDS ws::ui_gui)
+
+# The sound effects' gate, headless by construction: the synth (pure
+# functions - same cue in, same bytes out) and the Editor::Sound policy
+# (the cooldown core over an injected clock, the LiveRun suite's own
+# discipline) never touch the device - the app's SoundHost owns the one
+# engine, and a bench has no speaker. Links ws::audio only for the
+# engine.hpp include the seam's types ride (nothing from the archive is
+# called), beside editor.cpp for the toast cue path.
+ws_add_test(circsim_editor_sound
+  SOURCES tests/test_sound.cpp
+          src/sound.cpp
+          src/schematic_adapter.cpp
+          src/document.cpp
+          src/editor.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/tests/ui_gui_r2d_stub.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/src/text/font.cpp
+          ${PROJECT_SOURCE_DIR}/libs/ui/src/text/stb_impl.cpp
+  LINK ws::circsim
+  DEPENDS ws::ui_gui ws::app ws::settings stb ws::schematic
+          ws::gestures ws::audio)
+if(TARGET test_circsim_editor_sound)
+  target_include_directories(test_circsim_editor_sound PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${PROJECT_SOURCE_DIR}/libs/ui/src"
+    "${PROJECT_SOURCE_DIR}/libs/ui/tests"
+    "${PROJECT_SOURCE_DIR}/libs/audio/include")
+endif()

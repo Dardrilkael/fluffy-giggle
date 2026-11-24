@@ -770,6 +770,15 @@ struct Editor {
     // (headless) writes live.settle_s alone.
     std::function<void(double seconds)> set_auto_run_settle;
 
+    // The sound effects' play seam, the export pair's own shape: the
+    // editor decides a cue MOMENT (sound.edited() etc. answered it),
+    // then hands the cue here - the app owns the device (its
+    // SoundHost: ws::audio's engine, process-global, never touched
+    // from Editor) and the gain (sound.volume's mirror). Unset (every
+    // headless bench), the moment dies here - the policy above is
+    // still fully testable without a speaker.
+    std::function<void(int cue)> play_sound;
+
     // "A run is in flight" as the EDITOR's mirror of the app's
     // run_job_.busy(). The panel layer draws from Editor (it cannot see
     // CircsimApp), so the app writes this beside the submit and the
@@ -1065,6 +1074,82 @@ struct Editor {
         // indicator is chrome, not a policy knob).
         static constexpr double kPulsePeriod = 1.4;
     } live;
+
+    // The sound effects' policy core (the LiveRun shape again: a
+    // headless struct the app feeds a clock, the device NEVER touched
+    // from here). The editor calls the cue fires (edited(), a run
+    // landing, an error toast); the struct's whole job is WHICH fires
+    // reach the speakers - the cooldowns. A cue fired within its
+    // cooldown is swallowed (an edit burst is ONE tick, a fast
+    // live loop converging run after run is a chime per SECOND not a
+    // chime per run). `now_s` is the same injected clock the live loop
+    // rides; a test drives it directly, determinism is the point.
+    //
+    // The volume/mute half lives in the app (settings + the host's
+    // gain) - the policy only decides IF a cue fires, never how loud.
+    struct Sound {
+        // Sound armed at all (the Circuit menu's Sound command, the
+        // persisted sound.enabled setting's mirror).
+        bool enabled = false;
+
+        // The app's clock, fed once per frame beside live.now_s.
+        double now_s = 0.0;
+
+        // Per-cue cooldowns (seconds): a second fire inside the
+        // window is swallowed. The edit tick's is short - distinct
+        // drags should tick distinctly - but a burst (drag commits at
+        // frame cadence) collapses. The chime's is long enough that a
+        // converging loop at settle 0.1s stays polite. The buzz/ding
+        // barely repeat (errors already tost), so their windows are
+        // nearly the cue's own length.
+        static constexpr double kEditCooldown = 0.12;
+        static constexpr double kDoneCooldown = 0.8;
+        static constexpr double kFailCooldown = 1.0;
+        static constexpr double kErrorCooldown = 1.0;
+
+        // The last fire per cue (index by SoundCue; -1 = never).
+        // mutable: the cooldown write is the POLICY's bookkeeping, not
+        // editor state - a const Editor may fire a cue (toast() is
+        // const, the whole toast path is), and the swallow/land answer
+        // rides the same call.
+        mutable double last_fire[4] = {-1.0, -1.0, -1.0, -1.0};
+
+        // The one gate. Returns true = the cue should sound NOW (the
+        // app plays it and the cooldown clock starts); false = the
+        // moment is real but swallowed (a burst member, a repeat).
+        // `cue_i` is the SoundCue as int (the switch-free call shape
+        // the editor's call sites keep).
+        [[nodiscard]] bool fired(int cue_i) const {
+            if (!enabled || cue_i < 0 || cue_i > 3) {
+                return false;
+            }
+            static constexpr double kCooldown[4] = {
+                kEditCooldown, kDoneCooldown, kFailCooldown, kErrorCooldown};
+            const double last = last_fire[cue_i];
+            if (last >= 0.0 && now_s - last < kCooldown[cue_i]) {
+                return false;
+            }
+            last_fire[cue_i] = now_s;
+            return true;
+        }
+
+        // The typed faces, one per cue class (the call sites stay
+        // reads). A document switch resets the cooldowns (a fresh
+        // document's first sounds are never swallowed by the old
+        // one's) - reset() rides document_changed, the same rule
+        // every per-document state spells.
+        [[nodiscard]] bool edited() const { return fired(0); }
+        [[nodiscard]] bool run_done() const { return fired(1); }
+        [[nodiscard]] bool run_failed() const { return fired(2); }
+        [[nodiscard]] bool error() const { return fired(3); }
+
+        void reset() {
+            for (double& t : last_fire) {
+                t = -1.0;
+            }
+            now_s = 0.0;
+        }
+    } sound;
 
     // auto_junction_dots' answer - empty since the partition rule
     // landed (the old coincidence rules minted silent joins; the new

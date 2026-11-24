@@ -49,7 +49,7 @@ fetches of that history.
 ## Build / test / run
 
 ```sh
-cmake --preset linux && cmake --build --preset linux   # core..circsim + CLIs
+cmake --preset linux && cmake --build --preset linux   # core..circsim + CLIs + editor (audio in)
 ctest --preset linux                                    # headless gate
 python3 tools/smoke_circsim.py --cli build/linux/bin/circsim_cli
 ```

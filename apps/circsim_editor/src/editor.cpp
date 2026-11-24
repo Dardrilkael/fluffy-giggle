@@ -4,6 +4,7 @@
 // route, the symbol renderer and the cache refreshers.
 
 #include "editor.hpp"
+#include "sound.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -1602,6 +1603,10 @@ void Editor::document_changed() {
     // state - the user who armed auto on one schematic armed it on the
     // workspace.
     live.reset();
+    // The sound cooldowns start over the same way: a fresh document's
+    // first tick/chime must never be swallowed by the OLD document's
+    // last fire (the quiet drag that landed just before the switch).
+    sound.reset();
     join_dots_.clear();
     nets_cache_ = ws::circsim::NetList{};
     nets_valid_ = false;
@@ -1705,6 +1710,16 @@ void Editor::toast(std::string text, gui::ToastSeverity severity,
         }
         toasts->push({toast_text_.back().c_str(), severity, nullptr,
                       seconds});
+        // The toast's sound half: ERROR toasts ding (the cue's own
+        // cooldown swallows a burst); WARNING toasts stay SILENT - most
+        // warnings are advisory and a ding per advisory is a nag; INFO
+        // is the toast's own visual, never a speaker's business. The
+        // dedupe above already killed the repeat words; this is the
+        // repeat MOMENT's gate.
+        if (severity == gui::ToastSeverity::error &&
+            sound.enabled && sound.error() && play_sound) {
+            play_sound(static_cast<int>(SoundCue::error));
+        }
     }
 }
 
