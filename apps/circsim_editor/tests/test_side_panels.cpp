@@ -1362,7 +1362,7 @@ TEST_CASE("two toasts in quick succession keep both messages' bytes live") {
 // (The synthetic-face factory lives up with the Bench now - the D1
 // label cases draw themed panels before this section's own cases.)
 
-TEST_CASE("the palette's tools header draws through the strong face") {
+TEST_CASE("the palette's compact header draws no heading at all") {
     Bench b;
     b.ed.palette_canvas = &b.clc;
 
@@ -1374,16 +1374,16 @@ TEST_CASE("the palette's tools header draws through the strong face") {
     ws::ui::gui_test::stub.reset();
     b.draw_palette(theme);
 
-    // The ONE text the whole palette draws: the "tools" heading, through
-    // the strong face at its own baked size - every other row (the tool
-    // selectables, the search placeholder, the group headers, the hint
-    // line) is fontless chrome and answers in bars, so the seam's count
-    // is the heading's own proof.
-    CHECK(ws::ui::gui_test::stub.texts == 1u);
-    CHECK(ws::ui::gui_test::stub.last_text_font == &strong);
+    // The 2026 redesign: the palette carries NO heading - the tool row
+    // and the search are the panel's own chrome (every row a compact
+    // select or input, no section title to shout over the symbols).
+    // With a strong face installed the palette still draws zero
+    // strong-face texts, and the fontless stock draws zero texts at
+    // all - the seam's count is the absence's own proof.
+    CHECK(ws::ui::gui_test::stub.texts == 0u);
 
-    // And without a strong face the heading degrades to a bar like
-    // every other row - one text fewer, no crash, the one-font rule.
+    // And without a strong face the panel degrades to bars like every
+    // other row - one text fewer, no crash, the one-font rule.
     ws::ui::gui_test::stub.reset();
     b.draw_palette();  // the stock fontless theme
     CHECK(ws::ui::gui_test::stub.texts == 0u);

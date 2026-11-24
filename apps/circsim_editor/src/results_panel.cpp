@@ -594,7 +594,7 @@ void tessellate_series(const std::vector<Point>& pts,
 // widens the right margin to a label strip of its own - and that
 // strip is the right spine's drag handle. The no-axis margin is the
 // stage-5 shape exactly.
-constexpr float kPlotHeight = 220.0f;
+constexpr float kPlotHeight = 240.0f;
 // The frame's margins and the 40x30 guard: the shared core's
 // constants (the widget's frame draws the identical ones - one
 // spelling, the unify-plotting merge).
@@ -604,12 +604,27 @@ constexpr float kMarginTop = ws::plotmath::kMarginTop;
 constexpr float kMarginRight = ws::plotmath::kMarginRight;
 constexpr float kMarginRightAxis = ws::plotmath::kMarginRightAxis;
 
-// The band's fill/outline: the theme's accent, alpha-split (a wash
-// under the series, a line around the box). r2d packs 0xRRGGBBAA, so
-// the alpha is the low byte.
+// A color with its low (alpha) byte replaced - r2d packs 0xRRGGBBAA.
 [[nodiscard]] std::uint32_t with_alpha(std::uint32_t color,
                                        std::uint8_t a) {
     return (color & 0xFFFFFF00u) | std::uint32_t(a);
+}
+
+// The legend row's own click: the swatch's run behaves as the row's
+// toggle (the chart-legend convention - click a row to show or hide
+// its trace). The hit area is the swatch slot grown to the row's
+// height, keyed by the signal's index under the caller's scope so
+// every row is its own widget; the name text beside it is chrome.
+[[nodiscard]] bool legend_toggle(gui::GuiContext& gui,
+                                 const gui::Rect& swatch_slot, float row_h,
+                                 bool visible) {
+    (void)visible;
+    const gui::Rect hit{swatch_slot.x, swatch_slot.y, 12.0f + 6.0f + 64.0f +
+                                                  4.0f + 10.0f,
+                        row_h};
+    const auto id = gui.ids().id("legend.row");
+    const gui::ButtonResult res = gui::button_behavior(gui, id, hit, false);
+    return res.activated();
 }
 
 // A legend sparkline: the cached 40-bucket envelope (see
@@ -1066,8 +1081,22 @@ void handle_plot_input(Editor& ed, gui::GuiContext& gui, PlotFrame& pf) {
 void draw_plot(Editor& ed, gui::GuiContext& gui,
                gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
                const ws::spice::Table& t, const char* x_name) {
+    // The plot's height: the panel's remaining content below the
+    // cursor, floored at kPlotHeight - the Results panel exists to
+    // show the graph, and the graph takes what the legend leaves it
+    // (the 2026 redesign's whole point: the legend got compact, the
+    // savings land here). The allowance below is the transport row,
+    // the hover readout and the gesture hint - the blocks the panel
+    // draws under the plot, so the fill never covers them.
+    const gui::Rect content = layout.panel_content();
+    const float below = 3.0f * theme.control_height + 8.0f;
+    const float room = content.height > 0.0f && content.y > 0.0f
+                           ? std::max(0.0f, content.y + content.height -
+                                                 layout.cursor_y() - below)
+                           : 0.0f;
+    const float plot_h = std::max(kPlotHeight, room);
     const gui::Rect plot =
-        layout.next(layout.remaining_width(), kPlotHeight);
+        layout.next(layout.remaining_width(), plot_h);
 
     // The two-axis split (stage 6) FIRST: whether the visible signals
     // earn a right spine decides the frame's right margin, so it is
@@ -2448,12 +2477,11 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
                 }
             }
         }
-        // The export pair, flowed on their own line and sized to their
-        // whole labels (B2: two "Export …" stubs were one
-        // indistinguishable button - the labels are the purpose).
-        // button_row_flow wraps the overflow when the line cannot
-        // hold both (the no-mid-word-cut rule, the same reflow the
-        // legend toolbar below rides).
+        // The export pair with the Auto re-run toggle on ONE line (the
+        // 2026 density pass: three stacked rows before the data began
+        // was the header's whole cost). The pair sizes to its whole
+        // labels; the checkbox rides beside it; a narrow panel wraps
+        // the overflow whole (button_row_flow's own rule).
         static const char* const kExportCells[] = {"Export CSV",
                                                     "Export JSON"};
         const int export_btn = gui::button_row_flow(
@@ -2469,7 +2497,14 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
         // after edits settle. The app installs set_auto_run (persisted
         // settings.json); a headless bench without it still gets the
         // in-memory flag, so the toggle reads and works everywhere.
+        // It rides the export pair's line when the room is there.
         bool auto_on = ed.live.enabled;
+        {
+            const float box_w = 96.0f;  // "Auto re-run" + its box
+            if (layout.remaining_width() > box_w + 8.0f) {
+                layout.same_line(8.0f);
+            }
+        }
         if (gui::checkbox(gui, layout, theme, "Auto re-run", auto_on) &&
             auto_on != ed.live.enabled) {
             if (ed.set_auto_run) {
@@ -2479,7 +2514,7 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
                 ed.live.off();
             }
         }
-        // The loop's live indicator, on the checkbox's own line: a dot
+        // The loop's live indicator, on the checkbox's own row: a dot
         // that BREATHES (the accent, alpha riding the period's own ease
         // over live.pulse_t) while a run is in flight or the queued
         // re-run waits, so "it is coming" reads at a glance. The
@@ -2525,10 +2560,15 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
         }
         // The queued re-run's eject (the menu item's button face):
         // drops the pending run without disarming Auto. The in-flight
-        // run is the status bar's Cancel, never this button.
-        if (ed.live.pending && gui::button(gui, layout, theme,
-                                           "Discard##live.pending")) {
-            (void)ed.live.discard_pending();
+        // run is the status bar's Cancel, never this button. It rides
+        // the indicator's own row - the two belong to the same story.
+        if (ed.live.pending) {
+            if (auto_on && (ed.run_in_flight || ed.live.pending)) {
+                layout.same_line(8.0f);  // beside the breathing dot
+            }
+            if (gui::button(gui, layout, theme, "Discard##live.pending")) {
+                (void)ed.live.discard_pending();
+            }
         }
         if (stale) {
             gui::ChromeTheme warn = theme;
@@ -2570,21 +2610,25 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
                 ? t.sweep_names[x_index].c_str()
                 : "sample";
 
-        // The legend: swatch + visibility + the spine tag + the live
-        // readout (the hover sample, else the last one - the
-        // waveform's resting state is the readout people want at a
-        // glance). The tag (stage 6) is which y spine the signal
-        // rides, spelled in units: V on the left scale, A on the
-        // right one - the classifier's answer, quiet, so a mixed
-        // legend reads its split without opening the plot.
-        gui::separator(layout, theme);
+        // The legend (2026 redesign): a compact chart legend, not a
+        // settings table. One 20px row per signal - swatch + name is
+        // the visibility TOGGLE itself (a legend row you click to show
+        // or hide its trace, the way every charting tool spells it);
+        // the sparkline and the live value ride the same row, right
+        // aligned. The old rows were full control height with a
+        // separate checkbox each - a 20-signal run burned the whole
+        // panel before the plot appeared.
+        const int at = ed.results.hover >= 0
+                           ? ed.results.hover
+                           : static_cast<int>(t.row_count()) - 1;
         gui::ChromeTheme quiet = theme;
         quiet.text = gui::dim(theme.text, 0.45f);
+        const float legend_row_h = 20.0f;
         // The toolbar: bulk visibility, the discoverable "fit view"
         // (the double-click still works), and the hover x readout.
         // The toolbar REFLOWS (button_row_flow): a narrow panel wraps
         // "Fit view" onto the next line whole instead of drawing
-        // "Sho…"/"Hid…" stubs - the labels ARE the pair's purpose
+        // "Sho..."/"Hid..." stubs - the labels ARE the pair's purpose
         // (B2), and the row never shrinks a button below its own
         // whole label (B1).
         static const char* const kLegendCells[] = {"Show all", "Hide all",
@@ -2605,40 +2649,42 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
         } else if (legend_btn == 2) {
             ed.results.view = PlotView{};  // dead never activates
         }
-        const int at = ed.results.hover >= 0
-                           ? ed.results.hover
-                           : static_cast<int>(t.row_count()) - 1;
         for (std::size_t i = 0; i < t.signals.size(); ++i) {
             const ws::spice::Signal& s = t.signals[i];
             gui.ids().push(static_cast<int>(i));
-            const gui::Rect swatch = layout.next(14.0f, 14.0f);
+            const bool visible =
+                i < ed.results.visible.size() ? ed.results.visible[i] != 0u
+                                              : true;
+            // The row: swatch + name + the value, one compact line.
+            // The swatch's grown slot carries the click (the row's
+            // own toggle); a hidden signal's row dims (the legend's
+            // own "off" state), a visible one reads full - visibility
+            // reads at a glance without a box.
+            const gui::Rect swatch = layout.next(12.0f, legend_row_h - 6.0f);
             canvas::Canvas2D& sw = ed.results_draw_canvas();
             sw.set_view_scale(1.0f);
-            // Centered on the row's own height (the checkbox beside it is
-            // a full control tall); it used to hang ~5px above center.
-            sw.fill_rounded_rect(
-                swatch.x,
-                swatch.y + std::max(0.0f, (theme.control_height - 12.0f) *
-                                              0.5f),
-                12.0f, 12.0f, 3.0f, series_color(i));
+            const bool toggled =
+                legend_toggle(gui, swatch, legend_row_h, visible);
+            sw.fill_rounded_rect(swatch.x,
+                                 swatch.y + (legend_row_h - 8.0f) * 0.5f,
+                                 10.0f, 8.0f, 2.0f,
+                                 visible ? series_color(i)
+                                         : gui::dim(series_color(i), 0.35f));
             layout.same_line(6.0f);
-            bool vis = i < ed.results.visible.size()
-                           ? ed.results.visible[i] != 0u
-                           : true;
-            if (gui::checkbox(gui, layout, theme, s.name.c_str(), vis)) {
-                if (ed.results.visible.size() == t.signals.size()) {
-                    ed.results.visible[i] = vis ? 1u : 0u;
-                }
-            }
-            layout.same_line();
+            gui::ChromeTheme row = theme;
+            row.text = visible ? theme.text : theme.text_muted;
+            gui::text(layout, row, s.name.c_str(), 64.0f);
+            // The spine tag, quiet, after the name.
+            layout.same_line(4.0f);
             gui::text(layout, quiet,
                       ws::circsim::signal_y_axis(s.name) ==
                               ws::circsim::PlotYAxis::Right
                           ? "A"
                           : "V",
-                      14.0f);
-            layout.same_line();
-            const gui::Rect spark = layout.next(48.0f, 14.0f);
+                      10.0f);
+            // The sparkline, then the live readout at the row's end.
+            layout.same_line(8.0f);
+            const gui::Rect spark = layout.next(40.0f, legend_row_h - 6.0f);
             // The layout still advances (the row's own widgets and the
             // plot below ride it); only the drawing is skipped for a
             // sparkline the scroll clip hides - a 48-signal legend is
@@ -2649,12 +2695,18 @@ void draw_results_panel(Editor& ed, gui::GuiContext& gui,
                                ed.results.scratch_pts);
             }
             if (at >= 0 && static_cast<std::size_t>(at) < s.data.size()) {
-                layout.same_line();
+                layout.same_line(8.0f);
                 const std::string value = with_unit(
                     s.data[static_cast<std::size_t>(at)], unit_of(s.name));
-                gui::text(layout, theme,
+                gui::text(layout, visible ? theme : quiet,
                           (ed.results.hover >= 0 ? value : value + "  (end)")
-                              .c_str());
+                              .c_str(),
+                          -1.0f);
+            }
+            if (toggled) {
+                if (ed.results.visible.size() == t.signals.size()) {
+                    ed.results.visible[i] = visible ? 0u : 1u;
+                }
             }
             gui.ids().pop();
         }

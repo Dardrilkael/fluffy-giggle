@@ -154,15 +154,17 @@ void hint_line(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
 // The panels' section break: a separator and a heading. The heading
 // WRAPS (the long ones - "Directives (.model / .include / .nodeset,
 // verbatim)" - keep every word whole at any panel width instead of
-// clipping at the right edge).
+// clipping at the right edge). The 2026 redesign: the section title
+// wears the SECONDARY rung, not the accent - sections read as
+// structure, and the accent stays reserved for state and the one
+// primary action (an accent title on every section was one of the
+// screen's loudest recurring elements).
 void panel_section(gui::LayoutCursor& layout, const gui::ChromeTheme& theme,
                    const char* title) {
     gui::separator(layout, theme);
-    // The title wears the accent: sections read as landmarks, not as
-    // more body text (control_on clears 4.5:1 on both app chromes).
-    gui::ChromeTheme accented = theme;
-    accented.text = theme.control_on;
-    gui::text_wrapped(layout, accented, title);
+    gui::ChromeTheme section = theme;
+    section.text = theme.text_secondary;
+    gui::text_wrapped(layout, section, title);
 }
 
 // D1's persistent label: a text row ABOVE the field, spelling what the
@@ -1424,6 +1426,8 @@ namespace {
 constexpr float kTileTargetW = 52.0f;
 constexpr float kTileH = 44.0f;
 constexpr float kTilePad = 6.0f;
+// The armed tile's accent bar, px (the selected row's own mark).
+constexpr float kArmedBarPx = 2.0f;
 
 // The symbols armed most recently, newest first, capped at six -
 // Editor::palette_recent's own policy (the browse row's whole
@@ -1461,39 +1465,32 @@ void note_recent_symbol(Editor& ed, const std::string& key) {
 
     canvas::Canvas2D& rc = ed.palette_draw_canvas();
     rc.set_view_scale(1.0f);  // the transform below carries the scale
+    // The flat tile: the elevated surface, period. No card edge (the
+    // grid of hairline borders was the palette's loudest element -
+    // fifty boxes where the symbols were the message); the hover
+    // tints a step lighter, the armed tile alone carries the accent
+    // wash and bar so the placement state reads across the room.
     std::uint32_t face = theme.control_bg;
-    if (res.hit.pressed) {
-        face = theme.control_pressed;
+    if (armed) {
+        face = gui::dim(theme.control_on, 0.24f);
+    } else if (res.hit.pressed) {
+        face = gui::dim(theme.control_on, 0.30f);
     } else if (res.hit.hovered) {
         face = theme.control_hovered;
     }
     rc.fill_rounded_rect(r.x, r.y, r.width, r.height, theme.control_radius(),
                          face);
-    if (!armed) {
-        // A hairline card edge so tiles read as buttons, not floating art.
-        canvas::Paint edge;
-        edge.width = 1.0f;
-        edge.color = res.hit.hovered ? theme.border_strong : theme.border;
-        rc.stroke_rounded_rect(r.x + 0.5f, r.y + 0.5f, r.width - 1.0f,
-                               r.height - 1.0f, theme.control_radius(), edge);
-    }
     if (armed) {
-        // The armed tile: an accent wash and outline (a selectable's
-        // accent bar, grown to fit a tile).
-        rc.fill_rounded_rect(r.x, r.y, r.width, r.height,
-                             theme.corner_radius,
-                             gui::dim(theme.control_on, 0.28f));
-        canvas::Paint outline;
-        outline.width = 1.5f;
-        outline.color = theme.control_on;
-        rc.stroke_rounded_rect(r.x + 0.75f, r.y + 0.75f, r.width - 1.5f,
-                               r.height - 1.5f, theme.corner_radius, outline);
+        // The armed tile's accent bar: a 2px bar on the tile's left
+        // edge, the selected row's own mark, grown to fit a tile.
+        rc.fill_rounded_rect(r.x, r.y, kArmedBarPx, r.height, 1.0f,
+                             theme.control_on);
     } else if (res.focused) {
         canvas::Paint ring;
         ring.width = 1.0f;
         ring.color = gui::dim(theme.control_on, 0.7f);
         rc.stroke_rounded_rect(r.x + 0.5f, r.y + 0.5f, r.width - 1.0f,
-                               r.height - 1.0f, theme.corner_radius, ring);
+                               r.height - 1.0f, theme.control_radius(), ring);
     }
 
     // The picture: fitted to the tile and centered on the symbol's own
@@ -1529,23 +1526,26 @@ void note_recent_symbol(Editor& ed, const std::string& key) {
 void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
                         gui::LayoutCursor& layout,
                         const gui::ChromeTheme& theme) {
-    // The section header: the strong face, a step larger than the body
-    // (the font hierarchy's loud rung - the tools list reads as a
-    // section, not a longer label).
-    gui::heading(layout, theme, "Tools");
-    if (gui::selectable(gui, layout, theme, "Select",
-                        ed.tool == Tool::Select)) {
-        ed.tool = Tool::Select;
-        ed.wire_draft = Editor::WireDraft{};
-    }
-    if (gui::selectable(gui, layout, theme, "Wire (W)",
-                        ed.tool == Tool::Wire)) {
-        ed.tool = Tool::Wire;
-        ed.wire_draft = Editor::WireDraft{};
-    }
-    if (gui::selectable(gui, layout, theme, "Label (L)",
-                        ed.tool == Tool::Label)) {
-        ed.tool = Tool::Label;
+    // The tool row: the three SELECT tools as one tight segmented row
+    // (a full-height selectable each was the palette's tallest block
+    // before any parts appeared; the tools read as peers on one line
+    // the way every pro tool spells its pointer modes). The keyboard
+    // hints stay in the labels - W and L are the chords.
+    static const char* const kTools[] = {"Select", "Wire (W)", "Label (L)"};
+    const Tool tool_kinds[] = {Tool::Select, Tool::Wire, Tool::Label};
+    for (int i = 0; i < 3; ++i) {
+        if (i > 0) {
+            layout.same_line();
+        }
+        gui.ids().push(i);
+        const bool active = ed.tool == tool_kinds[i];
+        if (gui::selectable(gui, layout, theme, kTools[i], active, 74.0f)) {
+            ed.tool = tool_kinds[i];
+            if (ed.tool == Tool::Wire) {
+                ed.wire_draft = Editor::WireDraft{};
+            }
+        }
+        gui.ids().pop();
     }
     if (ed.tool == Tool::Label) {
         // Tracked, so typing a net name never fires the bare panel keys.
@@ -1567,7 +1567,6 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
         hint_line(layout, theme,
                   "Click to place - R rotate - M mirror - Esc cancel");
     }
-    gui::separator(layout, theme);
 
     // The search box. The label is its placeholder; Enter arms the
     // first match, so "res" Enter drops straight into placing a resistor.
@@ -1590,14 +1589,23 @@ void draw_palette_panel(Editor& ed, gui::GuiContext& gui,
     const std::string_view filter{ed.palette_filter};
     const bool filtering = !filter.empty();
     // Grid (pictures, tooltips for names) or List (a named row each):
-    // the grid is dense, the list is readable - the user picks.
-    // A segmented control, so BOTH choices are visible and the current
-    // one is marked (the old toggle button was labeled with the view
-    // you would switch TO, which read as the current one).
+    // the grid is dense, the list is readable - the user picks. A
+    // segmented control sharing the SEARCH's line (a whole second
+    // line for two small choices was pure vertical cost; the two
+    // cells stay whole at any panel the search itself fits in).
     static const char* const kViews[] = {"Grid", "List"};
     int view_mode = ed.palette_list_view ? 1 : 0;
-    (void)gui::tab_bar(gui, layout, theme, "palette view", kViews, 2,
-                       view_mode, -1.0f);
+    {
+        const float views_w = 2.0f * 52.0f + theme.spacing;
+        if (layout.remaining_width() > views_w + 24.0f) {
+            layout.same_line();
+            (void)gui::tab_bar(gui, layout, theme, "palette view", kViews, 2,
+                               view_mode, 52.0f);
+        } else {
+            (void)gui::tab_bar(gui, layout, theme, "palette view", kViews, 2,
+                               view_mode, -1.0f);
+        }
+    }
     ed.palette_list_view = view_mode == 1;
     const std::vector<ws::circsim::PaletteGroup> groups =
         ws::circsim::palette_groups(ed.library, filter);
@@ -2495,7 +2503,10 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
         gui::text(layout, theme, "No document open");
         return;
     }
-    gui::heading(layout, theme, "Schematic");
+    // 2026: the two section titles ride the secondary rung like every
+    // other panel's sections (a heading's tall row was half the tab's
+    // vertical budget before any content appeared).
+    gui::text(layout, theme, "Schematic");
     // D1: the grid readout names its unit and its meaning - "Grid: 1"
     // said a number nobody could read. The pitch is in grid cells
     // (schematic units), and it is what placement snaps to and what
@@ -2511,7 +2522,7 @@ void draw_simulation_setup(Editor& ed, gui::GuiContext& gui,
     gui::separator(layout, theme);
 
     // --- the analysis list
-    gui::heading(layout, theme, "Analyses (in deck order)");
+    panel_section(layout, theme, "Analyses (in deck order)");
     hint_line(layout, theme,
               "Run executes these top to bottom - click one to edit "
               "its parameters");

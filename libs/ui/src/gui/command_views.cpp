@@ -161,30 +161,26 @@ std::string_view command_toolbar(
     ws::app::KeyContext context) {
     const ScopedId scope(gui.ids(), label);
     bool first = true;
+    // The redesign's icon grammar: a glyph on the bar's own face, the
+    // hover a quiet tint wash, the press the accent wash - the IDE
+    // convention, no per-button card. The glyph rides centered in a
+    // square the control height minus a hair of breathing room, so the
+    // strip reads as ONE row of glyphs, not a row of boxes.
+    const float icon_btn = theme.control_height - 2.0f;
+    const float icon_side = std::max(1.0f, icon_btn - 2.0f * 2.0f);
     for (std::size_t i = 0; i < ids.size(); ++i) {
-        // The group separator (F1): a "|" entry lays a vertical rule
-        // between the buttons - the toolbar's file / edit / tools /
-        // run groups read as groups at a glance. Chrome like
-        // separator(): no id, no hit-test, no tooltip. A leading or
-        // doubled separator draws nothing (the !first guard), so a
-        // host's list stays handsome whatever it leaves out.
-        // The group separator (F1): a "|" entry lays a vertical rule
-        // between the buttons - the toolbar's file / edit / tools /
-        // run groups read as groups at a glance. The rule occupies a
-        // FULL-HEIGHT slot (the button's own height, so same_line's
-        // resume-from-the-previous-bottom never drifts the row) and
-        // paints centered inside it; chrome like separator(): no id,
-        // no hit-test, no tooltip. A leading or doubled separator
-        // draws nothing (the !first guard), so a host's list stays
-        // handsome whatever it leaves out.
+        // The group separator: a 1px hairline, half the strip tall -
+        // the grouping cue, whispering (the old 2px full-slot rule
+        // drew one of the loudest elements on the screen).
         if (ids[i] == "|") {
             if (!first) {
                 layout.same_line();
-                const Rect slot = layout.next(
-                    2.0f, theme.control_height);
-                const float h = theme.control_height * 0.55f;
-                r2d::draw_quad(slot.x, slot.y + (slot.height - h) * 0.5f,
-                               2.0f, h, theme.border);
+                const Rect slot = layout.next(1.0f + 2.0f * 3.0f,
+                                              theme.control_height);
+                const float h = theme.control_height * 0.5f;
+                r2d::draw_quad(slot.x + 3.0f,
+                               slot.y + (slot.height - h) * 0.5f, 1.0f, h,
+                               theme.border);
             }
             continue;
         }
@@ -194,11 +190,11 @@ std::string_view command_toolbar(
         }
         const bool disabled = !ws::app::CommandRegistry::is_enabled(*cmd);
 
-        // The mapped icon, when the theme can serve its sprite: a
-        // square icon button. A command without a mapping - or one
-        // whose sprite came back the sentinel (a fontless theme, a
-        // skin that answers nothing) - keeps the text button, so a
-        // toolbar never lays a blank square.
+        // The mapped icon, when the theme can serve its sprite: a flat
+        // icon square. A command without a mapping - or one whose
+        // sprite came back the sentinel (a fontless theme, a skin that
+        // answers nothing) - keeps the text button, so a toolbar never
+        // lays a blank square.
         const ToolbarIcon* mapped = nullptr;
         for (std::size_t m = 0; m < icon_count; ++m) {
             if (icons[m].command == ids[i]) {
@@ -218,7 +214,7 @@ std::string_view command_toolbar(
         // (label_display's cut) - the name moves into the tooltip.
         const char* const button_label =
             as_icon ? "##icon" : cmd->label.c_str();
-        float width = theme.control_height;  // the icon button is square
+        float width = icon_btn;  // the icon square, a hair under the strip
         if (!as_icon) {
             char scratch[128];
             const LabelFit fit = fit_text(cmd->label.c_str(), -1.0f, theme,
@@ -235,20 +231,29 @@ std::string_view command_toolbar(
         const WidgetId id = gui.ids().id(button_label);
         ButtonResult result = button_behavior(gui, id, rect, disabled);
         fold_hover_t(gui, id, result, theme);
-        paint(theme, &WidgetPainters::button, &button_draw, rect, result,
-              theme, button_label, r2d::Sprite{});
         if (as_icon) {
-            // The glyph: the height minus the corner insets (the
-            // button's own icon room), centered, wearing the text
-            // color the label would draw - a coverage mask tinted
-            // white would vanish on the light theme - and dimmed with
-            // the dead lock.
-            const float inset =
-                std::min(theme.corner_radius, rect.height * 0.5f);
-            const float side = std::max(1.0f, rect.height - 2.0f * inset);
-            draw_icon(rect.x + (rect.width - side) * 0.5f,
-                      rect.y + (rect.height - side) * 0.5f, side, sprite,
-                      dim(theme.text, dim_factor(result.state, theme)));
+            // The flat icon: no card, no border - the strip's own face
+            // with the glyph on it. Hover is a quiet wash over the
+            // square, press the accent wash; the DISABLED glyph dims as
+            // any locked control does. The painter seam stays out of
+            // it (a paint() row would draw the button card).
+            const float dimming = dim_factor(result.state, theme);
+            if (result.state == WidgetState::Pressed ||
+                result.state == WidgetState::Hovered) {
+                const std::uint32_t wash =
+                    result.state == WidgetState::Pressed
+                        ? gui::dim(theme.control_on, 0.30f)
+                        : gui::dim(theme.text, 0.08f);
+                r2d::draw_rounded_quad(rect.x, rect.y, rect.width,
+                                       rect.height,
+                                       theme.control_radius(), wash);
+            }
+            draw_icon(rect.x + (rect.width - icon_side) * 0.5f,
+                      rect.y + (rect.height - icon_side) * 0.5f, icon_side,
+                      sprite, dim(theme.text, dimming));
+        } else {
+            paint(theme, &WidgetPainters::button, &button_draw, rect, result,
+                  theme, button_label, r2d::Sprite{});
         }
         if (result.activated()) {
             return cmd->id;

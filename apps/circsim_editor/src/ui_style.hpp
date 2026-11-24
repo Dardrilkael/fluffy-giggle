@@ -39,84 +39,106 @@ using ws::ui::r2d::rgba;
 
 // --- the dark chrome: "Night Circuit" -------------------------------------
 //
-// Layering (dark to light): canvas_bg < bar_bg < panel_bg < control_bg.
-// Designated initializers must follow ChromeTheme's declaration order.
+// The 2026 redesign pass: a restrained engineering-software palette.
+// The old chrome leaned on indigo-tinted faces everywhere, shadows and
+// 10px radii for a soft "product" look; this one follows the KiCad /
+// LTspice / IDE convention - one near-neutral blue-gray ramp for every
+// surface, structure through SUBTLE depth steps instead of borders,
+// and the accent reserved for state and the one primary action.
+//
+// The ramp (dark to light): canvas_bg < bar_bg < panel_bg < elevated
+// (control_bg). Faces deliberately close: hierarchy comes from WHICH
+// layer a thing sits on, not from how different the layers look.
 inline constexpr ChromeTheme kNightChrome{
-    .panel_bg = rgba(22, 25, 38),
-    .control_bg = rgba(36, 40, 60),
-    .control_hovered = rgba(52, 58, 86),
-    .control_pressed = rgba(98, 108, 238),
-    .control_disabled = rgba(22, 25, 38),
-    .control_on = rgba(118, 126, 255),
+    .panel_bg = rgba(25, 29, 40),        // #191D28 surface
+    .control_bg = rgba(34, 40, 56),      // #222838 elevated surface
+    .control_hovered = rgba(43, 50, 69),
+    .control_pressed = rgba(99, 115, 175),
+    .control_disabled = rgba(25, 29, 40),
+    .control_on = rgba(112, 132, 235),   // the accent - one step darker
+                                         // than #8295FF so a white
+                                         // on-accent label clears 3:1
     .text_on_accent = rgba(255, 255, 255),
-    .accent_hover = rgba(150, 157, 255),
-    .text = rgba(231, 234, 246),
-    .text_secondary = rgba(156, 163, 188),
-    .text_muted = rgba(133, 139, 164),
-    .border = rgba(170, 180, 255, 28),
-    .border_strong = rgba(170, 180, 255, 58),
-    .bar_bg = rgba(14, 16, 26),
-    .veil = rgba(6, 8, 18, 150),
-    .toast_info = rgba(66, 133, 244),
-    .toast_warning = rgba(245, 166, 35),
-    .toast_error = rgba(240, 82, 82),
-    .shadow = rgba(0, 0, 0, 150),
-    .danger = rgba(240, 82, 82),
-    .danger_hover = rgba(250, 116, 116),
-    .danger_pressed = rgba(214, 64, 64),
-    .canvas_bg = rgba(15, 19, 31),
-    .grid_minor = rgba(150, 165, 225, 54),
-    .grid_major = rgba(150, 165, 225, 120),
-    .grid_axis = rgba(118, 126, 255, 80),
-    .control_height = 30.0f,
-    .corner_radius = 8.0f,
-    .radius_control = 6.0f,
-    .radius_panel = 10.0f,
-    .radius_popup = 10.0f,
-    .radius_pill = 14.0f,
-    .focus_ring_width = 2.0f,
-    .shadow_blur = 18.0f,
-    .shadow_offset_y = 6.0f,
+    .accent_hover = rgba(145, 161, 245),
+    .text = rgba(229, 231, 235),        // #E5E7EB primary text
+    .text_secondary = rgba(146, 155, 173),  // #929BAD secondary text
+    .text_muted = rgba(124, 132, 150),  // the chrome rung - placeholders
+    .border = rgba(255, 255, 255, 22),
+    .border_strong = rgba(255, 255, 255, 48),
+    .bar_bg = rgba(17, 19, 26),          // #11131A app background
+    .veil = rgba(8, 10, 16, 170),
+    .toast_info = rgba(96, 130, 200),
+    .toast_warning = rgba(204, 153, 68),
+    .toast_error = rgba(214, 88, 80),
+    .shadow = rgba(0, 0, 0, 120),
+    .danger = rgba(226, 96, 88),
+    .danger_hover = rgba(238, 118, 108),
+    .danger_pressed = rgba(198, 76, 68),
+    .canvas_bg = rgba(21, 24, 33),       // the drawing surface, one step
+                                         // below the panel
+    .grid_minor = rgba(255, 255, 255, 38),  // ~15%: texture, not lines
+    .grid_major = rgba(255, 255, 255, 92),  // ~36%: every fifth dot
+    .grid_axis = rgba(130, 149, 255, 64),
+    // Metrics: the density pass. 26px controls (was 30) buy two extra
+    // rows of content per panel; 4/3/4 radii (was 8/6/10/14) read as
+    // crisp tooling, not soft product cards; no shadows anywhere
+    // (shadow_blur 0 - elevation is the surface ramp's own job);
+    // 10px panel padding (was 12) tightens the chrome without
+    // crowding the content.
+    .control_height = 26.0f,
+    .corner_radius = 4.0f,
+    .radius_control = 3.0f,
+    .radius_panel = 4.0f,
+    .radius_popup = 5.0f,
+    .radius_pill = 8.0f,
+    .padding = 10.0f,
+    .spacing = 6.0f,
+    .focus_ring_width = 1.5f,
     .anim_duration = 0.12f,
 };
 
 // --- the light chrome: "Daylight" -----------------------------------------
+//
+// The same neutral ramp walked bright: app background the palest,
+// surfaces one step up, the accent deep enough for white-on-accent
+// labels. Metrics identical to the night chrome (density is not a
+// dark-mode luxury).
 inline constexpr ChromeTheme kDaylightChrome{
-    .panel_bg = rgba(248, 249, 253),
-    .control_bg = rgba(230, 233, 246),
-    .control_hovered = rgba(213, 219, 240),
-    .control_pressed = rgba(55, 48, 163),
-    .control_disabled = rgba(243, 244, 250),
-    .control_on = rgba(79, 70, 229),
+    .panel_bg = rgba(246, 247, 250),
+    .control_bg = rgba(235, 237, 243),
+    .control_hovered = rgba(222, 226, 234),
+    .control_pressed = rgba(94, 106, 155),
+    .control_disabled = rgba(243, 244, 249),
+    .control_on = rgba(93, 106, 190),
     .text_on_accent = rgba(255, 255, 255),
-    .accent_hover = rgba(99, 102, 241),
-    .text = rgba(24, 27, 42),
-    .text_secondary = rgba(88, 94, 120),
-    .text_muted = rgba(116, 121, 142),
-    .border = rgba(30, 36, 90, 36),
-    .border_strong = rgba(30, 36, 90, 70),
-    .bar_bg = rgba(235, 238, 248),
+    .accent_hover = rgba(118, 130, 208),
+    .text = rgba(23, 26, 33),
+    .text_secondary = rgba(96, 102, 118),
+    .text_muted = rgba(122, 128, 143),
+    .border = rgba(28, 32, 45, 34),
+    .border_strong = rgba(28, 32, 45, 64),
+    .bar_bg = rgba(236, 238, 244),
     .veil = rgba(40, 44, 70, 120),
-    .toast_info = rgba(37, 99, 235),
-    .toast_warning = rgba(217, 119, 6),
-    .toast_error = rgba(220, 38, 38),
-    .shadow = rgba(30, 34, 70, 70),
-    .danger = rgba(200, 40, 52),
-    .danger_hover = rgba(222, 72, 82),
-    .danger_pressed = rgba(166, 30, 40),
+    .toast_info = rgba(66, 110, 190),
+    .toast_warning = rgba(186, 126, 40),
+    .toast_error = rgba(196, 58, 54),
+    .shadow = rgba(40, 44, 70, 60),
+    .danger = rgba(198, 44, 48),
+    .danger_hover = rgba(218, 68, 72),
+    .danger_pressed = rgba(168, 34, 38),
     .canvas_bg = rgba(252, 253, 255),
-    .grid_minor = rgba(60, 72, 130, 58),
-    .grid_major = rgba(60, 72, 130, 120),
-    .grid_axis = rgba(79, 70, 229, 84),
-    .control_height = 30.0f,
-    .corner_radius = 8.0f,
-    .radius_control = 6.0f,
-    .radius_panel = 10.0f,
-    .radius_popup = 10.0f,
-    .radius_pill = 14.0f,
-    .focus_ring_width = 2.0f,
-    .shadow_blur = 18.0f,
-    .shadow_offset_y = 6.0f,
+    .grid_minor = rgba(48, 58, 84, 48),
+    .grid_major = rgba(48, 58, 84, 105),
+    .grid_axis = rgba(93, 106, 190, 80),
+    .control_height = 26.0f,
+    .corner_radius = 4.0f,
+    .radius_control = 3.0f,
+    .radius_panel = 4.0f,
+    .radius_popup = 5.0f,
+    .radius_pill = 8.0f,
+    .padding = 10.0f,
+    .spacing = 6.0f,
+    .focus_ring_width = 1.5f,
     .anim_duration = 0.12f,
 };
 
@@ -149,13 +171,13 @@ struct AccentPreset {
 };
 
 inline constexpr std::array<AccentPreset, 7> kAccentPresets{{
-    {"indigo", "Indigo", rgba(118, 126, 255), rgba(79, 70, 229)},
-    {"violet", "Violet", rgba(167, 139, 250), rgba(124, 58, 237)},
-    {"sky", "Sky", rgba(56, 189, 248), rgba(2, 132, 199)},
-    {"teal", "Teal", rgba(45, 212, 191), rgba(13, 148, 136)},
-    {"emerald", "Emerald", rgba(52, 211, 153), rgba(5, 150, 105)},
-    {"amber", "Amber", rgba(251, 191, 36), rgba(217, 119, 6)},
-    {"rose", "Rose", rgba(251, 113, 133), rgba(225, 29, 72)},
+    {"indigo", "Indigo", rgba(112, 132, 235), rgba(93, 106, 190)},
+    {"violet", "Violet", rgba(164, 140, 250), rgba(118, 74, 230)},
+    {"sky", "Sky", rgba(84, 180, 250), rgba(14, 122, 190)},
+    {"teal", "Teal", rgba(64, 205, 190), rgba(18, 138, 128)},
+    {"emerald", "Emerald", rgba(84, 200, 150), rgba(30, 140, 100)},
+    {"amber", "Amber", rgba(240, 185, 60), rgba(184, 126, 20)},
+    {"rose", "Rose", rgba(246, 122, 141), rgba(198, 52, 88)},
 }};
 
 // The preset a setting value names; an unknown or empty value is the
