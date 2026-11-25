@@ -13,7 +13,9 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 #include <cmath>
 #include <numbers>
