@@ -150,16 +150,10 @@ class World {
   // probe).
   [[nodiscard]] int surface_height(int x, int z) const;
 
-  // The COLLISION SHELL: true when the cell is solid and has at least
-  // one non-solid 6-neighbor - the skin of the terrain, the trunks,
-  // every placed block's face. Buried cells (solid on all six sides)
-  // read false: nothing can ever touch them, so the physics grid keeps
-  // exactly the exposed cells and re-derives membership around every
-  // edit (a dig exposes the wall behind it, a place buries what it
-  // covers). The void outside the world reads SOLID for this test -
-  // the border columns' outboard faces are not "exposed" (nothing can
-  // reach them without leaving the world, and there is no floor out
-  // there anyway).
+  // Surface-membership helper: true when a solid cell has at least one
+  // non-solid 6-neighbor. Retained for gameplay queries/tests; the
+  // physics broadphase now uses exact merged solid cuboids instead of
+  // a body per exposed cell.
   [[nodiscard]] bool is_exposed(int x, int y, int z) const;
 
   // --- the DDA raycast ----------------------------------------------------------
