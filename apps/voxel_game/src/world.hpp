@@ -135,6 +135,17 @@ class World {
     return chunk_meshes_;
   }
 
+  // A merged axis-aligned collision cuboid in GAME-space coordinates.
+  // Cuboids exactly cover the solid voxel union without overlaps.
+  struct CollisionBox {
+    ws::math::Vec3 center{};
+    ws::math::Vec3 half_extents{};
+  };
+  // Greedily decomposes one chunk's solid cells into maximal cuboids.
+  // Static collision uses these instead of one body per exposed voxel.
+  [[nodiscard]] std::vector<CollisionBox> collision_boxes(int cx,
+                                                           int cz) const;
+
   // The highest solid block's y at a column, -1 when none (the spawn
   // probe).
   [[nodiscard]] int surface_height(int x, int z) const;
