@@ -128,7 +128,7 @@ constexpr FaceDir kFaces[6] = {
 
 // Each face's tangent basis (GAME space, y up): (u, v) with u x v = n.
 constexpr float kUVB[6][2][3] = {
-    {{0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f}},   // top: u=+z v=+x
+    {{1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}},  // top: u=+x (east) v=-z (north)
     {{1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}},   // bottom: u=+x v=+z
     {{0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}},   // east: u=+y v=+z
     {{0.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 0.0f}},   // west: u=+z v=+y
