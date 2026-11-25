@@ -1,11 +1,9 @@
 // apps/voxel_game - player.hpp: the first-person controller.
 //
-// A physics3d dynamic Box body (0.6 x 1.8 x 0.6 - the classic proportions)
-// for collision against the static voxel grid, plus the game-side look
-// state (yaw/pitch) and the controller tick that owns the horizontal
-// velocity (the FPS pattern the headless prototype validated: the
-// controller sets the horizontal velocity EXACTLY every tick so the
-// solver never fights it, gravity owns the vertical, zero friction).
+// A physics3d dynamic capsule (0.6 wide x 1.8 tall) for collision
+// against the static voxel grid. The controller owns horizontal velocity;
+// the physics world alone integrates vertical gravity. A short coyote-time
+// and jump-buffer window make grounding forgiving at voxel edges.
 //
 // Look: yaw/pitch from the mouse (the desktop path; Android gets a
 // drag-look on the right half of the screen, a later-life toggle -
@@ -17,11 +15,8 @@
 // sin(pitch), -cos(yaw)cos(pitch)) - yaw 0 looks north (-z), yaw
 // +pi/2 east (+x), the standard FPS compass.
 //
-// Grounding: a contact-driven grounded flag. The world's contact
-// events (began/hit with the player + a static below) set it, and it
-// decays when contacts end - the prototype proved resting works, so
-// the events stay as the ground truth (a probe ray would be the other
-// spell; the events are already in the pipe).
+// Grounding is contact-driven, with short coyote-time and jump buffering
+// to tolerate a one-frame contact gap at voxel seams.
 
 #pragma once
 
@@ -45,7 +40,7 @@ struct PlayerTuning {
   float walk_speed = 6.0f;   // m/s
   float sprint_speed = 10.5f;  // m/s (shift)
   float max_fall = 55.0f;     // m/s terminal clamp
-  float eye_height = 1.62f;   // above the feet (the box center + 0.72)
+  float eye_height = 1.72f;   // above the feet; slightly above classic eye level
   float mouse_sensitivity = 0.0025f;  // radians per pixel
 };
 
@@ -107,6 +102,8 @@ class Player {
   float yaw_ = 0.0f;   // about +y, 0 = north (-z)
   float pitch_ = 0.0f;  // about the horizontal, clamped +-89 deg
   bool grounded_ = false;
+  float coyote_time_ = 0.0f;  // brief grace after leaving a floor edge
+  float jump_buffer_ = 0.0f;  // brief grace when jump is pressed before landing
   PlayerTuning tuning_;
 };
 
