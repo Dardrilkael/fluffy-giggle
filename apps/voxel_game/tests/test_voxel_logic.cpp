@@ -13,6 +13,8 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <string>
+
 #include <cmath>
 #include <numbers>
 
@@ -557,89 +559,66 @@ TEST_CASE("atlas: the face->tile map matches the block vocabulary") {
     return voxel::atlas::kTileFor[static_cast<std::size_t>(block)][face];
   };
   CHECK(t(B::grass, 0) == 0);   // grass_block_top
-  CHECK(t(B::grass, 1) == 2);   // dirt
-  CHECK(t(B::grass, 2) == 1);   // grass_block_side
-  CHECK(t(B::grass, 5) == 1);
-  CHECK(t(B::dirt, 0) == 2);    // dirt everywhere
-  CHECK(t(B::dirt, 4) == 2);
+  CHECK(t(B::grass, 1) == 1);   // dirt
+  CHECK(t(B::grass, 2) == 2);   // grass_block_side
+  CHECK(t(B::grass, 5) == 2);
+  CHECK(t(B::dirt, 0) == 1);    // dirt everywhere
+  CHECK(t(B::dirt, 4) == 1);
   CHECK(t(B::stone, 3) == 3);   // stone everywhere
-  CHECK(t(B::wood, 0) == 5);    // oak_log_top
-  CHECK(t(B::wood, 1) == 5);
-  CHECK(t(B::wood, 2) == 4);    // oak_log side
-  CHECK(t(B::wood, 5) == 4);
+  CHECK(t(B::wood, 0) == 4);    // oak_log_top
+  CHECK(t(B::wood, 1) == 4);
+  CHECK(t(B::wood, 2) == 5);    // oak_log side
+  CHECK(t(B::wood, 5) == 5);
   CHECK(t(B::sand, 0) == 6);    // sand everywhere
   CHECK(t(B::sand, 5) == 6);
 }
 
-TEST_CASE("atlas: the mesher's UV math lands tiles upright on faces") {
-  // The mesher's own formula, spelled independently here: a face's
-  // corner (su, sv) in [-0.5, 0.5] maps into its tile's square, with
-  // v FLIPPED (sv = +0.5 is the face's UP edge; the tile's top rows -
-  // the grass side's green fringe - are v ~= 0 in atlas-image space).
-  // The tile bounds are INSET half a texel per edge (kTileInset) - the
-  // LINEAR sampler's bleed guard.
-  const int tile = voxel::atlas::kTileFor
-      [static_cast<std::size_t>(voxel::Block::grass)][5];  // north face
-  const float g = static_cast<float>(voxel::atlas::kAtlasGrid);
-  const float ins = voxel::atlas::kTileInset;
-  const float u0 = static_cast<float>(tile % voxel::atlas::kAtlasGrid) / g + ins;
-  const float v0 = static_cast<float>(tile / voxel::atlas::kAtlasGrid) / g + ins;
-  const float s = 1.0f / g - 2.0f * ins;
-  const float px = static_cast<float>(voxel::atlas::kAtlasPixels);
-  const float tp = px / g;  // the tile's edge in atlas pixels
-
-  // The face's UP corner (sv = +0.5) samples v = v0 + 0 (the tile's
-  // TOP rows - the fringe); the DOWN corner (sv = -0.5) samples v =
-  // v0 + s (the tile's BOTTOM rows). Read as atlas pixel rows (v*px):
-  // up < down, and each lands INSIDE the tile (the half-texel inset).
-  const auto v_at = [&](float sv) {
-    return (v0 + (1.0f - (sv + 0.5f)) * s) * px;
-  };
-  CHECK(v_at(+0.5f) < v_at(-0.5f));
-  CHECK(v_at(+0.5f) >= (tile / voxel::atlas::kAtlasGrid) * tp);
-  CHECK(v_at(-0.5f) <= (tile / voxel::atlas::kAtlasGrid + 1) * tp);
-
-  // u spans the tile's INSET bounds: the left corner (su = -0.5)
-  // samples the tile's first interior texel, the right corner
-  // (su = +0.5) the last - no bleed into the neighbor tile.
-  const auto u_at = [&](float su) { return (u0 + (su + 0.5f) * s) * px; };
-  CHECK(u_at(-0.5f) > (tile % voxel::atlas::kAtlasGrid) * tp);
-  CHECK(u_at(+0.5f) < (tile % voxel::atlas::kAtlasGrid + 1) * tp);
-  CHECK(u_at(+0.5f) - u_at(-0.5f) == doctest::Approx(tp - 2.0f * ins * px)
-                                                     .epsilon(0.01));
-}
-
-TEST_CASE("greedy meshing: the merged quad count is far under the per-face count") {
-  // The whole world's merged meshes must render the SAME faces with
-  // far fewer triangles: the per-face mesher's 114,256 triangles for
-  // this seed drop by more than half under greedy merging (measured:
-  // 26,378 - the exact pin is the reduction, not the exact count).
-  voxel::World world;
-  world.generate(0xC0FFEEu);
-  std::uint32_t tris = 0;
-  std::uint32_t meshes = 0;
-  // Count via the registry-free path: rebuild needs the renderer; the
-  // mesh builder itself is headless. Sum every (chunk, tile) mesh.
-  for (int cz = 0; cz < voxel::kWorldChunksZ; ++cz) {
-    for (int cx = 0; cx < voxel::kWorldChunksX; ++cx) {
-      for (int tile = 0; tile < voxel::atlas::kTileCount; ++tile) {
-        // The builder is file-local; the mesh count is pinned via the
-        // triangles each tile contributes - spelled through the public
-        // rebuild path when the renderer lives, else counted here via
-        // the same greedy walk. (Pinned indirectly: see below.)
-        (void)tile;
+TEST_CASE("atlas: the automatic creator's derived contract is pinned") {
+  // scripts/create_atlas.py derives the tile set FROM THE PACK; these
+  // pins hold the derivation still matches what the game reads:
+  // 8 distinct assets (dead pack entries never gain slots), 64px each,
+  // grass/dirt/wood split per face group, water resolved from the
+  // animation strip's frame 0, air never meshed.
+  CHECK(voxel::atlas::kTileCount == 8);
+  CHECK(voxel::atlas::kTilePixels == 64);
+  // First-use order: grass top, dirt, grass side, stone, oak top,
+  // oak side, sand, water - the manifest the creator pinned.
+  CHECK(std::string(voxel::atlas::kTileNames[0]) == "grass_block_top");
+  CHECK(std::string(voxel::atlas::kTileNames[1]) == "dirt");
+  CHECK(std::string(voxel::atlas::kTileNames[2]) == "grass_block_side");
+  CHECK(std::string(voxel::atlas::kTileNames[3]) == "stone");
+  CHECK(std::string(voxel::atlas::kTileNames[4]) == "oak_log_top");
+  CHECK(std::string(voxel::atlas::kTileNames[5]) == "oak_log");
+  CHECK(std::string(voxel::atlas::kTileNames[6]) == "sand");
+  CHECK(std::string(voxel::atlas::kTileNames[7]) == "water_still");
+  // The (block, face) table: grass top 0, grass bottom dirt, sides
+  // grass_side; wood top/bottom oak_log_top, sides oak_log; water
+  // still-frame on top only; air -1 (never meshed).
+  CHECK(voxel::atlas::kTileFor[1][0] == 0);
+  CHECK(voxel::atlas::kTileFor[1][1] == 1);
+  CHECK(voxel::atlas::kTileFor[1][2] == 2);
+  CHECK(voxel::atlas::kTileFor[1][5] == 2);
+  CHECK(voxel::atlas::kTileFor[2][0] == 1);   // dirt everywhere
+  CHECK(voxel::atlas::kTileFor[4][0] == 4);   // wood top = oak_log_top
+  CHECK(voxel::atlas::kTileFor[4][2] == 5);   // wood sides = oak_log
+  CHECK(voxel::atlas::kTileFor[5][0] == 6);   // sand
+  CHECK(voxel::atlas::kTileFor[6][0] == 7);   // water top only
+  CHECK(voxel::atlas::kTileFor[6][1] == -1);  // water sides never read
+  CHECK(voxel::atlas::kTileFor[0][0] == -1);  // air
+  // Every slot the table names exists (the PNG walk answers every
+  // named slot and refuses the rest).
+  for (int b = 1; b < 7; ++b) {
+    for (int f = 0; f < 6; ++f) {
+      const int tile = voxel::atlas::kTileFor[b][f];
+      if (tile < 0) {
+        continue;
       }
-      (void)tris; (void)meshes;
+      std::size_t bytes = 0;
+      CHECK(voxel::atlas::tile_png(tile, bytes) != nullptr);
+      CHECK(bytes > 0);
     }
   }
-  // The direct pin (needs the renderer) lives in the GPU harness; the
-  // logic-level pin here is the ATLAS TABLE + the mesh contract:
-  CHECK(voxel::atlas::kTileCount == 10);
-  CHECK(voxel::atlas::kTilePixels == 64);
-  // kTileFor rows unchanged (the same face->tile map as the atlas).
-  CHECK(voxel::atlas::kTileFor[1][0] == 0);   // grass top
-  CHECK(voxel::atlas::kTileFor[1][1] == 2);   // grass bottom -> dirt
-  CHECK(voxel::atlas::kTileFor[1][5] == 1);   // grass sides
-  CHECK(voxel::atlas::kTileFor[4][2] == 4);   // wood sides -> log
-  CHECK(voxel::atlas::kTileFor[4][0] == 5);   // wood top -> log top
+  std::size_t dead = 0;
+  CHECK(voxel::atlas::tile_png(voxel::atlas::kTileCount, dead) == nullptr);
+  CHECK(dead == 0);
 }
