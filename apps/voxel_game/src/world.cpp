@@ -201,7 +201,15 @@ void emit_quad(ws::ui::r3d::MeshData& out, Block /*type*/, int fi, int ox,
   // the u and v basis directions (they are axis-aligned unit steps).
   float anchor[3];
   for (int a = 0; a < 3; ++a) {
-    anchor[a] = pmin[a];
+    // The anchor must be the corner from which the positive (u, v)
+    // lattice walk starts. For a negative tangent axis, that is the
+    // maximum coordinate, not pmin: starting at pmin and then adding
+    // a negative basis vector shifts the whole greedy quad outside the
+    // cells it is meant to cover (notably every horizontal face's -Z
+    // tangent). Each non-normal axis belongs to exactly one tangent.
+    const bool negative_u = ub[a] < 0.0f;
+    const bool negative_v = vb[a] < 0.0f;
+    anchor[a] = (negative_u || negative_v) ? pmax[a] : pmin[a];
   }
   anchor[na] = plane;
   // Extents: the covered cells span w cells along u and h along v
