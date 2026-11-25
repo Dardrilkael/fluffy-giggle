@@ -35,9 +35,11 @@ bool Player::spawn(ws::physics3d::World3D& world,
                    const ws::math::Vec3& center) {
   ws::physics3d::BodyDesc desc{};
   desc.kind = ws::physics::BodyKind::dynamic;
-  desc.shape = ws::physics3d::Box{
-      ws::math::Vec3{tuning_.half_width, tuning_.half_height,
-                     tuning_.half_width}};
+  // A capsule rolls over voxel corners instead of catching its box edges.
+  // half_height is the inner segment; radius makes the total half-height
+  // exactly tuning_.half_height (0.6 + 0.3 = 0.9).
+  desc.shape = ws::physics3d::Capsule{
+      tuning_.half_height - tuning_.half_width, tuning_.half_width};
   desc.transform = ws::physics3d::Transform{center, {}};
   // Zero friction: the controller owns the horizontal velocity
   // exactly every tick, so the solver's friction would only fight it
@@ -94,33 +96,45 @@ void Player::tick(const MoveInput& input, float dt,
                                 move.z / len * speed};
   }
 
-  // --- the vertical: gravity + jump -------------------------------------------
-  // Read the body's current vertical velocity, jump if grounded, then
-  // hand the whole vector back - the controller is the authority.
+  // --- vertical motion: the physics world owns gravity ------------------------
+  // Applying gravity here as well would double the world acceleration.
+  // The controller only injects jump velocity and caps the fall speed.
   const auto state = world.body_state(body_);
-  float vy = 0.0f;
-  if (state.has_value()) {
-    vy = state->linear_velocity.y;
+  float vy = state.has_value() ? state->linear_velocity.y : 0.0f;
+
+  constexpr float kJumpBufferSeconds = 0.12f;
+  constexpr float kCoyoteSeconds = 0.10f;
+  if (input.jump) {
+    jump_buffer_ = kJumpBufferSeconds;
+  } else {
+    jump_buffer_ = std::max(0.0f, jump_buffer_ - dt);
   }
-  if (input.jump && grounded_) {
+  if (grounded_) {
+    coyote_time_ = kCoyoteSeconds;
+  } else {
+    coyote_time_ = std::max(0.0f, coyote_time_ - dt);
+  }
+  if (jump_buffer_ > 0.0f && coyote_time_ > 0.0f) {
     vy = tuning_.jump_speed;
+    jump_buffer_ = 0.0f;
+    coyote_time_ = 0.0f;
+    grounded_ = false;
   }
-  vy += tuning_.gravity * dt;
-  if (vy < -tuning_.max_fall) {
-    vy = -tuning_.max_fall;
-  }
+  vy = std::max(vy, -tuning_.max_fall);
 
   (void)world.set_velocity(
       body_, ws::math::Vec3{horizontal.x, vy, horizontal.z},
       ws::math::Vec3{});
 
-  // Cache the pose for the HUD/raycast (the world steps after this;
-  // position_ lags by one tick - invisible at 60 Hz, and the camera
-  // reads the live body_state instead).
-  const auto after = world.body_state(body_);
-  if (after.has_value()) {
-    position_ = after->position;
-    velocity_ = after->linear_velocity;
+  // Cache the last known pose from the single state read. The world
+  // advances after this controller tick; the camera/HUD are updated
+  // again on the next frame.
+  if (state.has_value()) {
+    position_ = state->position;
+    velocity_ = state->linear_velocity;
+    velocity_.x = horizontal.x;
+    velocity_.z = horizontal.z;
+    velocity_.y = vy;
   }
 }
 
