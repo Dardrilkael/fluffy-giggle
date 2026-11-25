@@ -504,6 +504,94 @@ TEST_CASE("frame: the camera reads the rotated world the right way round") {
   CHECK(ws::math::dot(w_s, fwd) < -9.0f);
 }
 
+TEST_CASE("collision: greedy chunk boxes exactly cover solid voxels") {
+  voxel::World world;
+  world.generate(0xC0FFEEu);
+
+  // Exercise a chunk with terrain and likely tree/overhang geometry.
+  constexpr int cx = 4;
+  constexpr int cz = 4;
+  const auto boxes = world.collision_boxes(cx, cz);
+  REQUIRE(!boxes.empty());
+
+  std::vector<std::uint8_t> covered(voxel::kBlocksPerChunk, 0);
+  for (const auto& box : boxes) {
+    const int min_x = static_cast<int>(std::lround(
+        box.center.x - box.half_extents.x)) - cx * voxel::kChunkSizeX;
+    const int min_y = static_cast<int>(std::lround(
+        box.center.y - box.half_extents.y));
+    const int min_z = static_cast<int>(std::lround(
+        box.center.z - box.half_extents.z)) - cz * voxel::kChunkSizeZ;
+    const int size_x = static_cast<int>(std::lround(
+        box.half_extents.x * 2.0f));
+    const int size_y = static_cast<int>(std::lround(
+        box.half_extents.y * 2.0f));
+    const int size_z = static_cast<int>(std::lround(
+        box.half_extents.z * 2.0f));
+    CHECK(size_x > 0);
+    CHECK(size_y > 0);
+    CHECK(size_z > 0);
+    for (int y = min_y; y < min_y + size_y; ++y) {
+      for (int z = min_z; z < min_z + size_z; ++z) {
+        for (int x = min_x; x < min_x + size_x; ++x) {
+          REQUIRE(x >= 0);
+          REQUIRE(x < voxel::kChunkSizeX);
+          REQUIRE(y >= 0);
+          REQUIRE(y < voxel::kChunkSizeY);
+          REQUIRE(z >= 0);
+          REQUIRE(z < voxel::kChunkSizeZ);
+          const auto i = static_cast<std::size_t>(
+              voxel::block_index(x, y, z));
+          CHECK(covered[i] == 0);  // no overlapping collision boxes
+          CHECK(voxel::is_solid(world.block_at(
+              cx * voxel::kChunkSizeX + x, y,
+              cz * voxel::kChunkSizeZ + z)));
+          covered[i] = 1;
+        }
+      }
+    }
+  }
+
+  std::size_t solid_count = 0;
+  for (int y = 0; y < voxel::kChunkSizeY; ++y) {
+    for (int z = 0; z < voxel::kChunkSizeZ; ++z) {
+      for (int x = 0; x < voxel::kChunkSizeX; ++x) {
+        const bool solid = voxel::is_solid(world.block_at(
+            cx * voxel::kChunkSizeX + x, y,
+            cz * voxel::kChunkSizeZ + z));
+        const auto i = static_cast<std::size_t>(
+            voxel::block_index(x, y, z));
+        CHECK((covered[i] != 0) == solid);
+        solid_count += solid ? 1u : 0u;
+      }
+    }
+  }
+  CHECK(solid_count > 0);
+  CHECK(boxes.size() < solid_count);
+}
+
+TEST_CASE("collision: chunk boxes update after digging and placing") {
+  voxel::World world;
+  world.generate(0xC0FFEEu);
+  constexpr int x = 64;
+  constexpr int z = 64;
+  const int y = world.surface_height(x, z);
+  REQUIRE(y >= 0);
+
+  const auto before = world.collision_boxes(x / voxel::kChunkSizeX,
+                                             z / voxel::kChunkSizeZ);
+  REQUIRE(!before.empty());
+  REQUIRE(world.set_block(x, y, z, voxel::Block::air));
+  const auto dug = world.collision_boxes(x / voxel::kChunkSizeX,
+                                          z / voxel::kChunkSizeZ);
+  CHECK(dug.size() <= before.size() + 6);
+
+  REQUIRE(world.set_block(x, y, z, voxel::Block::stone));
+  const auto placed = world.collision_boxes(x / voxel::kChunkSizeX,
+                                             z / voxel::kChunkSizeZ);
+  CHECK(!placed.empty());
+}
+
 TEST_CASE("menu: the pause layout centers the pair on the frame") {
   // Two buttons, resume above quit, the pair centered both ways: the
   // classic pause-menu read. Any frame size.
