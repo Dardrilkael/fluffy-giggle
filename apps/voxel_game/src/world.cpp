@@ -505,6 +505,93 @@ void World::rebuild_all() {
   }
 }
 
+std::vector<World::CollisionBox> World::collision_boxes(int cx,
+                                                                  int cz) const {
+  std::vector<CollisionBox> boxes;
+  if (cx < 0 || cx >= kWorldChunksX || cz < 0 || cz >= kWorldChunksZ) {
+    return boxes;
+  }
+
+  // Chunk-local occupancy and visitation. Merge X first, then Z rows,
+  // then Y layers. Every extension is accepted only when the complete
+  // rectangle is solid and unused, so the resulting boxes are disjoint
+  // and their union is exactly the original solid voxel set.
+  std::vector<std::uint8_t> used(kBlocksPerChunk, 0);
+  const int ox = cx * kChunkSizeX;
+  const int oz = cz * kChunkSizeZ;
+  const auto solid_unused = [&](int x, int y, int z) {
+    const auto i = static_cast<std::size_t>(block_index(x, y, z));
+    return used[i] == 0 && is_solid(block_at(ox + x, y, oz + z));
+  };
+
+  for (int y = 0; y < kChunkSizeY; ++y) {
+    for (int z = 0; z < kChunkSizeZ; ++z) {
+      for (int x = 0; x < kChunkSizeX; ++x) {
+        if (!solid_unused(x, y, z)) {
+          continue;
+        }
+
+        int sx = 1;
+        while (x + sx < kChunkSizeX &&
+               solid_unused(x + sx, y, z)) {
+          ++sx;
+        }
+
+        int sz = 1;
+        bool grow_z = true;
+        while (z + sz < kChunkSizeZ && grow_z) {
+          for (int dx = 0; dx < sx; ++dx) {
+            if (!solid_unused(x + dx, y, z + sz)) {
+              grow_z = false;
+              break;
+            }
+          }
+          if (grow_z) {
+            ++sz;
+          }
+        }
+
+        int sy = 1;
+        bool grow_y = true;
+        while (y + sy < kChunkSizeY && grow_y) {
+          for (int dz = 0; dz < sz && grow_y; ++dz) {
+            for (int dx = 0; dx < sx; ++dx) {
+              if (!solid_unused(x + dx, y + sy, z + dz)) {
+                grow_y = false;
+                break;
+              }
+            }
+          }
+          if (grow_y) {
+            ++sy;
+          }
+        }
+
+        for (int dy = 0; dy < sy; ++dy) {
+          for (int dz = 0; dz < sz; ++dz) {
+            for (int dx = 0; dx < sx; ++dx) {
+              used[static_cast<std::size_t>(
+                  block_index(x + dx, y + dy, z + dz))] = 1;
+            }
+          }
+        }
+
+        boxes.push_back(CollisionBox{
+            ws::math::Vec3{static_cast<float>(ox + x) +
+                               static_cast<float>(sx) * 0.5f,
+                           static_cast<float>(y) +
+                               static_cast<float>(sy) * 0.5f,
+                           static_cast<float>(oz + z) +
+                               static_cast<float>(sz) * 0.5f},
+            ws::math::Vec3{static_cast<float>(sx) * 0.5f,
+                           static_cast<float>(sy) * 0.5f,
+                           static_cast<float>(sz) * 0.5f}});
+      }
+    }
+  }
+  return boxes;
+}
+
 int World::surface_height(int x, int z) const {
   for (int y = kChunkSizeY - 1; y >= 0; --y) {
     if (is_solid(block_at(x, y, z))) {
