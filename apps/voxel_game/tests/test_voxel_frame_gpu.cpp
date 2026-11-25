@@ -27,6 +27,8 @@
 #include <doctest/doctest.h>
 
 #include "renderer.hpp"
+
+#include <array>
 #include "world.hpp"
 
 #include "render/renderer2d.h"
@@ -202,8 +204,10 @@ public:
                                ws::ui::r2d::rgba(135, 196, 250));
         ws::ui::r2d::end();
 
-        voxel::begin_scene(player_, static_cast<float>(kW) / static_cast<float>(kH));
-        voxel::draw_world(*world_, atlas_);
+        const auto cam = voxel::begin_scene(
+            player_, static_cast<float>(kW) / static_cast<float>(kH));
+        voxel::draw_world(*world_, tiles_, cam,
+                          static_cast<float>(kW) / static_cast<float>(kH));
         ws::ui::r2d::end();
 
         r.frame_end();
@@ -255,9 +259,9 @@ private:
             return false;
         }
         world_->rebuild_all();
-        // The atlas: the app's own load path (the generated header's
-        // PNG bytes through the engine's memory decoder).
-        atlas_ = voxel::load_atlas_texture();
+        // The tiles: the app's own load path (the generated header's
+        // per-tile PNGs through the engine's memory decoder).
+        tiles_ = voxel::load_tile_textures();
         return true;
     }
 
@@ -440,7 +444,8 @@ private:
     std::unique_ptr<Renderer2D> renderer_;
     std::unique_ptr<voxel::World> world_;
     voxel::Player player_{};
-    ws::ui::r2d::Texture atlas_{};  // the app's own atlas load
+    std::array<ws::ui::r2d::Texture, voxel::atlas::kTileCount>
+        tiles_{};  // the app's own per-tile loads
     VkDevice device_ = VK_NULL_HANDLE;
     VkQueue queue_ = VK_NULL_HANDLE;
     VkPhysicalDevice phys_ = VK_NULL_HANDLE;

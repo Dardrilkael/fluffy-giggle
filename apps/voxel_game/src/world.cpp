@@ -12,6 +12,8 @@
 #include "texture_atlas.hpp"
 #include "world.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 
@@ -92,151 +94,283 @@ constexpr int kWaterLevel = 12;  // game-space y water fills to
 constexpr int kHeightMin = 2;    // the terrain's lowest column (a lake bed)
 constexpr int kHeightSpan = 28; // the range above kHeightMin (hills to 30)
 
-// --- the mesher ------------------------------------------------------------------
-// One (chunk, type) mesh: the chunk's cells of that type, each face
-// emitted when the neighbor across it is non-solid (air or water both
-// read see-through). Geometry is RENDER space (world.hpp's frame note):
-// game (gx, gy, gz) -> render (gx+0.5, -(gy+0.5), -(gz+0.5)) - the
-// 180-degree turn about the x axis, a proper rotation (det +1), so
-// winding survives the map unchanged.
+// --- the mesher (GREEDY) ----------------------------------------------------------
+// One (chunk, TILE) mesh: the chunk's exposed faces whose (block, face)
+// pair selects THIS atlas tile (kTileFor), merged into large quads by the
+// classic greedy-meshing sweep - same-direction faces that sit coplanar
+// and adjacent merge into one quad. A hillside of 100 grass blocks is a
+// handful of quads instead of 100; the triangles drop several-fold.
 //
-// Winding: the mesh pipeline culls BACK faces with CCW front
-// (renderer3d_math.h's kMeshFrontFaceCcw, pinned by the r3d suite).
-// The emitter picks each face's corner order by the right-hand test
-// (u x v) . n >= 0 and flips when negative - no per-family spelling to
-// get wrong.
-[[nodiscard]] ws::ui::r3d::MeshData build_chunk_type_mesh(
-    const World& world, int cx, int cz, Block type) {
-  ws::ui::r3d::MeshData out;
+// Face existence is the SAME rule the per-face mesher used: a face
+// emits when the neighbor across it is non-solid; greedy only changes
+// HOW faces group, never WHICH exist. Geometry is RENDER space
+// (world.hpp's frame note), winding CCW by the right-hand (u x v) . n
+// test, normals per face direction - all unchanged.
+//
+// UVs: a merged W x H quad carries (u, v) in TILE UNITS [0, W] x [0, H];
+// mesh.frag's wrap_tiled repeats the tile per unit (the tile's own
+// standalone texture - one per draw - samples its full [0,1]).
+namespace {
+
+// The 6 face directions: cell offset + game-space outward normal.
+struct FaceDir {
+  int dx, dy, dz;
+  float normal[3];
+};
+constexpr FaceDir kFaces[6] = {
+    {0, 1, 0, {0.0f, 1.0f, 0.0f}},    // top
+    {0, -1, 0, {0.0f, -1.0f, 0.0f}},  // bottom
+    {1, 0, 0, {1.0f, 0.0f, 0.0f}},    // east
+    {-1, 0, 0, {-1.0f, 0.0f, 0.0f}},  // west
+    {0, 0, 1, {0.0f, 0.0f, 1.0f}},    // south
+    {0, 0, -1, {0.0f, 0.0f, -1.0f}},  // north
+};
+
+// Each face's tangent basis (GAME space, y up): (u, v) with u x v = n.
+constexpr float kUVB[6][2][3] = {
+    {{0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f}},   // top: u=+z v=+x
+    {{1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}},   // bottom: u=+x v=+z
+    {{0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}},   // east: u=+y v=+z
+    {{0.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 0.0f}},   // west: u=+z v=+y
+    {{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}},   // south: u=+x v=+y
+    {{0.0f, 1.0f, 0.0f}, {1.0f, 0.0f, 0.0f}},   // north: u=+y v=+x
+};
+
+// Emits one merged quad for the greedy rectangle (slice sa, [pu, pu+w)
+// x [pv, pv+h) on face fi's plane lattice. The lattice walk mirrors
+// the mask build exactly - the two can never disagree where a cell is.
+void emit_quad(ws::ui::r3d::MeshData& out, Block /*type*/, int fi, int ox,
+                int oz, int sa, int pu, int pv, int w, int h,
+                int u_len, int v_len) {
+  const FaceDir& face = kFaces[fi];
+  const int ux = static_cast<int>(kUVB[fi][0][0]);
+  const int uy = static_cast<int>(kUVB[fi][0][1]);
+  const int uz = static_cast<int>(kUVB[fi][0][2]);
+  const int vx = static_cast<int>(kUVB[fi][1][0]);
+  const int vy = static_cast<int>(kUVB[fi][1][1]);
+  const int vz = static_cast<int>(kUVB[fi][1][2]);
+
+  // Chunk-local cell coords of one lattice point (the mask's walk).
+  const auto cell_of = [&](int s, int pU, int pV) {
+    int lx = 0, ly = 0, lz = 0;
+    lx += ux != 0 ? (ux > 0 ? pU : u_len - 1 - pU) : 0;
+    ly += uy != 0 ? (uy > 0 ? pU : u_len - 1 - pU) : 0;
+    lz += uz != 0 ? (uz > 0 ? pU : u_len - 1 - pU) : 0;
+    lx += vx != 0 ? (vx > 0 ? pV : v_len - 1 - pV) : 0;
+    ly += vy != 0 ? (vy > 0 ? pV : v_len - 1 - pV) : 0;
+    lz += vz != 0 ? (vz > 0 ? pV : v_len - 1 - pV) : 0;
+    if (face.dx != 0) lx = s;
+    if (face.dy != 0) ly = s;
+    if (face.dz != 0) lz = s;
+    return std::array<int, 3>{ox + lx, ly, oz + lz};
+  };
+
+  // The covered rectangle's four corner CELLS; the quad rides the
+  // boundary plane between the cells and their neighbors across the
+  // normal. Compute the min/max cell corners, then the quad's corners.
+  const auto c00 = cell_of(sa, pu, pv);
+  const auto cW0 = cell_of(sa, pu + w - 1, pv);
+  const auto c0H = cell_of(sa, pu, pv + h - 1);
+  const auto cWH = cell_of(sa, pu + w - 1, pv + h - 1);
+  // Cell corners: the face covers each cell's full [0,1]x[0,1] square
+  // on the plane; the quad spans min(corner0) .. max(cornerW) in the
+  // plane's axes, pushed half a block outward along the normal.
+  float pmin[3] = {1e9f, 1e9f, 1e9f};
+  float pmax[3] = {-1e9f, -1e9f, -1e9f};
+  for (const auto& c : {c00, cW0, c0H, cWH}) {
+    for (int a = 0; a < 3; ++a) {
+      pmin[a] = std::min(pmin[a], static_cast<float>(c[a]));
+      pmax[a] = std::max(pmax[a], static_cast<float>(c[a] + 1));
+    }
+  }
+  const float nrm[3] = {face.normal[0], face.normal[1], face.normal[2]};
+  // The plane offset: the boundary between the cell and its neighbor -
+  // for +faces, the cell's +1 face; for -faces, the cell's -0 face.
+  // Both are min/max already in pmin/pmax along the normal's axis when
+  // w or h spans the normal axis? No - the normal axis is neither u
+  // nor v; the plane sits at the cell's boundary along the normal:
+  // +dir faces at pmax along the axis, -dir faces at pmin.
+  const int na = nrm[0] != 0.0f ? 0 : (nrm[1] != 0.0f ? 1 : 2);
+  const float plane = nrm[na] > 0.0f ? pmax[na] : pmin[na];
+  // Build the quad's 4 corners in the plane basis (u, v GAME vectors).
+  const float* ub = kUVB[fi][0];
+  const float* vb = kUVB[fi][1];
+  // Plane anchor: the min corner of the rectangle projected on the
+  // plane axes; walk (u, v) from 0 to (extent_u, extent_v).
+  // The rectangle's extent along u/v: the bounding box's span along
+  // the u and v basis directions (they are axis-aligned unit steps).
+  float anchor[3];
+  for (int a = 0; a < 3; ++a) {
+    anchor[a] = pmin[a];
+  }
+  anchor[na] = plane;
+  // Extents: the covered cells span w cells along u and h along v
+  // (the lattice's own units; u/v steps are unit-length).
+  const float eu = static_cast<float>(w);
+  const float ev = static_cast<float>(h);
+  // The rectangle's corners: anchor, +u, +v, +u+v.
+  const float signs[4][2] = {{0.0f, 0.0f}, {1.0f, 0.0f},
+                             {1.0f, 1.0f}, {0.0f, 1.0f}};
+  float corners[4][3];
+  for (int ci = 0; ci < 4; ++ci) {
+    const float su = signs[ci][0] * eu;
+    const float sv = signs[ci][1] * ev;
+    corners[ci][0] = anchor[0] + su * ub[0] + sv * vb[0];
+    corners[ci][1] = anchor[1] + su * ub[1] + sv * vb[1];
+    corners[ci][2] = anchor[2] + su * ub[2] + sv * vb[2];
+  }
+  // Winding: CCW seen from the normal's side = (u x v) . n >= 0 - the
+  // basis guarantees it; emit 0,1,2 / 2,3,0 (the per-face mesher's
+  // own order, preserved by the proper game_to_render rotation).
+  const std::uint32_t base =
+      static_cast<std::uint32_t>(out.vertices.size());
+  for (int ci = 0; ci < 4; ++ci) {
+    ws::ui::r3d::Vertex3D vertex;
+    vertex.pos[0] = game_to_render(corners[ci][0], 0);
+    vertex.pos[1] = game_to_render(corners[ci][1], 1);
+    vertex.pos[2] = game_to_render(corners[ci][2], 2);
+    vertex.normal[0] = game_to_render(nrm[0], 0);
+    vertex.normal[1] = game_to_render(nrm[1], 1);
+    vertex.normal[2] = game_to_render(nrm[2], 2);
+    // UVs in TILE UNITS: [0, w] x [0, h], v flipped inside each unit
+    // (the per-cell mesher's own orientation rule, generalized).
+    vertex.uv[0] = signs[ci][0] * eu;
+    vertex.uv[1] = (1.0f - signs[ci][1]) * ev;
+    out.vertices.push_back(vertex);
+  }
+  out.indices.push_back(base + 0);
+  out.indices.push_back(base + 1);
+  out.indices.push_back(base + 2);
+  out.indices.push_back(base + 2);
+  out.indices.push_back(base + 3);
+  out.indices.push_back(base + 0);
+}
+
+// The greedy sweep for one (chunk, tile, face direction): builds the
+// exposed-face mask on the face's plane lattice, then carves greedy
+// rectangles out of it.
+void greedy_faces(const World& world, Block type, int fi, int cx, int cz,
+                  ws::ui::r3d::MeshData& out) {
+  const FaceDir& face = kFaces[fi];
   const int ox = cx * kChunkSizeX;
   const int oz = cz * kChunkSizeZ;
-
-  // The 6 neighbor offsets with their game-space normals; emission
-  // negates y for the render-space normal.
-  struct FaceDir {
-    int dx, dy, dz;        // the neighbor cell offset (game space)
-    float normal[3];       // game-space outward normal
+  // The plane lattice axes (chunk-local): u/v are the face basis'
+  // integer directions; the slice axis is the face's normal axis.
+  const int ux = static_cast<int>(kUVB[fi][0][0]);
+  const int uy = static_cast<int>(kUVB[fi][0][1]);
+  const int uz = static_cast<int>(kUVB[fi][0][2]);
+  const int vx = static_cast<int>(kUVB[fi][1][0]);
+  const int vy = static_cast<int>(kUVB[fi][1][1]);
+  const int vz = static_cast<int>(kUVB[fi][1][2]);
+  const int u_len = (ux != 0) ? kChunkSizeX : (uy != 0) ? kChunkSizeY
+                                                        : kChunkSizeZ;
+  const int v_len = (vx != 0) ? kChunkSizeX : (vy != 0) ? kChunkSizeY
+                                                        : kChunkSizeZ;
+  const int a_len = (face.dy != 0) ? kChunkSizeY
+                    : (face.dx != 0) ? kChunkSizeX
+                                     : kChunkSizeZ;
+  // One lattice point -> its chunk-local cell (the emit_quad walk).
+  const auto cell_of = [&](int s, int pU, int pV) {
+    int lx = 0, ly = 0, lz = 0;
+    lx += ux != 0 ? (ux > 0 ? pU : u_len - 1 - pU) : 0;
+    ly += uy != 0 ? (uy > 0 ? pU : u_len - 1 - pU) : 0;
+    lz += uz != 0 ? (uz > 0 ? pU : u_len - 1 - pU) : 0;
+    lx += vx != 0 ? (vx > 0 ? pV : v_len - 1 - pV) : 0;
+    ly += vy != 0 ? (vy > 0 ? pV : v_len - 1 - pV) : 0;
+    lz += vz != 0 ? (vz > 0 ? pV : v_len - 1 - pV) : 0;
+    if (face.dx != 0) lx = s;
+    if (face.dy != 0) ly = s;
+    if (face.dz != 0) lz = s;
+    return std::array<int, 3>{lx, ly, lz};
   };
-  static constexpr FaceDir kFaces[6] = {
-      {0, 1, 0, {0.0f, 1.0f, 0.0f}},    // top
-      {0, -1, 0, {0.0f, -1.0f, 0.0f}},  // bottom
-      {1, 0, 0, {1.0f, 0.0f, 0.0f}},    // east
-      {-1, 0, 0, {-1.0f, 0.0f, 0.0f}},  // west
-      {0, 0, 1, {0.0f, 0.0f, 1.0f}},    // south
-      {0, 0, -1, {0.0f, 0.0f, -1.0f}},  // north
-  };
-
-  // The face plane's tangent basis (GAME space; y is the world's up):
-  // for each normal, (u, v) spanning the plane with u x v = n.
-  static constexpr float kUV[6][2][3] = {
-      // top (+y): u = +z, v = +x -> u x v = +y
-      {{0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f}},
-      // bottom (-y): u = +x, v = +z -> u x v = -y
-      {{1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}},
-      // east (+x): u = +y, v = +z -> u x v = +x
-      {{0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}},
-      // west (-x): u = +z, v = +y -> u x v = -x
-      {{0.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 0.0f}},
-      // south (+z): u = +x, v = +y -> u x v = +z
-      {{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}},
-      // north (-z): u = +y, v = +x -> u x v = -z
-      {{0.0f, 1.0f, 0.0f}, {1.0f, 0.0f, 0.0f}},
-  };
-
-  for (int ly = 0; ly < kChunkSizeY; ++ly) {
-    for (int lz = 0; lz < kChunkSizeZ; ++lz) {
-      for (int lx = 0; lx < kChunkSizeX; ++lx) {
-        const int gx = ox + lx;
-        const int gz = oz + lz;
-        if (world.block_at(gx, ly, gz) != type) {
+  // The mask + used grid, per slice (the sweep only merges within one
+  // slice: two cells at different slice positions are NOT coplanar).
+  std::vector<bool> mask(static_cast<std::size_t>(u_len) * v_len, false);
+  std::vector<bool> used(static_cast<std::size_t>(u_len) * v_len, false);
+  for (int sa = 0; sa < a_len; ++sa) {
+    std::fill(mask.begin(), mask.end(), false);
+    std::fill(used.begin(), used.end(), false);
+    bool any = false;
+    for (int pu = 0; pu < u_len; ++pu) {
+      for (int pv = 0; pv < v_len; ++pv) {
+        const auto c = cell_of(sa, pu, pv);
+        const int gx = ox + c[0];
+        const int gy = c[1];
+        const int gz = oz + c[2];
+        if (world.block_at(gx, gy, gz) != type) {
           continue;
         }
-        for (int fi = 0; fi < 6; ++fi) {
-          const FaceDir& face = kFaces[fi];
-          if (is_solid(world.block_at(gx + face.dx, ly + face.dy,
-                                      gz + face.dz))) {
-            continue;  // hidden behind the neighbor: never emit
-          }
-          // The face's center, GAME space: the cell's center pushed
-          // half a block along the normal.
-          const float gc[3] = {
-              static_cast<float>(gx) + 0.5f + face.normal[0] * 0.5f,
-              static_cast<float>(ly) + 0.5f + face.normal[1] * 0.5f,
-              static_cast<float>(gz) + 0.5f + face.normal[2] * 0.5f};
-          const float* u = kUV[fi][0];
-          const float* v = kUV[fi][1];
-          // The face's atlas tile (texture_atlas.hpp's kTileFor): the
-          // uploaded resource pack's own art per (block, face) - grass
-          // top/side, oak log side/top, the works.
-          const int tile = atlas::kTileFor[static_cast<std::size_t>(type)][fi];
-          const float tile_u0 = static_cast<float>(tile % atlas::kAtlasGrid) /
-                               static_cast<float>(atlas::kAtlasGrid);
-          const float tile_v0 = static_cast<float>(tile / atlas::kAtlasGrid) /
-                               static_cast<float>(atlas::kAtlasGrid);
-          const float tile_s = 1.0f / static_cast<float>(atlas::kAtlasGrid);
-          // The four corners (GAME space): the unit square around the
-          // center in the (u, v) basis - (-u/2 - v/2), (+u/2 - v/2),
-          // (+u/2 + v/2), (-u/2 + v/2) - the right-hand CCW order for
-          // (u, v) with u x v = n. (The first build's table was a KITE:
-          // (-,-), (0,+), (+,+), (+,0) - an irregular quad missing half
-          // the face, so every block in the world rendered as pinched,
-          // gap-riddled geometry - the "still not rendering correctly"
-          // field report.)
-          float corners[4][3];
-          const float signs[4][2] = {
-              {-0.5f, -0.5f}, {0.5f, -0.5f}, {0.5f, 0.5f}, {-0.5f, 0.5f}};
-          for (int ci = 0; ci < 4; ++ci) {
-            const float su = signs[ci][0];
-            const float sv = signs[ci][1];
-            corners[ci][0] = gc[0] + su * u[0] + sv * v[0];
-            corners[ci][1] = gc[1] + su * u[1] + sv * v[1];
-            corners[ci][2] = gc[2] + su * u[2] + sv * v[2];
-          }
-          // GAME -> RENDER: through world.hpp's game_to_render - the
-          // 180-degree turn about the x axis that swaps the world's up
-          // and north - (x, -y, -z), a PROPER rotation (det +1, unlike
-          // the old y-only mirror whose det -1 mirrored the world and
-          // flipped the view's horizontal handedness - the "mouse x is
-          // inverted" field report: east landed on screen-left, so
-          // turning east read as turning left). A rotation preserves
-          // winding, so the right-hand CCW order above stays CCW in
-          // render space - emit in order.
-          const std::uint32_t base =
-              static_cast<std::uint32_t>(out.vertices.size());
-          for (int ci = 0; ci < 4; ++ci) {
-            ws::ui::r3d::Vertex3D vertex;
-            vertex.pos[0] = game_to_render(corners[ci][0], 0);
-            vertex.pos[1] = game_to_render(corners[ci][1], 1);
-            vertex.pos[2] = game_to_render(corners[ci][2], 2);
-            // The normal rides the same rotation (x, -y, -z).
-            vertex.normal[0] = game_to_render(face.normal[0], 0);
-            vertex.normal[1] = game_to_render(face.normal[1], 1);
-            vertex.normal[2] = game_to_render(face.normal[2], 2);
-            // The atlas UV: the face's (su, sv) in [-0.5, 0.5] mapped
-            // into the tile's [u0, u0+s] x [v0, v0+s] square. v is
-            // FLIPPED inside the tile - sv=+0.5 is the face's UP edge
-            // (side faces' v basis is +y), and the tile's green fringe
-            // must land there, but the fringe sits at the ATLAS's top
-            // rows, which are v ~= 0 in image space. Without the flip
-            // every grass side wore its dirt strip on top.
-            vertex.uv[0] = tile_u0 + (signs[ci][0] + 0.5f) * tile_s;
-            vertex.uv[1] =
-                tile_v0 + (1.0f - (signs[ci][1] + 0.5f)) * tile_s;
-            out.vertices.push_back(vertex);
-          }
-          out.indices.push_back(base + 0);
-          out.indices.push_back(base + 1);
-          out.indices.push_back(base + 2);
-          out.indices.push_back(base + 2);
-          out.indices.push_back(base + 3);
-          out.indices.push_back(base + 0);
+        if (is_solid(world.block_at(gx + face.dx, gy + face.dy,
+                                    gz + face.dz))) {
+          continue;  // hidden behind the neighbor: never emit
         }
+        mask[static_cast<std::size_t>(pu) * v_len + pv] = true;
+        any = true;
       }
+    }
+    if (!any) {
+      continue;
+    }
+    // Carve greedy rectangles.
+    for (int pu = 0; pu < u_len; ++pu) {
+      for (int pv = 0; pv < v_len; ++pv) {
+        const std::size_t idx =
+            static_cast<std::size_t>(pu) * v_len + pv;
+        if (!mask[idx] || used[idx]) {
+          continue;
+        }
+        int w = 1;
+        while (pu + w < u_len && mask[idx + static_cast<std::size_t>(w) * v_len]
+               && !used[idx + static_cast<std::size_t>(w) * v_len]) {
+          ++w;
+        }
+        int h = 1;
+        bool grew = true;
+        while (grew && pv + h < v_len) {
+          for (int k = 0; k < w; ++k) {
+            const std::size_t probe = static_cast<std::size_t>(pu + k) *
+                v_len + static_cast<std::size_t>(pv + h);
+            if (!mask[probe] || used[probe]) {
+              grew = false;
+              break;
+            }
+          }
+          if (grew) {
+            ++h;
+          }
+        }
+        for (int dw = 0; dw < w; ++dw) {
+          for (int dh = 0; dh < h; ++dh) {
+            used[static_cast<std::size_t>(pu + dw) * v_len +
+                 static_cast<std::size_t>(pv + dh)] = true;
+          }
+        }
+        emit_quad(out, type, fi, ox, oz, sa, pu, pv, w, h, u_len, v_len);
+      }
+    }
+  }
+}
+
+}  // namespace
+
+// One (chunk, tile) mesh: every face of every block whose kTileFor
+// entry selects this tile, merged greedily per face direction.
+[[nodiscard]] ws::ui::r3d::MeshData build_chunk_tile_mesh(
+    const World& world, int cx, int cz, int tile) {
+  ws::ui::r3d::MeshData out;
+  for (int type = 1; type < static_cast<int>(Block::count_); ++type) {
+    if (type == static_cast<int>(Block::water)) {
+      continue;  // water never meshes
+    }
+    for (int fi = 0; fi < 6; ++fi) {
+      if (atlas::kTileFor[static_cast<std::size_t>(type)][fi] != tile) {
+        continue;
+      }
+      greedy_faces(world, static_cast<Block>(type), fi, cx, cz, out);
     }
   }
   return out;
 }
-
 }  // namespace
 
 // --- the API ----------------------------------------------------------------------
@@ -335,22 +469,20 @@ void World::rebuild_chunk(int cx, int cz) {
       ++it;
     }
   }
-  // One mesh per solid type present with visible faces.
-  for (int type = 1; type < static_cast<int>(Block::count_); ++type) {
-    if (type == static_cast<int>(Block::water)) {
-      continue;  // water never meshes (a later life)
-    }
-    const Block block = static_cast<Block>(type);
-    ws::ui::r3d::MeshData data = build_chunk_type_mesh(*this, cx, cz, block);
+  // One mesh per TILE present with visible faces (greedy-merged).
+  for (int tile = 0; tile < atlas::kTileCount; ++tile) {
+    ws::ui::r3d::MeshData data = build_chunk_tile_mesh(*this, cx, cz, tile);
     if (data.vertices.empty()) {
       continue;
     }
     const auto mesh = ws::ui::r3d::create_mesh(data);
     if (!mesh.has_value()) {
       ws::core::log_error(mesh.error());
-      continue;  // one failed type leaves the rest of the chunk visible
+      continue;  // one failed tile leaves the rest of the chunk visible
     }
-    chunk_meshes_.push_back(ChunkMesh{cx, cz, block, *mesh});
+    chunk_meshes_.push_back(
+        ChunkMesh{cx, cz, tile, *mesh,
+                  static_cast<std::uint32_t>(data.indices.size())});
   }
 }
 

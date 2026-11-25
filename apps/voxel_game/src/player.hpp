@@ -40,7 +40,8 @@ struct PlayerTuning {
   float half_width = 0.3f;   // the box's x/z half extent (0.6 wide)
   float half_height = 0.9f;  // the box's y half extent (1.8 tall)
   float gravity = -32.0f;    // m/s^2 - 5x earth, the snappy arcade fall
-  float jump_speed = 8.4f;   // m/s - ~1.1 m apex (sqrt(2 g h))
+  float jump_speed = 9.8f;   // m/s - ~1.5 m apex (sqrt(2 g h)): clears a
+                             // full block with margin (the stronger jump)
   float walk_speed = 6.0f;   // m/s
   float sprint_speed = 10.5f;  // m/s (shift)
   float max_fall = 55.0f;     // m/s terminal clamp

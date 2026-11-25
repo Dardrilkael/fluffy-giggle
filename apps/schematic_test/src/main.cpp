@@ -892,12 +892,18 @@ extern "C" void android_main(android_app* app) {
 #else
 
 int main(int /*argc*/, char** /*argv*/) {
-    // Single instance
-    ws::platform::SingleInstance single("schematic_test");
+    // The single-instance grab, Windows-only: a posix dev box has no
+    // grab TU in ws_platform (the platform CMake's loud-link rule),
+    // so the nicety is skipped there - the circsim editor's own
+    // spelling. Android single-instancing is the manifest's job (the
+    // android_main path above).
+#ifdef _WIN32
+    const ws::platform::SingleInstance single("schematic_test");
     if (!single.is_primary()) {
         fprintf(stderr, "Another instance is already running\n");
         return 0;
     }
+#endif
 
     // Create and run app
     ws::ui::AppConfig cfg;

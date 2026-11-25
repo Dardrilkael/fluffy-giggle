@@ -62,6 +62,8 @@
 #include <ws/ui/renderer3d.hpp>
 
 #include "menu.hpp"
+#include "bench.hpp"
+#include "perf.hpp"
 #include "player.hpp"
 #include "renderer.hpp"
 #include "world.hpp"
@@ -210,10 +212,11 @@ class VoxelApp final : public ws::ui::App {
                                    r2d::FontBakeOptions::dark_chrome());
 
     // --- the block-texture atlas (the uploaded resource pack) ---------------
-    atlas_ = voxel::load_atlas_texture();
-    if (atlas_.id == 0) {
-      ws::core::warn(
-          "voxel: the texture atlas fell back to white - flat tints");
+    tile_textures_ = voxel::load_tile_textures();
+    for (int i = 0; i < voxel::atlas::kTileCount; ++i) {
+      if (tile_textures_[i].id == 0) {
+        ws::core::warn("voxel: tile {} fell back to white - flat tint", i);
+      }
     }
 
     // --- audio: the break/place pair ----------------------------------------
@@ -246,6 +249,18 @@ class VoxelApp final : public ws::ui::App {
     // raw deltas (never a cursor pinned at a screen edge). ESC's pause
     // menu is the one place that hands the visible pointer back.
     set_cursor_mode(ws::ui::CursorMode::hidden);
+
+    // The scripted benchmark (WS_VOXEL_BENCH=<seconds>): the frame loop
+    // feeds perf.hpp's counters and bench.hpp prints one CSV line per
+    // second; request_stop lands at the end of the run.
+    const float bench_seconds = voxel::bench::bench_seconds_from_env();
+    if (bench_seconds > 0.0f) {
+      voxel::bench::Config cfg{};
+      cfg.seconds = bench_seconds;
+      bench_.start(cfg);
+      ws::core::info("voxel: benchmark - {} s of scripted phases",
+                     bench_seconds);
+    }
   }
 
   void on_update() override {
@@ -259,6 +274,9 @@ class VoxelApp final : public ws::ui::App {
             : 0.0f;
     last_time_ = now;
     const float frame_dt = std::clamp(dt, 0.0f, 0.05f);
+    const auto frame_t0 = std::chrono::steady_clock::now();
+    voxel::perf::FrameTimings timings{};
+    mesh_rebuild_ms_ = 0.0f;  // rebuild_around feeds this across the frame
 
     const ws::input::InputFrame& input = ws::input::frame_input();
     const r2d::FrameSize frame = r2d::frame_size();
@@ -290,8 +308,9 @@ class VoxelApp final : public ws::ui::App {
                      r2d::rgba(135, 196, 250));
       r2d::end();
 
-      voxel::begin_scene(player_, frame.width / frame.height);
-      voxel::draw_world(world_, atlas_);
+      const auto cam = voxel::begin_scene(player_, frame.width / frame.height);
+      voxel::draw_world(world_, tile_textures_, cam,
+                         frame.width / frame.height);
       r2d::end();
 
       r2d::begin();
@@ -304,21 +323,28 @@ class VoxelApp final : public ws::ui::App {
 
     // --- the controller tick -------------------------------------------------
     voxel::Player::MoveInput move{};
-    move.forward = input.key_down[kKeyW];
-    move.back = input.key_down[kKeyS];
-    move.left = input.key_down[kKeyA];
-    move.right = input.key_down[kKeyD];
-    move.jump = input.key_down[kKeySpace];
-    move.sprint = input.key_down[kKeyShiftL];
-    move.look_dx = look_dx_;
-    move.look_dy = look_dy_;
-    look_dx_ = 0.0f;  // consumed: the next frame starts fresh
-    look_dy_ = 0.0f;
+    if (bench_.running()) {
+      // The scripted benchmark drives the same input path.
+      move = bench_.input(frame_dt);
+    } else {
+      move.forward = input.key_down[kKeyW];
+      move.back = input.key_down[kKeyS];
+      move.left = input.key_down[kKeyA];
+      move.right = input.key_down[kKeyD];
+      move.jump = input.key_down[kKeySpace];
+      move.sprint = input.key_down[kKeyShiftL];
+      move.look_dx = look_dx_;
+      move.look_dy = look_dy_;
+      look_dx_ = 0.0f;  // consumed: the next frame starts fresh
+      look_dy_ = 0.0f;
+    }
 
+    const auto phys_t0 = std::chrono::steady_clock::now();
     player_.tick(move, frame_dt, *phys_);
     phys_->advance(frame_dt);
     player_.on_contacts(phys_->contact_events());
     (void)audio_.update();
+    timings.physics_ms = voxel::perf::ms_since(phys_t0);
 
     // --- hotbar + break/place ------------------------------------------------
     for (int i = 0; i < kHotbarSlots; ++i) {
@@ -326,20 +352,36 @@ class VoxelApp final : public ws::ui::App {
         hotbar_ = i;
       }
     }
-    if (input.mouse_pressed[0] || input.mouse_pressed[1]) {
+    const bool wants_break =
+        (input.mouse_pressed[0] && !bench_.running()) ||
+        (bench_.running() && bench_.wants_edit() && bench_.edit_ready() &&
+         ((bench_frame_ & 15) == 8));  // one burst pair per ~1/4 s
+    const bool wants_place =
+        (input.mouse_pressed[1] && !bench_.running()) ||
+        (bench_.running() && bench_.wants_edit() && bench_.edit_ready() &&
+         ((bench_frame_ & 15) == 0));
+    const bool bench_break =
+        bench_.running() && bench_.wants_edit() && bench_.edit_ready() &&
+        ((bench_frame_ & 15) == 8);
+    const bool bench_place =
+        bench_.running() && bench_.wants_edit() && bench_.edit_ready() &&
+        ((bench_frame_ & 15) == 0);
+    const bool do_break = wants_break || bench_break;
+    const bool do_place = wants_place || bench_place;
+    if (do_break || do_place) {
       const Vec3 eye = player_.eye_position();
       const Vec3 look = player_.look_direction();
       const float origin[3] = {eye.x, eye.y, eye.z};
       const float dir[3] = {look.x, look.y, look.z};
       const voxel::World::RayHit hit = world_.raycast(origin, dir, 7.0f);
-      if (input.mouse_pressed[0] && hit.hit) {  // break
+      if (do_break && hit.hit) {  // break
         if (world_.set_block(hit.cell[0], hit.cell[1], hit.cell[2],
                              voxel::Block::air)) {
           rebuild_around(hit.cell[0], hit.cell[2]);
           update_shell(hit.cell[0], hit.cell[1], hit.cell[2]);
           play_sound(kSoundBreak, 0.9f);
         }
-      } else if (input.mouse_pressed[1] && hit.hit) {  // place
+      } else if (do_place && hit.hit) {  // place
         const int px = hit.cell[0] + hit.normal[0];
         const int py = hit.cell[1] + hit.normal[1];
         const int pz = hit.cell[2] + hit.normal[2];
@@ -364,14 +406,33 @@ class VoxelApp final : public ws::ui::App {
                    r2d::rgba(135, 196, 250));
     r2d::end();
 
-    voxel::begin_scene(player_, frame.width / frame.height);
-    voxel::draw_world(world_, atlas_);
+    const auto draw_t0 = std::chrono::steady_clock::now();
+    const auto cam = voxel::begin_scene(player_, frame.width / frame.height);
+    voxel::draw_world(world_, tile_textures_, cam,
+                       frame.width / frame.height, &last_counters_);
     r2d::end();
+    timings.draw_ms = voxel::perf::ms_since(draw_t0);
+    last_counters_.bodies = static_cast<std::uint32_t>(physics_cells_.size()) +
+                            1u /* the player */;
 
     r2d::begin();
     r2d::set_layer(10);
     draw_hud(frame);
     r2d::end();
+
+    // --- the instrumentation close -----------------------------------------
+    timings.meshes_ms = mesh_rebuild_ms_;
+    timings.total_ms = voxel::perf::ms_since(frame_t0);
+    last_timings_ = timings;
+    if (bench_.running()) {
+      ++bench_frame_;
+      bench_.frame(frame_dt, timings, last_counters_);
+      if (bench_.advance_phase(frame_dt)) {
+        std::printf("bench: done (%.1f s)\n", bench_.seconds());
+        std::fflush(stdout);
+        request_stop();
+      }
+    }
   }
 
  private:
@@ -487,8 +548,11 @@ class VoxelApp final : public ws::ui::App {
 
   // Rebuilds the chunk containing the cell (x, z), and the neighbor
   // chunk too when the cell rides a chunk boundary (the neighbor's
-  // culled face against this cell may need its own face now).
+  // culled face against this cell may need its own face now). The
+  // rebuild's CPU cost lands in mesh_rebuild_ms_ - the perf
+  // instrumentation's mesh phase.
   void rebuild_around(int x, int z) {
+    const auto t0 = std::chrono::steady_clock::now();
     const int cx = x / voxel::kChunkSizeX;
     const int cz = z / voxel::kChunkSizeZ;
     world_.rebuild_chunk(cx, cz);
@@ -506,6 +570,7 @@ class VoxelApp final : public ws::ui::App {
     if (lz == voxel::kChunkSizeZ - 1 && cz < voxel::kWorldChunksZ - 1) {
       world_.rebuild_chunk(cx, cz + 1);
     }
+    mesh_rebuild_ms_ += voxel::perf::ms_since(t0);
   }
 
   void play_sound(int which, float gain) {
@@ -565,11 +630,21 @@ class VoxelApp final : public ws::ui::App {
       fps_clock_ = now;
     }
 
-    // The stats + help lines, top-left.
-    char stats[128];
+    // The stats + help lines, top-left. The perf line carries the
+    // instrumentation's last sample (frame phase means, the draw and
+    // body counts) so the running game answers "where does the frame
+    // go" without a debugger.
+    char stats[160];
     const Vec3 p = player_.position();
-    std::snprintf(stats, sizeof(stats), "fps %u   pos %.1f %.1f %.1f   %s",
-                  fps_, p.x, p.y, p.z, player_.grounded() ? "ground" : "air");
+    std::snprintf(stats, sizeof(stats),
+                  "fps %u   pos %.1f %.1f %.1f   %s\n"
+                  "cpu %.2fms (phys %.2f mesh %.2f draw %.2f)   draws %u"
+                  " tris %u   bodies %u",
+                  fps_, p.x, p.y, p.z,
+                  player_.grounded() ? "ground" : "air", last_timings_.total_ms,
+                  last_timings_.physics_ms, last_timings_.meshes_ms,
+                  last_timings_.draw_ms, last_counters_.draw_calls,
+                  last_counters_.triangles, last_counters_.bodies);
     (void)r2d::draw_text(12.0f, 12.0f, stats, font_, r2d::rgba(235, 235, 240));
     (void)r2d::draw_text(
         12.0f, 32.0f,
@@ -665,10 +740,11 @@ class VoxelApp final : public ws::ui::App {
   float mouse_x_ = 0.0f;
   float mouse_y_ = 0.0f;
   bool clicked_ = false;
-  // The block-texture atlas (the uploaded resource pack's art, loaded
-  // once at setup). id 0 = the white fallback - the frame shades the
-  // flat tints alone.
-  ws::ui::r2d::Texture atlas_{};
+  // The per-tile block textures (the uploaded resource pack's art,
+  // loaded once at setup). id 0 = the white fallback - that tile's
+  // draw shades the flat tint alone.
+  std::array<ws::ui::r2d::Texture, voxel::atlas::kTileCount>
+      tile_textures_{};
   bool dead_ = false;
   bool audio_ok_ = false;
   ws::audio::SoundHandle sounds_[2]{};
@@ -689,6 +765,14 @@ class VoxelApp final : public ws::ui::App {
   std::uint32_t fps_ = 0;
   std::uint32_t frames_ = 0;
   std::chrono::steady_clock::time_point fps_clock_{};
+
+  // The perf instrumentation's last sample (perf.hpp) + the scripted
+  // benchmark driver (bench.hpp; idle unless WS_VOXEL_BENCH is set).
+  voxel::perf::FrameTimings last_timings_{};
+  voxel::perf::Counters last_counters_{};
+  float mesh_rebuild_ms_ = 0.0f;
+  voxel::bench::Driver bench_{};
+  std::uint32_t bench_frame_ = 0;
 };
 
 #ifdef __ANDROID__

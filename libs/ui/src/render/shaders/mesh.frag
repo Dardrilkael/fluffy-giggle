@@ -46,6 +46,20 @@ layout(set = 1, binding = 0, std140) uniform Scene {
     vec4 light_color_ambient;  // rgb = color, a = ambient
 } scene;
 
+// Tiled UV support (greedy-merged quads): a UV component ABOVE 1.0
+// wraps fract-style so one texture repeats across an N-wide quad.
+// In-range values - including exactly 1.0 - pass through untouched,
+// so every existing mesh (all UVs in [0,1]) renders bit-identically.
+// The sampler is CLAMP_TO_EDGE; the wrap happens here, in-shader.
+// Requires GLSL derivatives: the dFdx/dFdy below already sit behind
+// no extension pragma because #version 450 core covers them.
+vec2 wrap_tiled(vec2 uv) {
+    vec2 r = uv;
+    if (r.x > 1.0) { r.x = fract(r.x); }
+    if (r.y > 1.0) { r.y = fract(r.y); }
+    return r;
+}
+
 void main() {
     const vec3 n = normalize(v_normal);
     const float ndl = max(dot(n, scene.light_dir.xyz), 0.0);
@@ -56,10 +70,19 @@ void main() {
     const vec3 light =
         vec3(ambient) + (1.0 - ambient) * scene.light_color_ambient.rgb * ndl;
 
+    // textureGrad with the UNWRAPPED uv's derivatives: the LOD comes
+    // from the smooth pre-wrap coordinate (a REPEAT sampler's own
+    // math), so a repeat seam never spikes the mip selection - plain
+    // texture() on the fract'd coordinate would flash a coarse-mip
+    // line at every integer boundary.
+    const vec2 wuv = wrap_tiled(v_uv);
+    const vec2 grad_x = dFdx(v_uv);
+    const vec2 grad_y = dFdy(v_uv);
 #ifdef WS_BINDLESS
-    const vec4 texel = texture(u_textures[nonuniformEXT(int(pc.tex_slot))], v_uv);
+    const vec4 texel = textureGrad(
+        u_textures[nonuniformEXT(int(pc.tex_slot))], wuv, grad_x, grad_y);
 #else
-    const vec4 texel = texture(u_textures[0], v_uv);
+    const vec4 texel = textureGrad(u_textures[0], wuv, grad_x, grad_y);
 #endif
     const vec4 albedo = unpackUnorm4x8(pc.tint) * texel;
     out_color = vec4(albedo.rgb * light, albedo.a);

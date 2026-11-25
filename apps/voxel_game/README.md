@@ -12,7 +12,8 @@ Jolt behind `ws::physics3d`, OpenAL Soft behind `ws::audio`.
   shorelines, water at the shore level, scattered wood trunks.
   Deterministic per seed (seed `0xC0FFEE`).
 - **A first-person player**: WASD movement, mouse look, space jump
-  (~1.1 m apex), shift sprint — a physics3d dynamic Box (0.6 × 1.8 × 0.6)
+  (~1.5 m apex — clears a full block with margin), shift sprint — a
+  physics3d dynamic Box (0.6 × 1.8 × 0.6)
   against a static **collision shell** (one Box per exposed solid cell,
   ~17k bodies), at a 60 Hz fixed tick. The controller was validated
   headlessly first (`libs/physics/tests/test_voxel_proto.cpp`): rest,

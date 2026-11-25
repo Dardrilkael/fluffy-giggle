@@ -6,8 +6,8 @@
 // The static ground: a 1-block grid of static boxes (the voxel world's
 // floor stand-in). The player: a 0.6 x 1.8 x 0.6 Box (Minecraft's own
 // numbers), gravity -32 m/s^2 (5x earth: the snappy arcade feel - this
-// is about jump feel, not realism), jump impulse ~8.4 m/s for ~1.1 m
-// apex (2-block reach).
+// is about jump feel, not realism), jump impulse 9.8 m/s for ~1.5 m
+// apex (a full block cleared with margin - the stronger jump).
 //
 // Run: LD_LIBRARY_PATH=... ninja -C build/linux test_voxel_proto &&
 //       ./build/linux/bin/test_voxel_proto
@@ -33,7 +33,7 @@ using ws::math::Vec3;
 constexpr float kPlayerHalfW = 0.3f;   // 0.6 wide/deep
 constexpr float kPlayerHalfH = 0.9f;   // 1.8 tall
 constexpr float kGravity = -32.0f;     // arcade: 5x earth, snappy fall
-constexpr float kJumpSpeed = 8.4f;      // ~1.1 m apex (sqrt(2*32*1.1))
+constexpr float kJumpSpeed = 9.8f;      // ~1.5 m apex (sqrt(2*32*1.5))
 constexpr float kMoveSpeed = 6.0f;     // walk speed, m/s
 constexpr float kMaxFall = 55.0f;      // terminal, m/s
 
@@ -128,7 +128,7 @@ TEST_CASE("proto: the controller walks and the velocity is exact") {
   CHECK(state->position.x < 4.3f);
 }
 
-TEST_CASE("proto: the jump apex is ~1.1 m above the ground") {
+TEST_CASE("proto: the jump apex is ~1.5 m above the ground") {
   auto world = make_world();
   pd::BodyDesc desc{};
   desc.kind = ws::physics::BodyKind::dynamic;
@@ -155,8 +155,8 @@ TEST_CASE("proto: the jump apex is ~1.1 m above the ground") {
     REQUIRE(s.has_value());
     apex = std::max(apex, s->position.y);
   }
-  // Feet apex = apex - kPlayerHalfH; above the rest feet by ~1.1 m.
+  // Feet apex = apex - kPlayerHalfH; above the rest feet by ~1.5 m.
   const float feet_apex = apex - kPlayerHalfH;
-  CHECK(feet_apex > 1.5f);  // landed, then jumped ~1.1
-  CHECK(feet_apex < 1.7f);  // (0.5 rest + 1.1 apex = 1.6, 0.1 band)
+  CHECK(feet_apex > 1.9f);  // landed, then jumped ~1.5
+  CHECK(feet_apex < 2.1f);  // (0.5 rest + 1.5 apex = 2.0, 0.1 band)
 }

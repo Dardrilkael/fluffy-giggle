@@ -120,12 +120,16 @@ class World {
   void rebuild_all();
 
   // Every chunk's meshes (the renderer walks this: one draw_mesh per
-  // entry, at the entry's tint).
+  // entry, at the entry's tint). index_count carries the mesh's own
+  // triangle count snapshot (create_mesh rounds down to whole
+  // triangles) - the perf counters read it without touching the
+  // renderer's registry.
   struct ChunkMesh {
     int cx = 0;
     int cz = 0;
-    Block type = Block::air;
+    int tile = -1;  // the atlas tile slot this mesh's faces sample
     ws::ui::r3d::Mesh mesh{};
+    std::uint32_t index_count = 0;
   };
   [[nodiscard]] const std::vector<ChunkMesh>& chunk_meshes() const {
     return chunk_meshes_;

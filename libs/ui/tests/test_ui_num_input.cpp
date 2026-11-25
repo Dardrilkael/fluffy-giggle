@@ -1339,6 +1339,17 @@ std::size_t g_alloc_bytes = 0;
 
 }  // namespace
 
+// GCC 14's -Wmismatched-new-delete mis-fires on this block: the sized
+// deletes pair fine with the throw new, but the diagnostic inlines
+// std::allocator's frees against the nothrow new and reports
+// mismatches that are not there (every allocation here goes through
+// malloc; every deallocation through free). Disable just the
+// diagnostic for the block - the pairing is sound and checked below.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
+
 void* operator new(std::size_t n) {
     ++g_alloc_count;
     g_alloc_bytes += n;
@@ -1351,10 +1362,31 @@ void* operator new(std::size_t n) {
     throw std::bad_alloc{};
 }
 void* operator new[](std::size_t n) { return operator new(n); }
+// The sized + array delete spellings, and the nothrow new pair: GCC
+// 14's -Wmismatched-new-delete wants EVERY allocation function
+// paired with a matching deallocation spelling (the unsized deletes
+// alone leave new(nothrow) unpaired - the false "mismatch" this
+// block trips on toolchains that enable the diagnostic as an error).
+void* operator new(std::size_t n, const std::nothrow_t&) noexcept {
+    ++g_alloc_count;
+    g_alloc_bytes += n;
+    return std::malloc(n == 0 ? 1 : n);
+}
+void* operator new[](std::size_t n, const std::nothrow_t&) noexcept {
+    return operator new(n, std::nothrow);
+}
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void* p) noexcept { std::free(p); }
 void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, const std::nothrow_t&) noexcept {
+    std::free(p);
+}
+
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 TEST_CASE("property_grid: a steady frame allocates NOTHING - the schema walk, "
           "the enum choice lists and the idle text re-sync ride the cache") {
