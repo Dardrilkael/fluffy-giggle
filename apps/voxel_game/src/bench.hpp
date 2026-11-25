@@ -34,6 +34,7 @@ struct Config {
 class Driver {
  public:
     void start(const Config& cfg) {
+        started_ = true;
         cfg_ = cfg;
         elapsed_ = 0.0f;
         phase_ = 0;
@@ -55,6 +56,9 @@ class Driver {
     // The frame's synthetic input (phase-shaped).
     [[nodiscard]] Player::MoveInput input(float dt) {
         Player::MoveInput in{};
+        if (!started_) {
+            return in;  // idle: no scripted look, no motion, nothing
+        }
         const float phase_t = phase_time();
         switch (phase_) {
             case 0:  // spin: constant yaw rate, full circle in ~3s
@@ -121,7 +125,15 @@ class Driver {
         return elapsed_ >= cfg_.seconds;
     }
 
-    [[nodiscard]] bool running() const { return elapsed_ < cfg_.seconds; }
+    // True only between start() and the run's end. A
+    // default-constructed Driver is IDLE (running() false, input()
+    // zero): the frame loop gates its whole scripted path on this -
+    // before the fix, cfg_'s default seconds=12 made running() true
+    // from birth, so a plain launch (no WS_VOXEL_BENCH) took phase
+    // 0's constant-yaw spin input from the first frame - the camera
+    // kept rotating with no input at all, and request_stop() ended
+    // the run at the default seconds. start() is the only wake-up.
+    [[nodiscard]] bool running() const { return started_ && elapsed_ < cfg_.seconds; }
     [[nodiscard]] const char* phase_name() const {
         static constexpr const char* kNames[5] = {"spin", "still", "move",
                                                  "edit", "done"};
@@ -132,6 +144,7 @@ class Driver {
     [[nodiscard]] float phase_time() const { return elapsed_ - phase_start_; }
 
     Config cfg_{};
+    bool started_ = false;
     float elapsed_ = 0.0f;
     float phase_start_ = 0.0f;
     int phase_ = 0;

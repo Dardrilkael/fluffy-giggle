@@ -24,6 +24,8 @@
 #include <ws/physics/3d/world.hpp>
 #include <ws/physics/common.hpp>  // kMaxBodiesPerWorld (the shell budget)
 
+#include "bench.hpp"
+#include "perf.hpp"
 #include "menu.hpp"
 #include "texture_atlas.hpp"
 #include "world.hpp"
@@ -546,6 +548,44 @@ TEST_CASE("menu: the click hits the right button, edges exact") {
   const float between_y = b[0].y + b[0].h + voxel::menu::kButtonGap * 0.5f;
   CHECK(voxel::menu::click_action(fw, fh, between_x, between_y) == -1);
   CHECK(voxel::menu::click_action(fw, fh, 2.0f, 2.0f) == -1);
+}
+
+TEST_CASE("bench: a default-constructed driver is idle, not running") {
+  // The frame loop gates its whole input path on bench_.running() - a
+  // Driver that answers TRUE before start() hijacks the app from the
+  // first frame: phase 0's constant-yaw "spin" input rotates the camera
+  // with no input at all (the field report), the real mouse/keys are
+  // bypassed, and request_stop() self-quits at the default seconds.
+  // Default construction must mean idle (the app launches plain, no
+  // WS_VOXEL_BENCH); only start() wakes the driver.
+  voxel::bench::Driver driver{};
+  CHECK(!driver.running());
+  // And the idle driver hands out no scripted input: a plain frame's
+  // MoveInput is the zero struct (nothing pressed, nothing to look).
+  const auto in = driver.input(1.0f / 60.0f);
+  CHECK(in.look_dx == 0.0f);
+  CHECK(in.look_dy == 0.0f);
+  CHECK(!in.forward);
+  CHECK(!driver.wants_edit());
+  // start() is the only wake-up: a two-second run is running, spins
+  // (phase 0 answers a constant-yaw look rate), and reports done
+  // exactly at its seconds.
+  voxel::bench::Config cfg{};
+  cfg.seconds = 2.0f;
+  cfg.print_header = false;
+  driver.start(cfg);
+  CHECK(driver.running());
+  const auto spin = driver.input(1.0f / 60.0f);
+  CHECK(spin.look_dx > 0.0f);
+  // The end-of-run read: the app calls frame(dt) (which accumulates
+  // elapsed_) before advance_phase(dt) - mimic that order, two
+  // one-second frames make a two-second run.
+  voxel::perf::FrameTimings t0{};
+  voxel::perf::Counters c0{};
+  driver.frame(1.0f, t0, c0);
+  driver.frame(1.0f, t0, c0);
+  CHECK(driver.advance_phase(0.0f));
+  CHECK(!driver.running());
 }
 
 TEST_CASE("atlas: the face->tile map matches the block vocabulary") {
