@@ -16,6 +16,12 @@
 #include <cmath>
 #include <numbers>
 
+#include <ws/math/vecmath.hpp>
+#include <ws/physics/3d/body.hpp>
+#include <ws/physics/3d/shape.hpp>
+#include <ws/physics/3d/world.hpp>
+#include <ws/physics/common.hpp>  // kMaxBodiesPerWorld (the shell budget)
+
 #include "world.hpp"
 
 namespace {
@@ -278,3 +284,155 @@ TEST_CASE("worldgen: water sits only at or below its level") {
   CHECK(any_water);
 }
 
+
+TEST_CASE("shell: is_exposed is the solid-with-an-open-face oracle") {
+  // The oracle, spelled independently: a cell is exposed iff it is
+  // solid AND some in-bounds neighbor is non-solid (the out-of-world
+  // side reads solid). Every cell in a slab around the terrain's
+  // surface band gets both answers compared.
+  const voxel::World world = make_world();
+  const int dirs[6][3] = {{0, 1, 0},  {0, -1, 0}, {1, 0, 0},
+                          {-1, 0, 0}, {0, 0, 1},  {0, 0, -1}};
+  int checked = 0;
+  int exposed_cells = 0;
+  for (int x = 0; x < voxel::kWorldSizeX; x += 3) {
+    for (int z = 0; z < voxel::kWorldSizeZ; z += 3) {
+      const int top = world.surface_height(x, z);
+      REQUIRE(top >= 0);
+      for (int y = 0; y <= top + 1; ++y) {
+        bool oracle = false;
+        if (voxel::is_solid(world.block_at(x, y, z))) {
+          for (const auto& d : dirs) {
+            const int nx = x + d[0];
+            const int ny = y + d[1];
+            const int nz = z + d[2];
+            if (nx < 0 || nx >= voxel::kWorldSizeX || nz < 0 ||
+                nz >= voxel::kWorldSizeZ || ny < 0 ||
+                ny >= voxel::kChunkSizeY) {
+              continue;  // the void reads solid
+            }
+            if (!voxel::is_solid(world.block_at(nx, ny, nz))) {
+              oracle = true;
+              break;
+            }
+          }
+        }
+        CHECK(world.is_exposed(x, y, z) == oracle);
+        ++checked;
+        exposed_cells += oracle ? 1 : 0;
+      }
+    }
+  }
+  CHECK(checked > 10000);        // the sweep really covered the terrain
+  CHECK(exposed_cells > 500);   // and the shell is populous
+}
+
+TEST_CASE("shell: a dig exposes the wall behind it, a place buries what it covers") {
+  voxel::World world = make_world();
+  // A buried interior cell starts not exposed.
+  const int x = 40;
+  const int z = 40;
+  const int surface = world.surface_height(x, z);
+  REQUIRE(surface >= 4);
+  const int buried_y = surface - 2;
+  REQUIRE(voxel::is_solid(world.block_at(x, buried_y, z)));
+  if (!world.is_exposed(x, buried_y, z)) {
+    // The common case: interior dirt, solid on all six sides.
+    // Break the cell ABOVE it: the buried cell gains an open face.
+    REQUIRE(world.set_block(x, buried_y + 1, z, voxel::Block::air));
+    CHECK(world.is_exposed(x, buried_y, z));
+    // And placing that block back re-buries it.
+    REQUIRE(world.set_block(x, buried_y + 1, z, voxel::Block::stone));
+    CHECK_FALSE(world.is_exposed(x, buried_y, z));
+  }
+  // A solitary placed block in the sky is exposed on all its own.
+  REQUIRE(world.set_block(x, 40, z, voxel::Block::stone));
+  CHECK(world.is_exposed(x, 40, z));
+}
+
+TEST_CASE("shell: the count fits the body budget - the capacity regression") {
+  // The shipped bug: the first build's surface-BAND grid needed ~50k
+  // bodies against max_bodies = 20000, so create_body failed at the
+  // 20001st cell, flooded the log, and the player's own body (created
+  // after the grid) was refused too - a dead world that rendered
+  // nothing. The shell (17,254 cells for this seed - the terrain's
+  // natural flats keep it far thinner than the band's blind walk)
+  // must fit comfortably inside the cap with room for the player and
+  // every edit's re-derivation.
+  const voxel::World world = make_world();
+  int shell = 0;
+  for (int x = 0; x < voxel::kWorldSizeX; ++x) {
+    for (int z = 0; z < voxel::kWorldSizeZ; ++z) {
+      const int top = world.surface_height(x, z);
+      for (int y = top; y >= 0; --y) {
+        shell += world.is_exposed(x, y, z) ? 1 : 0;
+      }
+    }
+  }
+  MESSAGE("shell cells: " << shell);
+  // The shell is populated (a real skin, not a degenerate one)...
+  CHECK(shell > 10000);
+  // ...comfortable under the old, buggy 20000 budget even before the
+  // cap question (the band never was)...
+  CHECK(shell < 20000);
+  // ...and miles under the lib's published cap.
+  CHECK(shell < static_cast<int>(ws::physics::kMaxBodiesPerWorld) - 1000);
+}
+
+TEST_CASE("shell: every shell body creates in a real World3D, then the player") {
+  // The acceptance half of the capacity regression: run the SAME shell
+  // the app builds against the REAL World3D (the same Desc the app
+  // spells, max_bodies = kMaxBodiesPerWorld), and confirm every cell
+  // creates - including the player's own body AFTER the whole shell,
+  // the exact call order the shipped bug broke.
+  const voxel::World world = make_world();
+  ws::physics3d::World3D::Desc desc{};
+  desc.gravity = ws::math::Vec3{0.0f, -32.0f, 0.0f};
+  desc.fixed_dt = 1.0f / 60.0f;
+  desc.thread_count = 0;
+  desc.max_bodies = ws::physics::kMaxBodiesPerWorld;
+  auto phys = ws::physics3d::World3D::create(desc);
+  REQUIRE(phys.has_value());
+
+  int created = 0;
+  for (int x = 0; x < voxel::kWorldSizeX; ++x) {
+    for (int z = 0; z < voxel::kWorldSizeZ; ++z) {
+      const int top = world.surface_height(x, z);
+      for (int y = top; y >= 0; --y) {
+        if (!world.is_exposed(x, y, z)) {
+          continue;
+        }
+        ws::physics3d::BodyDesc cell{};
+        cell.kind = ws::physics::BodyKind::static_;
+        cell.shape = ws::physics3d::Box{
+            ws::math::Vec3{0.5f, 0.5f, 0.5f}};
+        cell.transform = ws::physics3d::Transform{
+            ws::math::Vec3{static_cast<float>(x) + 0.5f,
+                           static_cast<float>(y) + 0.5f,
+                           static_cast<float>(z) + 0.5f},
+            {}};
+        const auto id = phys->create_body(cell);
+        REQUIRE(id.has_value());
+        ++created;
+      }
+    }
+  }
+  MESSAGE("bodies created: " << created);
+  CHECK(created > 10000);  // the shell, whole
+  CHECK(created < 20000);   // inside even the old buggy budget
+
+  // The player's body, after the entire shell - the order the bug broke.
+  ws::physics3d::BodyDesc player{};
+  player.kind = ws::physics::BodyKind::dynamic;
+  player.shape = ws::physics3d::Box{
+      ws::math::Vec3{0.3f, 0.9f, 0.3f}};
+  player.transform = ws::physics3d::Transform{
+      ws::math::Vec3{64.5f, 40.0f, 64.5f}, {}};
+  const auto player_id = phys->create_body(player);
+  REQUIRE(player_id.has_value());
+  // And it steps: one advance with the whole shell standing.
+  REQUIRE(phys->advance(1.0f / 60.0f).has_value());
+  const auto state = phys->body_state(*player_id);
+  REQUIRE(state.has_value());
+  CHECK(state->position.y < 40.0f);  // gravity is already pulling it
+}

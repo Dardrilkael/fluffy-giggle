@@ -343,6 +343,33 @@ int World::surface_height(int x, int z) const {
   return -1;
 }
 
+bool World::is_exposed(int x, int y, int z) const {
+  // The cell itself must be solid (air and water never collide).
+  if (!is_solid(block_at(x, y, z))) {
+    return false;
+  }
+  // An exposed cell has at least one non-solid in-bounds neighbor. The
+  // out-of-world side reads SOLID (world.hpp's note): the border's
+  // outboard faces are not reachable, and y's outside reads solid too
+  // (a pillar's cap and the y=0 floor are interior questions, not
+  // shell questions). In-bounds neighbors consult the table.
+  static constexpr int kDirs[6][3] = {{0, 1, 0},  {0, -1, 0}, {1, 0, 0},
+                                       {-1, 0, 0}, {0, 0, 1},  {0, 0, -1}};
+  for (const auto& d : kDirs) {
+    const int nx = x + d[0];
+    const int ny = y + d[1];
+    const int nz = z + d[2];
+    if (nx < 0 || nx >= kWorldSizeX || nz < 0 || nz >= kWorldSizeZ ||
+        ny < 0 || ny >= kChunkSizeY) {
+      continue;  // the void: reads solid for this test
+    }
+    if (!is_solid(block_at(nx, ny, nz))) {
+      return true;  // a face open to air or water
+    }
+  }
+  return false;  // buried on all six sides
+}
+
 // --- the DDA raycast --------------------------------------------------------------
 
 World::RayHit World::raycast(const float origin[3],

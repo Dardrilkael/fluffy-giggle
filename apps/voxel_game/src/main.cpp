@@ -56,6 +56,7 @@
 #include <ws/physics/3d/contact.hpp>
 #include <ws/physics/3d/shape.hpp>
 #include <ws/physics/3d/world.hpp>
+#include <ws/physics/common.hpp>  // kMaxBodiesPerWorld (the shell's budget)
 #include <ws/ui/app.hpp>
 #include <ws/ui/renderer2d.hpp>
 #include <ws/ui/renderer3d.hpp>
@@ -153,7 +154,14 @@ class VoxelApp final : public ws::ui::App {
     desc.gravity = Vec3{0.0f, player_.tuning_gravity(), 0.0f};
     desc.fixed_dt = 1.0f / 60.0f;
     desc.thread_count = 0;  // single-threaded: deterministic, simple
-    desc.max_bodies = 20000;
+    // The collision shell of a 128x128x64 world: ~17k exposed cells for
+    // the shipped seed (the first build's 20000 answer was the shipped
+    // bug - the old surface-BAND grid needed ~50k and the world died
+    // at capacity, taking the player's body with it). The cap is the
+    // lib's own published maximum; the shell is measured well under it
+    // (the regression test pins the margin), the player's own body sits
+    // in the same budget.
+    desc.max_bodies = ws::physics::kMaxBodiesPerWorld;
     auto world3d = pd::World3D::create(desc);
     if (!world3d.has_value()) {
       ws::core::log_error(world3d.error());
@@ -162,11 +170,12 @@ class VoxelApp final : public ws::ui::App {
     }
     phys_.emplace(std::move(*world3d));
 
-    // The sparse collision grid: every solid block in the surface band
-    // (surface - 2 .. surface + 8) is one 1x1x1 static Box. The player
-    // walks the surface and digs into it; deep stone never collides in
-    // this build (a dig reaching the band's floor re-adds cells through
-    // the same add_physics_at the place path uses).
+    // The collision shell: one static Box per EXPOSED solid cell (see
+    // World::is_exposed) - the terrain's skin, the trunks, every
+    // reachable face. Buried cells never collide (nothing can touch
+    // them), and every edit re-derives membership around the changed
+    // cell (a dig exposes the wall behind it, a place buries what it
+    // covers), so digging deep and tunneling mid-hill just work.
     build_physics_grid();
 
     if (!player_.spawn(*phys_, spawn)) {
@@ -263,7 +272,7 @@ class VoxelApp final : public ws::ui::App {
         if (world_.set_block(hit.cell[0], hit.cell[1], hit.cell[2],
                              voxel::Block::air)) {
           rebuild_around(hit.cell[0], hit.cell[2]);
-          remove_physics_at(hit.cell[0], hit.cell[1], hit.cell[2]);
+          update_shell(hit.cell[0], hit.cell[1], hit.cell[2]);
           play_sound(kSoundBreak, 0.9f);
         }
       } else if (input.mouse_pressed[1] && hit.hit) {  // place
@@ -277,7 +286,7 @@ class VoxelApp final : public ws::ui::App {
             !overlaps_player(px, py, pz)) {
           if (world_.set_block(px, py, pz, place)) {
             rebuild_around(px, pz);
-            add_physics_at(px, py, pz);
+            update_shell(px, py, pz);
             play_sound(kSoundPlace, 0.8f);
           }
         }
@@ -302,20 +311,27 @@ class VoxelApp final : public ws::ui::App {
   }
 
  private:
-  // --- the physics grid --------------------------------------------------------
+  // --- the collision shell -------------------------------------------------------
   void build_physics_grid() {
+    // The shell walk: a column's stack up to its highest solid block
+    // (surface_height - a trunk top counts; the trunk's cells and the
+    // ground under it are all shell candidates, the first build's
+    // band missed the ground under trees). Buried cells read false and
+    // are skipped; the walk is y-major per column so the early exit
+    // from the top bounds the cost.
     for (int z = 0; z < voxel::kWorldSizeZ; ++z) {
       for (int x = 0; x < voxel::kWorldSizeX; ++x) {
-        const int surface = world_.surface_height(x, z);
-        for (int y = surface - 2; y <= surface + 8; ++y) {
-          if (y < 0 || y >= voxel::kChunkSizeY) {
-            continue;
-          }
-          if (voxel::is_solid(world_.block_at(x, y, z))) {
+        const int top = world_.surface_height(x, z);
+        for (int y = top; y >= 0; --y) {
+          if (world_.is_exposed(x, y, z)) {
             add_physics_at(x, y, z);
           }
         }
       }
+    }
+    if (cells_refused_ > 0) {
+      ws::core::warn("voxel: collision shell clipped by the body cap - "
+                     "the far corners may be soft");
     }
   }
 
@@ -334,8 +350,14 @@ class VoxelApp final : public ws::ui::App {
     const auto id = phys_->create_body(desc);
     if (id.has_value()) {
       physics_cells_[key] = *id;
-    } else {
+    } else if (!cells_refused_) {
+      // Once, not per cell: a capacity refusal would otherwise flood
+      // the log with one error per remaining cell (the user's #3
+      // report was exactly this symptom).
+      ++cells_refused_;
       ws::core::log_error(id.error());
+    } else {
+      ++cells_refused_;
     }
   }
 
@@ -346,6 +368,37 @@ class VoxelApp final : public ws::ui::App {
     }
     (void)phys_->destroy_body(it->second);
     physics_cells_.erase(it);
+  }
+
+  // Re-derives shell membership for one cell and its 6 neighbors: the
+  // edit's whole blast radius. A break exposes the wall behind it (the
+  // formerly-buried neighbor now has a face); a place buries the cells
+  // it covers (their faces against it are gone) while itself standing
+  // if it has any open face. Membership is is_exposed - the same
+  // authority the build walk used - so the shell never drifts from
+  // the table it mirrors.
+  void update_shell(int x, int y, int z) {
+    static constexpr int kDirs[6][3] = {{0, 1, 0},  {0, -1, 0}, {1, 0, 0},
+                                         {-1, 0, 0}, {0, 0, 1},  {0, 0, -1}};
+    if (world_.is_exposed(x, y, z)) {
+      add_physics_at(x, y, z);
+    } else {
+      remove_physics_at(x, y, z);
+    }
+    for (const auto& d : kDirs) {
+      const int nx = x + d[0];
+      const int ny = y + d[1];
+      const int nz = z + d[2];
+      if (nx < 0 || nx >= voxel::kWorldSizeX || nz < 0 ||
+          nz >= voxel::kWorldSizeZ || ny < 0 || ny >= voxel::kChunkSizeY) {
+        continue;
+      }
+      if (world_.is_exposed(nx, ny, nz)) {
+        add_physics_at(nx, ny, nz);
+      } else {
+        remove_physics_at(nx, ny, nz);
+      }
+    }
   }
 
   [[nodiscard]] static std::uint64_t cell_key(int x, int y, int z) {
@@ -469,6 +522,9 @@ class VoxelApp final : public ws::ui::App {
   voxel::World world_;
   std::optional<pd::World3D> phys_;
   std::unordered_map<std::uint64_t, pd::BodyId> physics_cells_{};
+  // How many shell cells the body cap refused (0 = none; the warn-once
+  // guard in add_physics_at keeps the log at one error + one warning).
+  std::uint32_t cells_refused_ = 0;
   voxel::Player player_;
   int hotbar_ = 0;
   bool dead_ = false;

@@ -13,10 +13,10 @@ Jolt behind `ws::physics3d`, OpenAL Soft behind `ws::audio`.
   Deterministic per seed (seed `0xC0FFEE`).
 - **A first-person player**: WASD movement, mouse look, space jump
   (~1.1 m apex), shift sprint — a physics3d dynamic Box (0.6 × 1.8 × 0.6)
-  against a sparse static grid of the surface-band solid blocks, at a
-  60 Hz fixed tick. The controller was validated headlessly first
-  (`libs/physics/tests/test_voxel_proto.cpp`): rest, exact walk speed,
-  and the jump apex are pinned by tests.
+  against a static **collision shell** (one Box per exposed solid cell,
+  ~17k bodies), at a 60 Hz fixed tick. The controller was validated
+  headlessly first (`libs/physics/tests/test_voxel_proto.cpp`): rest,
+  exact walk speed, and the jump apex are pinned by tests.
 - **Block interaction**: left mouse breaks, right mouse places (the
   hotbar's selected type), both through an Amanatides & Woo DDA voxel
   raycast with a 7-block reach. Placement is guarded against entombing
@@ -90,9 +90,13 @@ camera builder mirrors the player's pose).
 
 ## Known limits (the honest list)
 
-- The physics grid is the surface band only (surface−2 … surface+8 per
-  column) — deep stone never collides; digging below the band falls
-  through. Deep-collision is the next pass (a column-rebuild on dig).
+- The collision grid is the **shell** — every solid cell with an open
+  face (see `World::is_exposed`), re-derived around every edit: digging
+  deep and tunneling mid-hill just work. The shell is ~17k bodies for
+  the shipped seed (measured; the regression test pins it inside the
+  budget, and a full World3D acceptance case creates every shell body
+  plus the player's). The one soft spot: the border columns' outboard
+  faces are not collision (the void reads solid for the exposure test).
 - The water block type exists in the palette but is not meshed or
   swimmable — it only shapes the terrain (sand shorelines).
 - Mouse look is free-cursor (window-edge clamped): the shell has no
