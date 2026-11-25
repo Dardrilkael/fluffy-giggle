@@ -331,7 +331,7 @@ class VoxelApp final : public ws::ui::App {
       move.back = input.key_down[kKeyS];
       move.left = input.key_down[kKeyA];
       move.right = input.key_down[kKeyD];
-      move.jump = input.key_down[kKeySpace];
+      move.jump = input.key_pressed[kKeySpace];
       move.sprint = input.key_down[kKeyShiftL];
       move.look_dx = look_dx_;
       move.look_dy = look_dy_;
