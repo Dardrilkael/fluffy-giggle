@@ -26,3 +26,29 @@ if(TARGET test_voxel_logic)
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_SOURCE_DIR}/libs/physics/include")
 endif()
+
+# The frame harness: the app's own frame rendered headless on a real
+# Vulkan device (lavapipe is enough) with the pixels READ BACK - the
+# terrain/horizon/displacement pins behind the two field reports.
+# Opt-in like ui_mesh_gpu (WS_VOXEL_GPU_TESTS), skips with a message
+# when no device comes up.
+option(WS_VOXEL_GPU_TESTS
+  "Build the headless-GPU frame harness (needs a Vulkan device)" OFF)
+if(WS_VOXEL_GPU_TESTS)
+  # LINK is single-value (WsHelpers.cmake) - ws::ui carries the
+  # default-link override (the TUs include renderer.cpp/world.cpp),
+  # DEPENDS carries gfx/physics the same way the logic suite carries
+  # its extras.
+  ws_add_test(voxel_frame_gpu
+    SOURCES src/renderer.cpp src/world.cpp src/player.cpp
+            tests/test_voxel_frame_gpu.cpp
+    LINK ws::ui
+    DEPENDS ws::gfx ws::physics)
+  if(TARGET test_voxel_frame_gpu)
+    target_include_directories(test_voxel_frame_gpu PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/src"
+      "${CMAKE_SOURCE_DIR}/libs/physics/include"
+      "${CMAKE_SOURCE_DIR}/libs/ui/src")
+    target_link_libraries(test_voxel_frame_gpu PRIVATE volk stb)
+  endif()
+endif()

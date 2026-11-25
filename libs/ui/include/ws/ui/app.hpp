@@ -66,6 +66,18 @@ enum class CursorShape {
     not_allowed,   // the operation will not work here
 };
 
+// The pointer's POLICY, set_cursor_mode's vocabulary. hidden is the
+// game convention: the OS pointer vanishes and mouse motion arrives
+// as raw unclipped deltas (never a cursor hitting a screen edge) -
+// free-cursor mouse-look rides it. normal is the OS pointer back,
+// visible and free - menus, editors. A host without a cursor API
+// (Android's glue) no-ops the seam and keeps whatever the OS does
+// by default.
+enum class CursorMode {
+    normal,   // the visible OS pointer - the default
+    hidden,   // grabbed for raw mouse-look
+};
+
 // Generic application shell: window + Vulkan context + Dear ImGui (docking)
 // + ImPlot, with a Hazel-style event system and a render command queue.
 // Apps subclass and override on_setup()/on_event()/on_update().
@@ -162,6 +174,13 @@ public:
     // API. The shape persists until the next call - set CursorShape::
     // arrow to hand the default back.
     void set_cursor(CursorShape shape);
+
+    // The pointer policy (see CursorMode): hidden grabs the pointer
+    // for raw mouse-look deltas; normal hands the visible OS pointer
+    // back. No-op before run() and on a host without a cursor API.
+    // The mode persists until the next call - pair it with the pause
+    // menu's open/close, the way games do.
+    void set_cursor_mode(CursorMode mode);
 
     // The F3 close interception: while false, the OS's close request
     // (the title bar's X) reaches on_event as a WindowCloseEvent but

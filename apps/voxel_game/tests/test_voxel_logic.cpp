@@ -22,6 +22,8 @@
 #include <ws/physics/3d/world.hpp>
 #include <ws/physics/common.hpp>  // kMaxBodiesPerWorld (the shell budget)
 
+#include "menu.hpp"
+#include "texture_atlas.hpp"
 #include "world.hpp"
 
 namespace {
@@ -496,4 +498,106 @@ TEST_CASE("frame: the camera reads the rotated world the right way round") {
   const Vec3 south = eye + Vec3{0.0f, 0.0f, -10.0f};
   const Vec3 w_s = south - eye;
   CHECK(ws::math::dot(w_s, fwd) < -9.0f);
+}
+
+TEST_CASE("menu: the pause layout centers the pair on the frame") {
+  // Two buttons, resume above quit, the pair centered both ways: the
+  // classic pause-menu read. Any frame size.
+  const float fw = 320.0f, fh = 240.0f;
+  voxel::menu::Button b[voxel::menu::kButtonCount];
+  voxel::menu::layout(fw, fh, b);
+  // Horizontal: centered - both buttons share x, the frame's middle.
+  CHECK(b[0].x == doctest::Approx((fw - voxel::menu::kButtonW) * 0.5f));
+  CHECK(b[1].x == b[0].x);
+  CHECK(b[0].w == voxel::menu::kButtonW);
+  CHECK(b[0].h == voxel::menu::kButtonH);
+  // Vertical: resume on top, quit one gap below, the pair centered.
+  CHECK(b[1].y == doctest::Approx(b[0].y + voxel::menu::kButtonH +
+                                  voxel::menu::kButtonGap));
+  const float pair_h = 2.0f * voxel::menu::kButtonH + voxel::menu::kButtonGap;
+  CHECK(b[0].y == doctest::Approx(fh * 0.5f - pair_h * 0.5f));
+  // And the pair really is centered: symmetric margins top and bottom.
+  CHECK(b[0].y == doctest::Approx(fh - (b[1].y + b[1].h)));
+}
+
+TEST_CASE("menu: the click hits the right button, edges exact") {
+  const float fw = 320.0f, fh = 240.0f;
+  voxel::menu::Button b[voxel::menu::kButtonCount];
+  voxel::menu::layout(fw, fh, b);
+
+  // The center of each button is that button's.
+  CHECK(voxel::menu::click_action(fw, fh, b[0].x + b[0].w * 0.5f,
+                                  b[0].y + b[0].h * 0.5f) == 0);
+  CHECK(voxel::menu::click_action(fw, fh, b[1].x + b[1].w * 0.5f,
+                                  b[1].y + b[1].h * 0.5f) == 1);
+
+  // The [x, x+w) edges: left/top inclusive, right/bottom exclusive.
+  CHECK(voxel::menu::hit(b[0], b[0].x, b[0].y) == true);
+  CHECK(voxel::menu::hit(b[0], b[0].x + b[0].w - 0.01f,
+                         b[0].y + b[0].h - 0.01f) == true);
+  CHECK(voxel::menu::hit(b[0], b[0].x + b[0].w, b[0].y) == false);
+  CHECK(voxel::menu::hit(b[0], b[0].x, b[0].y + b[0].h) == false);
+
+  // The two buttons share NO pixel: a click between them (the gap)
+  // hits neither - and neither does a click far away.
+  const float between_x = b[0].x + b[0].w * 0.5f;
+  const float between_y = b[0].y + b[0].h + voxel::menu::kButtonGap * 0.5f;
+  CHECK(voxel::menu::click_action(fw, fh, between_x, between_y) == -1);
+  CHECK(voxel::menu::click_action(fw, fh, 2.0f, 2.0f) == -1);
+}
+
+TEST_CASE("atlas: the face->tile map matches the block vocabulary") {
+  // The generated header's map, pinned: grass wears the grass TOP on
+  // top, DIRT on bottom, the grass SIDE everywhere else; the log wears
+  // its top on the ends, the side texture on the sides; dirt/stone/sand
+  // are uniform. Face order is world.cpp's kFaces:
+  //   0 top  1 bottom  2 east  3 west  4 south  5 north.
+  using B = voxel::Block;
+  const auto t = [](B block, int face) {
+    return voxel::atlas::kTileFor[static_cast<std::size_t>(block)][face];
+  };
+  CHECK(t(B::grass, 0) == 0);   // grass_block_top
+  CHECK(t(B::grass, 1) == 2);   // dirt
+  CHECK(t(B::grass, 2) == 1);   // grass_block_side
+  CHECK(t(B::grass, 5) == 1);
+  CHECK(t(B::dirt, 0) == 2);    // dirt everywhere
+  CHECK(t(B::dirt, 4) == 2);
+  CHECK(t(B::stone, 3) == 3);   // stone everywhere
+  CHECK(t(B::wood, 0) == 5);    // oak_log_top
+  CHECK(t(B::wood, 1) == 5);
+  CHECK(t(B::wood, 2) == 4);    // oak_log side
+  CHECK(t(B::wood, 5) == 4);
+  CHECK(t(B::sand, 0) == 6);    // sand everywhere
+  CHECK(t(B::sand, 5) == 6);
+}
+
+TEST_CASE("atlas: the mesher's UV math lands tiles upright on faces") {
+  // The mesher's own formula, spelled independently here: a face's
+  // corner (su, sv) in [-0.5, 0.5] maps into its tile's square, with
+  // v FLIPPED (sv = +0.5 is the face's UP edge; the tile's top rows -
+  // the grass side's green fringe - are v ~= 0 in atlas-image space).
+  const int tile = voxel::atlas::kTileFor
+      [static_cast<std::size_t>(voxel::Block::grass)][5];  // north face
+  const float g = static_cast<float>(voxel::atlas::kAtlasGrid);
+  const float u0 = static_cast<float>(tile % voxel::atlas::kAtlasGrid) / g;
+  const float v0 = static_cast<float>(tile / voxel::atlas::kAtlasGrid) / g;
+  const float s = 1.0f / g;
+
+  // The face's UP corner (sv = +0.5) samples v = v0 + 0 (the tile's
+  // TOP rows - the fringe); the DOWN corner (sv = -0.5) samples v =
+  // v0 + s (the tile's BOTTOM rows). Read as atlas pixel rows (v*64):
+  // up < down, and each lands exactly on the tile's own edge.
+  const auto v_at = [&](float sv) {
+    return (v0 + (1.0f - (sv + 0.5f)) * s) * 64.0f;
+  };
+  CHECK(v_at(+0.5f) < v_at(-0.5f));
+  CHECK(v_at(+0.5f) == doctest::Approx(v0 * 64.0f).epsilon(0.01));
+  CHECK(v_at(-0.5f) == doctest::Approx((v0 + s) * 64.0f).epsilon(0.01));
+
+  // u spans the tile: the left corner (su = -0.5) samples u0, the
+  // right corner (su = +0.5) samples u0 + s - no bleed into the
+  // neighbor tile.
+  const auto u_at = [&](float su) { return (u0 + (su + 0.5f) * s) * 64.0f; };
+  CHECK(u_at(-0.5f) == doctest::Approx(u0 * 64.0f).epsilon(0.01));
+  CHECK(u_at(+0.5f) == doctest::Approx((u0 + s) * 64.0f).epsilon(0.01));
 }

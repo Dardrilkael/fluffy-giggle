@@ -9,6 +9,7 @@
 // columns a hash dice fires on; water fills every cell at or below
 // its level the terrain does not.
 
+#include "texture_atlas.hpp"
 #include "world.hpp"
 
 #include <cmath>
@@ -164,12 +165,26 @@ constexpr int kHeightSpan = 28; // the range above kHeightMin (hills to 30)
               static_cast<float>(gz) + 0.5f + face.normal[2] * 0.5f};
           const float* u = kUV[fi][0];
           const float* v = kUV[fi][1];
-          // The four corners (GAME space): c - u/2 - v/2, c + v/2,
-          // c + u/2 + v/2, c + u/2 - the right-hand CCW order for
-          // (u, v) with u x v = n.
+          // The face's atlas tile (texture_atlas.hpp's kTileFor): the
+          // uploaded resource pack's own art per (block, face) - grass
+          // top/side, oak log side/top, the works.
+          const int tile = atlas::kTileFor[static_cast<std::size_t>(type)][fi];
+          const float tile_u0 = static_cast<float>(tile % atlas::kAtlasGrid) /
+                               static_cast<float>(atlas::kAtlasGrid);
+          const float tile_v0 = static_cast<float>(tile / atlas::kAtlasGrid) /
+                               static_cast<float>(atlas::kAtlasGrid);
+          const float tile_s = 1.0f / static_cast<float>(atlas::kAtlasGrid);
+          // The four corners (GAME space): the unit square around the
+          // center in the (u, v) basis - (-u/2 - v/2), (+u/2 - v/2),
+          // (+u/2 + v/2), (-u/2 + v/2) - the right-hand CCW order for
+          // (u, v) with u x v = n. (The first build's table was a KITE:
+          // (-,-), (0,+), (+,+), (+,0) - an irregular quad missing half
+          // the face, so every block in the world rendered as pinched,
+          // gap-riddled geometry - the "still not rendering correctly"
+          // field report.)
           float corners[4][3];
           const float signs[4][2] = {
-              {-0.5f, -0.5f}, {0.0f, 0.5f}, {0.5f, 0.5f}, {0.5f, 0.0f}};
+              {-0.5f, -0.5f}, {0.5f, -0.5f}, {0.5f, 0.5f}, {-0.5f, 0.5f}};
           for (int ci = 0; ci < 4; ++ci) {
             const float su = signs[ci][0];
             const float sv = signs[ci][1];
@@ -197,8 +212,16 @@ constexpr int kHeightSpan = 28; // the range above kHeightMin (hills to 30)
             vertex.normal[0] = game_to_render(face.normal[0], 0);
             vertex.normal[1] = game_to_render(face.normal[1], 1);
             vertex.normal[2] = game_to_render(face.normal[2], 2);
-            vertex.uv[0] = static_cast<float>(ci & 1);
-            vertex.uv[1] = static_cast<float>(ci >> 1);
+            // The atlas UV: the face's (su, sv) in [-0.5, 0.5] mapped
+            // into the tile's [u0, u0+s] x [v0, v0+s] square. v is
+            // FLIPPED inside the tile - sv=+0.5 is the face's UP edge
+            // (side faces' v basis is +y), and the tile's green fringe
+            // must land there, but the fringe sits at the ATLAS's top
+            // rows, which are v ~= 0 in image space. Without the flip
+            // every grass side wore its dirt strip on top.
+            vertex.uv[0] = tile_u0 + (signs[ci][0] + 0.5f) * tile_s;
+            vertex.uv[1] =
+                tile_v0 + (1.0f - (signs[ci][1] + 0.5f)) * tile_s;
             out.vertices.push_back(vertex);
           }
           out.indices.push_back(base + 0);

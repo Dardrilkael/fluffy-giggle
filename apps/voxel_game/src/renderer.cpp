@@ -2,7 +2,19 @@
 
 #include "renderer.hpp"
 
+#include "texture_atlas.hpp"
+
 namespace voxel {
+
+ws::ui::r2d::Texture load_atlas_texture() {
+  // The atlas as one GPU texture: the generated header's PNG bytes
+  // through the engine's own memory decoder (no filesystem seam - the
+  // same bytes on every host, Android included). The white fallback on
+  // a dead decode is the load's own contract; the app checks the id
+  // and warns (flat-tint terrain still renders - the pre-atlas look).
+  return ws::ui::r2d::load_texture_from_memory(atlas::kPng.data(),
+                                               atlas::kPng.size());
+}
 
 ws::ui::r3d::Light3D scene_light() {
   // The direction TO the light (r3d::set_light normalizes): from the
@@ -48,16 +60,21 @@ void begin_scene(const Player& player, float aspect) {
   (void)ws::ui::r3d::set_light(scene_light());
 }
 
-void draw_world(const World& world) {
+void draw_world(const World& world, ws::ui::r2d::Texture atlas_texture) {
   // Every chunk mesh is built in RENDER space at world-grid positions
   // already (the mesher's own note) - the identity transform draws it
   // exactly where it was baked. One draw per (chunk, type) mesh; the
   // painter's order within layer 0 does not matter (the mesh path is
   // depth-tested - the GPU's depth buffer resolves the geometry).
+  // The material carries the atlas texture (the uploaded pack's art,
+  // the per-face UVs already baked in the vertices) with a WHITE tint
+  // so the texels arrive as authored; the flat per-block tints are the
+  // untextured fallback (a {} texture id would shade the tint alone).
   for (const World::ChunkMesh& chunk : world.chunk_meshes()) {
     ws::ui::r3d::Transform3D identity{};  // translation 0, scale 1
     ws::ui::r3d::MeshMaterial material;
-    material.tint = tint_of(chunk.type);
+    material.texture = atlas_texture;
+    material.tint = ws::ui::r2d::rgba(255, 255, 255);
     ws::ui::r3d::draw_mesh(chunk.mesh, identity, material);
   }
 }

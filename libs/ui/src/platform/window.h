@@ -172,13 +172,18 @@ public:
     // platform a composed title - the answer of ws::platform's
     // window_title(), which stays headless: this seam is where the
     // composed string meets the OS window. set_cursor picks one of the
-    // standard system pointers (CursorShape in <ws/ui/app.hpp>). Base
-    // defaults are no-ops: a host whose platform owns the surface keeps
-    // them - Android's activity owns the window label (manifest-bound)
-    // and the glue exposes no cursor API, so a USB mouse there keeps
-    // the system pointer.
+    // standard system pointers (CursorShape in <ws/ui/app.hpp>).
+    // set_cursor_mode picks the pointer policy - hidden grabs the
+    // pointer for raw mouse-look (desktop: the OS pointer vanishes and
+    // motion arrives as unclipped deltas; the cursor never hits a
+    // screen edge), normal hands it back to the OS (menus). Base
+    // defaults are no-ops: a host whose platform owns the surface
+    // keeps them - Android's activity owns the window label
+    // (manifest-bound) and the glue exposes no cursor API, so a USB
+    // mouse there keeps the system pointer.
     virtual void set_title(std::string_view title) { (void)title; }
     virtual void set_cursor(CursorShape shape) { (void)shape; }
+    virtual void set_cursor_mode(CursorMode mode) { (void)mode; }
 
     // The OS-drawn title bar's look: `dark` picks the dark or light
     // frame, `caption_rgb` / `text_rgb` (0xRRGGBB) tint the caption and

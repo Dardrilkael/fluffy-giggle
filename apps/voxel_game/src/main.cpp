@@ -61,6 +61,7 @@
 #include <ws/ui/renderer2d.hpp>
 #include <ws/ui/renderer3d.hpp>
 
+#include "menu.hpp"
 #include "player.hpp"
 #include "renderer.hpp"
 #include "world.hpp"
@@ -123,18 +124,36 @@ class VoxelApp final : public ws::ui::App {
     // The look's raw material: the deltas between successive
     // MouseMovedEvents, accumulated between frames. The events carry
     // window-relative coords; consecutive differences are the motion,
-    // whatever the pointer's absolute position is.
+    // whatever the pointer's absolute position is. The live absolute
+    // position is kept too - the pause menu's buttons hit-test it
+    // (the cursor is free while the menu is open, so the OS is
+    // delivering real positions then).
     ws::input::EventDispatcher d{e};
     (void)d.dispatch<ws::input::MouseMovedEvent>(
         [this](const ws::input::MouseMovedEvent& ev) {
-          if (have_last_mouse_) {
+          if (!paused_ && have_last_mouse_) {
             look_dx_ += ev.x - last_mouse_x_;
             look_dy_ += ev.y - last_mouse_y_;
           }
           have_last_mouse_ = true;
           last_mouse_x_ = ev.x;
           last_mouse_y_ = ev.y;
+          mouse_x_ = ev.x;
+          mouse_y_ = ev.y;
           return false;  // not consumed: the shell keeps its own bookkeeping
+        });
+    // The menu's click: only when the menu is up (a paused game must
+    // not dig blocks behind the overlay), and consumed so the frame's
+    // break/place pass never sees it.
+    (void)d.dispatch<ws::input::MouseButtonPressedEvent>(
+        [this](const ws::input::MouseButtonPressedEvent& ev) {
+          if (paused_) {
+            clicked_ = ev.button == 0;
+            if (clicked_) {
+              return true;  // consumed: the menu ate the click
+            }
+          }
+          return false;
         });
   }
 
@@ -190,6 +209,13 @@ class VoxelApp final : public ws::ui::App {
     font_ = r2d::load_default_font(16.0f,
                                    r2d::FontBakeOptions::dark_chrome());
 
+    // --- the block-texture atlas (the uploaded resource pack) ---------------
+    atlas_ = voxel::load_atlas_texture();
+    if (atlas_.id == 0) {
+      ws::core::warn(
+          "voxel: the texture atlas fell back to white - flat tints");
+    }
+
     // --- audio: the break/place pair ----------------------------------------
     if (audio_.init().has_value()) {
       break_pcm_ = synth_tock(240.0, 610.0, 26.0);  // low, woody
@@ -215,6 +241,11 @@ class VoxelApp final : public ws::ui::App {
     } else {
       ws::core::warn("voxel: audio device unavailable - running silent");
     }
+    // --- the gameplay pointer: hidden from the first frame -------------------
+    // The mouse-look grab: the OS pointer vanishes and motion arrives as
+    // raw deltas (never a cursor pinned at a screen edge). ESC's pause
+    // menu is the one place that hands the visible pointer back.
+    set_cursor_mode(ws::ui::CursorMode::hidden);
   }
 
   void on_update() override {
@@ -231,6 +262,45 @@ class VoxelApp final : public ws::ui::App {
 
     const ws::input::InputFrame& input = ws::input::frame_input();
     const r2d::FrameSize frame = r2d::frame_size();
+
+    // --- esc opens/closes the pause menu ------------------------------------
+    // The old esc-quit is gone: the game keeps running until the menu's
+    // Quit (or the title bar's X). ESC toggles - open freezes play and
+    // hands the OS cursor back, close regrabs it and resumes. (The
+    // look-delta accumulator is gated in on_event, and the click flag
+    // is consumed here, so no paused-frame input leaks into the game.)
+    if (input.key_pressed[256]) {  // GLFW_KEY_ESCAPE
+      paused_ = !paused_;
+      set_cursor_mode(paused_ ? ws::ui::CursorMode::normal
+                              : ws::ui::CursorMode::hidden);
+      clicked_ = false;
+      // Re-anchor the look accumulator: while paused, deltas were not
+      // accumulated, but events kept arriving - drop any motion the
+      // resume could otherwise read as one giant turn.
+      look_dx_ = 0.0f;
+      look_dy_ = 0.0f;
+    }
+
+    if (paused_) {
+      // --- the paused frame: last game state + the menu overlay ------------
+      menu_action(frame);
+      r2d::begin();  // the 2D epoch: records first, paints first
+      r2d::set_layer(0);
+      r2d::draw_quad(0.0f, 0.0f, frame.width, frame.height,
+                     r2d::rgba(135, 196, 250));
+      r2d::end();
+
+      voxel::begin_scene(player_, frame.width / frame.height);
+      voxel::draw_world(world_, atlas_);
+      r2d::end();
+
+      r2d::begin();
+      r2d::set_layer(10);
+      draw_hud(frame);
+      draw_pause_menu(frame);
+      r2d::end();
+      return;
+    }
 
     // --- the controller tick -------------------------------------------------
     voxel::Player::MoveInput move{};
@@ -249,12 +319,6 @@ class VoxelApp final : public ws::ui::App {
     phys_->advance(frame_dt);
     player_.on_contacts(phys_->contact_events());
     (void)audio_.update();
-
-    // --- esc quits -----------------------------------------------------------
-    if (input.key_pressed[256]) {  // GLFW_KEY_ESCAPE
-      request_stop();
-      return;
-    }
 
     // --- hotbar + break/place ------------------------------------------------
     for (int i = 0; i < kHotbarSlots; ++i) {
@@ -301,7 +365,7 @@ class VoxelApp final : public ws::ui::App {
     r2d::end();
 
     voxel::begin_scene(player_, frame.width / frame.height);
-    voxel::draw_world(world_);
+    voxel::draw_world(world_, atlas_);
     r2d::end();
 
     r2d::begin();
@@ -510,10 +574,75 @@ class VoxelApp final : public ws::ui::App {
     (void)r2d::draw_text(
         12.0f, 32.0f,
         "LMB break - RMB place - 1-5 select - WASD move - space jump - "
-        "shift sprint - esc quit",
+        "shift sprint - esc menu",
         font_, r2d::rgba(160, 164, 174));
   }
 
+  // --- the pause menu ----------------------------------------------------------------
+  // The layout + hit test live in menu.hpp (engine-free, pinned by the
+  // logic suite); this side owns the state (paused_, the cursor mode,
+  // the consumed click) and the painting - plain quads + text in the
+  // game's own look, no widget framework.
+
+  // Consumes the menu frame's click (if any) against the layout.
+  void menu_action(const r2d::FrameSize& frame) {
+    if (!clicked_) {
+      return;
+    }
+    const int action = voxel::menu::click_action(
+        static_cast<float>(frame.width), static_cast<float>(frame.height),
+        mouse_x_, mouse_y_);
+    clicked_ = false;  // eaten either way: the modal shade owns the screen
+    if (action == 0) {  // resume: the ESC-toggle path, shared verbatim
+      paused_ = false;
+      set_cursor_mode(ws::ui::CursorMode::hidden);
+      look_dx_ = 0.0f;
+      look_dy_ = 0.0f;
+    } else if (action == 1) {  // quit
+      request_stop();
+    }
+  }
+
+  void draw_pause_menu(const r2d::FrameSize& frame) {
+    if (font_.empty()) {
+      return;
+    }
+    // The modal shade: the frame darkened under the menu, the classic
+    // "game is paused" read, drawn over the world + HUD beneath.
+    r2d::draw_quad(0.0f, 0.0f, frame.width, frame.height,
+                   r2d::rgba(10, 12, 16, 160));
+
+    // The title.
+    (void)r2d::draw_text(frame.width * 0.5f - 40.0f,
+                         frame.height * 0.5f - 96.0f, "paused", font_,
+                         r2d::rgba(235, 235, 240));
+
+    // The buttons: the hovered one brightens (the live mouse position
+    // is the OS cursor's own - the pointer is free while the menu is
+    // up), the rest sit at rest.
+    voxel::menu::Button buttons[voxel::menu::kButtonCount];
+    voxel::menu::layout(static_cast<float>(frame.width),
+                        static_cast<float>(frame.height), buttons);
+    static constexpr const char* kLabels[voxel::menu::kButtonCount] = {
+        "resume (esc)", "quit game"};
+    for (int i = 0; i < voxel::menu::kButtonCount; ++i) {
+      const voxel::menu::Button& b = buttons[i];
+      const bool hovered = voxel::menu::hit(b, mouse_x_, mouse_y_);
+      r2d::draw_quad(b.x, b.y, b.w, b.h,
+                     hovered ? r2d::rgba(58, 62, 72, 230)
+                             : r2d::rgba(38, 42, 50, 230));
+      // Centered label: draw_text returns the drawn width, so draw
+      // once off-screen to measure, then draw at the centered origin
+      // (the Font's own measure member needs the source-side header).
+      const float tw = r2d::draw_text(-1000.0f, -1000.0f, kLabels[i], font_);
+      (void)r2d::draw_text(b.x + (b.w - tw) * 0.5f,
+                           b.y + b.h * 0.5f - 8.0f, kLabels[i], font_,
+                           hovered ? r2d::rgba(255, 255, 255)
+                                   : r2d::rgba(190, 194, 204));
+    }
+  }
+
+ private:
   // --- the state -------------------------------------------------------------------
   static constexpr std::uint32_t kSeed = 0xC0FFEEu;
   static constexpr int kSoundBreak = 0;
@@ -527,6 +656,19 @@ class VoxelApp final : public ws::ui::App {
   std::uint32_t cells_refused_ = 0;
   voxel::Player player_;
   int hotbar_ = 0;
+  // The pause menu's state: paused_ gates the whole simulation (the
+  // controller tick, physics, break/place all skip while it is up) and
+  // owns the cursor mode; mouse_x_/mouse_y_ is the live OS pointer -
+  // the menu hit-tests it; clicked_ is the frame's menu click,
+  // consumed by the frame that reads it.
+  bool paused_ = false;
+  float mouse_x_ = 0.0f;
+  float mouse_y_ = 0.0f;
+  bool clicked_ = false;
+  // The block-texture atlas (the uploaded resource pack's art, loaded
+  // once at setup). id 0 = the white fallback - the frame shades the
+  // flat tints alone.
+  ws::ui::r2d::Texture atlas_{};
   bool dead_ = false;
   bool audio_ok_ = false;
   ws::audio::SoundHandle sounds_[2]{};

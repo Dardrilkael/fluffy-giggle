@@ -553,6 +553,21 @@ public:
         glfwSetCursor(window_, cursors_[slot]);
     }
 
+    void set_cursor_mode(CursorMode mode) override {
+        // GLFW's DISABLED is the game convention in one call: the OS
+        // pointer vanishes and motion arrives as unclipped deltas
+        // (never a cursor pinned at a screen edge); NORMAL hands the
+        // visible OS pointer back. The events keep flowing either way
+        // - the free-cursor look (deltas between successive
+        // MouseMovedEvents) never notices the switch.
+        if (window_ == nullptr) {
+            return;
+        }
+        glfwSetInputMode(window_, GLFW_CURSOR,
+                         mode == CursorMode::hidden ? GLFW_CURSOR_DISABLED
+                                                     : GLFW_CURSOR_NORMAL);
+    }
+
 private:
     GLFWwindow* window_ = nullptr;
     WindowEventSink* sink_ = nullptr;

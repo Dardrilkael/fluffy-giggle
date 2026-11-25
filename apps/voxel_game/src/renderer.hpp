@@ -34,8 +34,15 @@ namespace voxel {
 // chunk draws.
 void begin_scene(const Player& player, float aspect);
 
-// Draws every chunk mesh at its tint, one draw_mesh per mesh, inside
-// the CURRENT begin(Camera3D) block. Layer 0: the HUD rides higher.
-void draw_world(const World& world);
+// The block-texture atlas as one GPU texture (the generated
+// texture_atlas.hpp's PNG through the engine's memory decoder).
+// Call from on_setup onward; a dead decode answers the white-fallback
+// contract (id 0 - draw_world then shades the flat tints alone).
+[[nodiscard]] ws::ui::r2d::Texture load_atlas_texture();
+
+// Draws every chunk mesh textured with the atlas (WHITE tint so the
+// texels arrive as authored), inside the CURRENT begin(Camera3D)
+// block. Layer 0: the HUD rides higher.
+void draw_world(const World& world, ws::ui::r2d::Texture atlas_texture);
 
 }  // namespace voxel

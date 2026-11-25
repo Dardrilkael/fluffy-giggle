@@ -1242,6 +1242,14 @@ void App::set_cursor(CursorShape shape) {
     }
 }
 
+void App::set_cursor_mode(CursorMode mode) {
+    // Same seam story as set_cursor: no window before run(), and a host
+    // without a cursor API (Android's glue) no-ops inside the seam.
+    if (impl_->host_) {
+        impl_->host_->set_cursor_mode(mode);
+    }
+}
+
 void App::set_closable(bool closable) {
     // The F3 interception seam: the host clears GLFW's close flag when
     // an app holds the window open for its prompt; a platform that
