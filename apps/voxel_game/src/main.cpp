@@ -25,6 +25,7 @@
 // simply never contests them.
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -175,13 +176,9 @@ class VoxelApp final : public ws::ui::App {
     desc.gravity = Vec3{0.0f, player_.tuning_gravity(), 0.0f};
     desc.fixed_dt = 1.0f / 60.0f;
     desc.thread_count = 0;  // single-threaded: deterministic, simple
-    // The collision shell of a 128x128x64 world: ~17k exposed cells for
-    // the shipped seed (the first build's 20000 answer was the shipped
-    // bug - the old surface-BAND grid needed ~50k and the world died
-    // at capacity, taking the player's body with it). The cap is the
-    // lib's own published maximum; the shell is measured well under it
-    // (the regression test pins the margin), the player's own body sits
-    // in the same budget.
+    // Chunk-level greedy collision boxes reduce the static body count
+    // from one body per exposed voxel to a few cuboids per chunk.
+    // Keep a generous cap for dynamic bodies and future gameplay objects.
     desc.max_bodies = ws::physics::kMaxBodiesPerWorld;
     auto world3d = pd::World3D::create(desc);
     if (!world3d.has_value()) {
@@ -191,12 +188,9 @@ class VoxelApp final : public ws::ui::App {
     }
     phys_.emplace(std::move(*world3d));
 
-    // The collision shell: one static Box per EXPOSED solid cell (see
-    // World::is_exposed) - the terrain's skin, the trunks, every
-    // reachable face. Buried cells never collide (nothing can touch
-    // them), and every edit re-derives membership around the changed
-    // cell (a dig exposes the wall behind it, a place buries what it
-    // covers), so digging deep and tunneling mid-hill just work.
+    // One merged static collision decomposition per chunk. Boxes tile
+    // the complete solid voxel volume, so caves, overhangs, trunks and
+    // edited structures retain exact collision while body count falls.
     build_physics_grid();
 
     if (!player_.spawn(*phys_, spawn)) {
@@ -378,7 +372,7 @@ class VoxelApp final : public ws::ui::App {
         if (world_.set_block(hit.cell[0], hit.cell[1], hit.cell[2],
                              voxel::Block::air)) {
           rebuild_around(hit.cell[0], hit.cell[2]);
-          update_shell(hit.cell[0], hit.cell[1], hit.cell[2]);
+          rebuild_collision_around(hit.cell[0], hit.cell[2]);
           play_sound(kSoundBreak, 0.9f);
         }
       } else if (do_place && hit.hit) {  // place
@@ -392,7 +386,7 @@ class VoxelApp final : public ws::ui::App {
             !overlaps_player(px, py, pz)) {
           if (world_.set_block(px, py, pz, place)) {
             rebuild_around(px, pz);
-            update_shell(px, py, pz);
+            rebuild_collision_around(px, pz);
             play_sound(kSoundPlace, 0.8f);
           }
         }
@@ -412,8 +406,12 @@ class VoxelApp final : public ws::ui::App {
                        frame.width / frame.height, &last_counters_);
     r2d::end();
     timings.draw_ms = voxel::perf::ms_since(draw_t0);
-    last_counters_.bodies = static_cast<std::uint32_t>(physics_cells_.size()) +
-                            1u /* the player */;
+    std::uint32_t collision_body_count = 0;
+    for (const auto& chunk_bodies : physics_chunks_) {
+      collision_body_count +=
+          static_cast<std::uint32_t>(chunk_bodies.size());
+    }
+    last_counters_.bodies = collision_body_count + 1u /* the player */;
 
     r2d::begin();
     r2d::set_layer(10);
@@ -436,121 +434,76 @@ class VoxelApp final : public ws::ui::App {
   }
 
  private:
-  // --- the collision shell -------------------------------------------------------
-  void build_physics_grid() {
-    // The shell walk: a column's stack up to its highest solid block
-    // (surface_height - a trunk top counts; the trunk's cells and the
-    // ground under it are all shell candidates, the first build's
-    // band missed the ground under trees). Buried cells read false and
-    // are skipped; the walk is y-major per column so the early exit
-    // from the top bounds the cost.
-    for (int z = 0; z < voxel::kWorldSizeZ; ++z) {
-      for (int x = 0; x < voxel::kWorldSizeX; ++x) {
-        const int top = world_.surface_height(x, z);
-        for (int y = top; y >= 0; --y) {
-          if (world_.is_exposed(x, y, z)) {
-            add_physics_at(x, y, z);
-          }
+  // --- chunk-merged static collision -----------------------------------------
+  [[nodiscard]] static std::size_t chunk_index(int cx, int cz) {
+    return static_cast<std::size_t>(cz * voxel::kWorldChunksX + cx);
+  }
+
+  void destroy_collision_chunk(int cx, int cz) {
+    auto& bodies = physics_chunks_[chunk_index(cx, cz)];
+    for (const pd::BodyId id : bodies) {
+      (void)phys_->destroy_body(id);
+    }
+    bodies.clear();
+  }
+
+  void rebuild_collision_chunk(int cx, int cz) {
+    destroy_collision_chunk(cx, cz);
+    const auto boxes = world_.collision_boxes(cx, cz);
+    auto& bodies = physics_chunks_[chunk_index(cx, cz)];
+    bodies.reserve(boxes.size());
+    for (const auto& box : boxes) {
+      pd::BodyDesc desc{};
+      desc.kind = ws::physics::BodyKind::static_;
+      desc.shape = pd::Box{box.half_extents};
+      desc.transform = pd::Transform{box.center, {}};
+      const auto id = phys_->create_body(desc);
+      if (id.has_value()) {
+        bodies.push_back(*id);
+      } else {
+        ++collision_boxes_refused_;
+        if (collision_boxes_refused_ == 1) {
+          ws::core::log_error(id.error());
         }
       }
     }
-    if (cells_refused_ > 0) {
-      ws::core::warn("voxel: collision shell clipped by the body cap - "
-                     "the far corners may be soft");
-    }
   }
 
-  void add_physics_at(int x, int y, int z) {
-    const std::uint64_t key = cell_key(x, y, z);
-    if (physics_cells_.find(key) != physics_cells_.end()) {
-      return;  // already standing
-    }
-    pd::BodyDesc desc{};
-    desc.kind = ws::physics::BodyKind::static_;
-    desc.shape = pd::Box{Vec3{0.5f, 0.5f, 0.5f}};
-    desc.transform = pd::Transform{
-        Vec3{static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f,
-             static_cast<float>(z) + 0.5f},
-        {}};
-    const auto id = phys_->create_body(desc);
-    if (id.has_value()) {
-      physics_cells_[key] = *id;
-    } else if (!cells_refused_) {
-      // Once, not per cell: a capacity refusal would otherwise flood
-      // the log with one error per remaining cell (the user's #3
-      // report was exactly this symptom).
-      ++cells_refused_;
-      ws::core::log_error(id.error());
-    } else {
-      ++cells_refused_;
-    }
-  }
-
-  void remove_physics_at(int x, int y, int z) {
-    const auto it = physics_cells_.find(cell_key(x, y, z));
-    if (it == physics_cells_.end()) {
-      return;
-    }
-    (void)phys_->destroy_body(it->second);
-    physics_cells_.erase(it);
-  }
-
-  // Re-derives shell membership for one cell and its 6 neighbors: the
-  // edit's whole blast radius. A break exposes the wall behind it (the
-  // formerly-buried neighbor now has a face); a place buries the cells
-  // it covers (their faces against it are gone) while itself standing
-  // if it has any open face. Membership is is_exposed - the same
-  // authority the build walk used - so the shell never drifts from
-  // the table it mirrors.
-  void update_shell(int x, int y, int z) {
-    static constexpr int kDirs[6][3] = {{0, 1, 0},  {0, -1, 0}, {1, 0, 0},
-                                         {-1, 0, 0}, {0, 0, 1},  {0, 0, -1}};
-    if (world_.is_exposed(x, y, z)) {
-      add_physics_at(x, y, z);
-    } else {
-      remove_physics_at(x, y, z);
-    }
-    for (const auto& d : kDirs) {
-      const int nx = x + d[0];
-      const int ny = y + d[1];
-      const int nz = z + d[2];
-      if (nx < 0 || nx >= voxel::kWorldSizeX || nz < 0 ||
-          nz >= voxel::kWorldSizeZ || ny < 0 || ny >= voxel::kChunkSizeY) {
-        continue;
-      }
-      if (world_.is_exposed(nx, ny, nz)) {
-        add_physics_at(nx, ny, nz);
-      } else {
-        remove_physics_at(nx, ny, nz);
+  void build_physics_grid() {
+    for (int cz = 0; cz < voxel::kWorldChunksZ; ++cz) {
+      for (int cx = 0; cx < voxel::kWorldChunksX; ++cx) {
+        rebuild_collision_chunk(cx, cz);
       }
     }
+    if (collision_boxes_refused_ > 0) {
+      ws::core::warn("voxel: {} merged collision boxes could not be created",
+                     collision_boxes_refused_);
+    }
   }
 
-  [[nodiscard]] static std::uint64_t cell_key(int x, int y, int z) {
-    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 40) |
-           (static_cast<std::uint64_t>(static_cast<std::uint32_t>(y)) << 20) |
-           static_cast<std::uint64_t>(static_cast<std::uint32_t>(z));
-  }
-
-  // Would a block at (x, y, z) overlap the player's AABB? (The
-  // player's box: 0.6 wide, 1.8 tall, centered at position_.)
   [[nodiscard]] bool overlaps_player(int x, int y, int z) const {
+    // Conservative capsule-vs-voxel test: closest point on the block
+    // AABB to the capsule's vertical segment, expanded by its radius.
     const Vec3 p = player_.position();
-    const float half_w = 0.3f + 0.01f;  // the block's half extent + skin
-    const float half_h = 0.9f + 0.01f;
-    const float bx = static_cast<float>(x) + 0.5f;
-    const float by = static_cast<float>(y) + 0.5f;
-    const float bz = static_cast<float>(z) + 0.5f;
-    return std::abs(p.x - bx) < half_w + 0.5f &&
-           std::abs(p.y - by) < half_h + 0.5f &&
-           std::abs(p.z - bz) < half_w + 0.5f;
+    constexpr float radius = 0.3f;
+    constexpr float segment_half = 0.6f;  // 0.9 total half-height - radius
+    constexpr float skin = 0.015f;
+    const float cx = static_cast<float>(x) + 0.5f;
+    const float cy = static_cast<float>(y) + 0.5f;
+    const float cz = static_cast<float>(z) + 0.5f;
+    const float qx = std::max(std::abs(p.x - cx) - 0.5f, 0.0f);
+    const float qz = std::max(std::abs(p.z - cz) - 0.5f, 0.0f);
+    const float segment_y = std::clamp(cy, p.y - segment_half,
+                                      p.y + segment_half);
+    const float qy = std::max(std::abs(segment_y - cy) - 0.5f, 0.0f);
+    const float reach = radius + skin;
+    return qx * qx + qy * qy + qz * qz < reach * reach;
   }
 
-  // Rebuilds the chunk containing the cell (x, z), and the neighbor
-  // chunk too when the cell rides a chunk boundary (the neighbor's
-  // culled face against this cell may need its own face now). The
-  // rebuild's CPU cost lands in mesh_rebuild_ms_ - the perf
-  // instrumentation's mesh phase.
+  // Rebuilds the render chunk and collision chunk after an edit.
+  // Collision boxes are chunk-local, so adjacent chunks remain valid:
+  // unlike face-culling meshes, collision decomposition has no neighbor
+  // dependency. The measured cost includes both rebuild paths.
   void rebuild_around(int x, int z) {
     const auto t0 = std::chrono::steady_clock::now();
     const int cx = x / voxel::kChunkSizeX;
@@ -570,6 +523,13 @@ class VoxelApp final : public ws::ui::App {
     if (lz == voxel::kChunkSizeZ - 1 && cz < voxel::kWorldChunksZ - 1) {
       world_.rebuild_chunk(cx, cz + 1);
     }
+    mesh_rebuild_ms_ += voxel::perf::ms_since(t0);
+  }
+
+  void rebuild_collision_around(int x, int z) {
+    const auto t0 = std::chrono::steady_clock::now();
+    rebuild_collision_chunk(x / voxel::kChunkSizeX,
+                            z / voxel::kChunkSizeZ);
     mesh_rebuild_ms_ += voxel::perf::ms_since(t0);
   }
 
@@ -725,10 +685,9 @@ class VoxelApp final : public ws::ui::App {
 
   voxel::World world_;
   std::optional<pd::World3D> phys_;
-  std::unordered_map<std::uint64_t, pd::BodyId> physics_cells_{};
-  // How many shell cells the body cap refused (0 = none; the warn-once
-  // guard in add_physics_at keeps the log at one error + one warning).
-  std::uint32_t cells_refused_ = 0;
+  std::array<std::vector<pd::BodyId>,
+             voxel::kWorldChunksX * voxel::kWorldChunksZ> physics_chunks_{};
+  std::uint32_t collision_boxes_refused_ = 0;
   voxel::Player player_;
   int hotbar_ = 0;
   // The pause menu's state: paused_ gates the whole simulation (the
