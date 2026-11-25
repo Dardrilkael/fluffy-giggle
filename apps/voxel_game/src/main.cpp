@@ -33,7 +33,6 @@
 #include <cstdlib>
 #include <numbers>
 #include <optional>
-#include <unordered_map>
 #include <vector>
 
 #ifdef __ANDROID__
@@ -270,7 +269,7 @@ class VoxelApp final : public ws::ui::App {
     const float frame_dt = std::clamp(dt, 0.0f, 0.05f);
     const auto frame_t0 = std::chrono::steady_clock::now();
     voxel::perf::FrameTimings timings{};
-    mesh_rebuild_ms_ = 0.0f;  // rebuild_around feeds this across the frame
+    mesh_rebuild_ms_ = 0.0f;  // mesh and collision chunk rebuilds feed this
 
     const ws::input::InputFrame& input = ws::input::frame_input();
     const r2d::FrameSize frame = r2d::frame_size();
