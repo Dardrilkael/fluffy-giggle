@@ -24,10 +24,13 @@
 //   - RENDER space: r3d's world has +Y DOWN (the 2D convention the
 //     mesh path inherited). The mesher itself emits render-space
 //     geometry directly: game (gx, gy, gz) -> render (gx+0.5,
-//     -(gy+0.5), gz+0.5), x/z kept, y negated (normals the same flip).
-//     The camera maps the player's game pose over the same mirror, so
-//     the whole pipeline stays consistent; only the mesher and the
-//     camera builder ever spell the mirror.
+//     -(gy+0.5), -(gz+0.5)) - the 180-degree turn about the x axis
+//     that swaps up/north, a PROPER rotation (det +1), so CCW winding
+//     survives it. (The first build negated only y - a mirror, det
+//     -1 - which mirrored the world and inverted the view's
+//     horizontal handedness: the "mouse x is flipped" field report.
+//     The rotation is the fix; the camera rides the same map, so only
+//     the mesher and the camera builder ever spell it.)
 
 #pragma once
 
@@ -57,6 +60,17 @@ enum class Block : std::uint8_t {
 // Solid for meshing/collision/raycast. Water is not solid (see-through,
 // swimmable in a later life).
 [[nodiscard]] bool is_solid(Block block);
+
+// The GAME -> RENDER map, the one spell the mesher, the camera and the
+// light all share: the 180-degree turn about the x axis (x, -y, -z) -
+// a PROPER rotation (det +1), unlike the first build's y-only mirror
+// whose det -1 mirrored the world (the "mouse x is flipped" field
+// report: east landed on screen-left, so turning east read as turning
+// left). Exposed for the frame's regression test.
+[[nodiscard]] inline constexpr float game_to_render(
+    float value, int axis /*0 = x, 1 = y, 2 = z*/) {
+  return axis == 1 ? -value : (axis == 2 ? -value : value);
+}
 
 // --- chunks ------------------------------------------------------------------------
 

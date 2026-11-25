@@ -6,29 +6,34 @@ namespace voxel {
 
 ws::ui::r3d::Light3D scene_light() {
   // The direction TO the light (r3d::set_light normalizes): from the
-  // east and overhead in GAME space -> mirrored for the render scene
-  // the same way everything else is (y negated).
+  // east and overhead in GAME space, mapped to render space by the
+  // same proper rotation the mesher uses (x, -y, -z - the 180-degree
+  // turn about the x axis).
   ws::ui::r3d::Light3D light;
   light.dir[0] = 0.55f;   // east
-  light.dir[1] = -0.82f;  // GAME up -> render -y (the mirror)
-  light.dir[2] = 0.18f;
+  light.dir[1] = -0.82f;  // GAME up -> render -y (the rotation)
+  light.dir[2] = -0.18f;  // GAME slightly-north -> render -z
   light.color[0] = light.color[1] = light.color[2] = 1.0f;
   light.ambient = 0.35f;  // the shadow-side floor: dark, not black
   return light;
 }
 
 void begin_scene(const Player& player, float aspect) {
-  // The player's GAME-space eye and look, mirrored to render space.
+  // The player's GAME-space eye and look, mapped to render space by
+  // world.hpp's game_to_render - the SAME map the mesher baked the
+  // geometry with, so the camera and the world can never disagree
+  // about the frame (the first build's mirror-vs-rotation drift is
+  // exactly the bug this centralization closes).
   const ws::math::Vec3 eye = player.eye_position();
   const ws::math::Vec3 look = player.look_direction();
 
   ws::ui::r2d::Camera3D camera;
-  camera.eye[0] = eye.x;
-  camera.eye[1] = -eye.y;  // the mirror
-  camera.eye[2] = eye.z;
-  camera.target[0] = eye.x + look.x;
-  camera.target[1] = -(eye.y + look.y);
-  camera.target[2] = eye.z + look.z;
+  camera.eye[0] = game_to_render(eye.x, 0);
+  camera.eye[1] = game_to_render(eye.y, 1);
+  camera.eye[2] = game_to_render(eye.z, 2);
+  camera.target[0] = game_to_render(eye.x + look.x, 0);
+  camera.target[1] = game_to_render(eye.y + look.y, 1);
+  camera.target[2] = game_to_render(eye.z + look.z, 2);
   // up (0, -1, 0) is the default already: render +y is DOWN, so
   // "up" on screen is -y in render space = +y in game space.
   camera.up[0] = 0.0f;

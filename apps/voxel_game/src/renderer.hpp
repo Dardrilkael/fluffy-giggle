@@ -2,15 +2,16 @@
 //
 // One job: given the player's GAME-space pose and the world's chunk
 // meshes, set the r3d scene (camera + light) and draw every mesh. The
-// coordinate mirror lives here and in the mesher (world.cpp's note):
-// game (x, y, z) -> render (x, -y, z), so the camera's eye/target are
-// mirrored the same way, with the camera's up (0, -1, 0) - render +y
-// is DOWN, so render-up is -y... spelled: the r2d::Camera3D defaults
-// have up (0, -1, 0) which IS "game +y up" after the mirror.
+// coordinate map lives here and in the mesher (world.cpp's frame note):
+// game (x, y, z) -> render (x, -y, -z) - the 180-degree turn about the
+// x axis, a proper rotation, so the camera's eye/target ride the same
+// map the baked geometry did, with the camera's up (0, -1, 0): render
+// +y is DOWN, so render-up is -y... spelled: the r2d::Camera3D
+// defaults have up (0, -1, 0) which IS "game +y up" after the map.
 //
 // The camera's look direction: the player's look_direction() is GAME
-// space; mirrored it is (dx, -dy, dz). The camera's eye looks at
-// target = eye + mirrored direction.
+// space; mapped it is (dx, -dy, -dz). The camera's eye looks at
+// target = eye + mapped direction.
 
 #pragma once
 

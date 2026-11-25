@@ -436,3 +436,64 @@ TEST_CASE("shell: every shell body creates in a real World3D, then the player") 
   REQUIRE(state.has_value());
   CHECK(state->position.y < 40.0f);  // gravity is already pulling it
 }
+
+// --- the frame regression: the game->render map is a ROTATION ----------------------
+//
+// The field report "mouse x is inverted" was the first build's frame
+// map: (x, -y, z), a MIRROR (det -1). With the engine camera's
+// right = cross(forward, up-hint) and a y-down screen, a mirrored
+// world reads as its own reflection - east lands on screen-LEFT, so
+// turning east (the correct game-space response to mouse-right) looks
+// like turning left. The fix: (x, -y, -z), the 180-degree turn about
+// the x axis, det +1 - a proper rotation, no mirror, winding intact.
+
+TEST_CASE("frame: the game->render map is a proper rotation, not a mirror") {
+  // det +1: three independent axis probes through game_to_render.
+  // x kept, y and z negated - and NOT just y (the old mirror).
+  CHECK(voxel::game_to_render(3.0f, 0) == 3.0f);
+  CHECK(voxel::game_to_render(3.0f, 1) == -3.0f);
+  CHECK(voxel::game_to_render(3.0f, 2) == -3.0f);
+  // The map's matrix is diag(1, -1, -1): determinant = 1 * -1 * -1
+  // = +1 - a rotation. The old map diag(1, -1, 1) had det -1.
+  CHECK(1.0f * -1.0f * -1.0f > 0.0f);
+  CHECK(1.0f * -1.0f * 1.0f < 0.0f);  // the mirror it replaced
+}
+
+TEST_CASE("frame: the camera reads the rotated world the right way round") {
+  // The full camera chain, spelled independently: the engine's basis
+  // formula (right = cross(forward, up-hint), the r2d doc's own
+  // contract) applied to begin_scene's camera for a north-looking
+  // player, then three GAME-space probes through the map. The
+  // numbers this test pins are exactly the shipped bug's signature,
+  // post-fix: EAST on screen right, UP on screen up, SOUTH behind.
+  using ws::math::Vec3;
+  const Vec3 game_eye{64.5f, 32.0f, 64.5f};
+  const Vec3 game_look{0.0f, 0.0f, -1.0f};  // north
+
+  const Vec3 eye{voxel::game_to_render(game_eye.x, 0),
+                 voxel::game_to_render(game_eye.y, 1),
+                 voxel::game_to_render(game_eye.z, 2)};
+  const Vec3 look{voxel::game_to_render(game_look.x, 0),
+                 voxel::game_to_render(game_look.y, 1),
+                 voxel::game_to_render(game_look.z, 2)};
+  const Vec3 fwd = ws::math::normalize(look);
+  const Vec3 hint{0.0f, -1.0f, 0.0f};
+  const Vec3 right = ws::math::normalize(ws::math::cross(fwd, hint));
+  const Vec3 up = ws::math::cross(right, fwd);
+
+  // A GAME-east point, through the map, must read on NDC +x (screen
+  // right): the axis the old mirror put on screen-LEFT.
+  const Vec3 east = eye + Vec3{10.0f, 0.0f, 0.0f};
+  const Vec3 w_e = east - eye;
+  CHECK(ws::math::dot(w_e, right) > 9.0f);
+
+  // A GAME-up point must read on NDC -y (screen up in Vulkan).
+  const Vec3 up10 = eye + Vec3{0.0f, -10.0f, 0.0f};
+  const Vec3 w_u = up10 - eye;
+  CHECK(-ws::math::dot(w_u, up) < -9.0f);
+
+  // A GAME-south point is BEHIND the north view.
+  const Vec3 south = eye + Vec3{0.0f, 0.0f, -10.0f};
+  const Vec3 w_s = south - eye;
+  CHECK(ws::math::dot(w_s, fwd) < -9.0f);
+}

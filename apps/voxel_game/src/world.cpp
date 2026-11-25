@@ -94,8 +94,10 @@ constexpr int kHeightSpan = 28; // the range above kHeightMin (hills to 30)
 // --- the mesher ------------------------------------------------------------------
 // One (chunk, type) mesh: the chunk's cells of that type, each face
 // emitted when the neighbor across it is non-solid (air or water both
-// read see-through). Geometry is RENDER space (world.hpp's mirror
-// note): game (gx, gy, gz) -> render (gx+0.5, -(gy+0.5), gz+0.5).
+// read see-through). Geometry is RENDER space (world.hpp's frame note):
+// game (gx, gy, gz) -> render (gx+0.5, -(gy+0.5), -(gz+0.5)) - the
+// 180-degree turn about the x axis, a proper rotation (det +1), so
+// winding survives the map unchanged.
 //
 // Winding: the mesh pipeline culls BACK faces with CCW front
 // (renderer3d_math.h's kMeshFrontFaceCcw, pinned by the r3d suite).
@@ -175,23 +177,26 @@ constexpr int kHeightSpan = 28; // the range above kHeightMin (hills to 30)
             corners[ci][1] = gc[1] + su * u[1] + sv * v[1];
             corners[ci][2] = gc[2] + su * u[2] + sv * v[2];
           }
-          // GAME -> RENDER: x/z kept, y negated. A mirrored winding
-          // flips handedness, so the CCW order above becomes CW in
-          // render space - reverse the quad to keep the pipeline's
-          // front face. (The mirror is an improper rotation; the
-          // winding fix is the standard companion.)
+          // GAME -> RENDER: through world.hpp's game_to_render - the
+          // 180-degree turn about the x axis that swaps the world's up
+          // and north - (x, -y, -z), a PROPER rotation (det +1, unlike
+          // the old y-only mirror whose det -1 mirrored the world and
+          // flipped the view's horizontal handedness - the "mouse x is
+          // inverted" field report: east landed on screen-left, so
+          // turning east read as turning left). A rotation preserves
+          // winding, so the right-hand CCW order above stays CCW in
+          // render space - emit in order.
           const std::uint32_t base =
               static_cast<std::uint32_t>(out.vertices.size());
-          // Emit in render space, reversed order: corners[3], [2],
-          // [1], [0].
-          for (int ci = 3; ci >= 0; --ci) {
+          for (int ci = 0; ci < 4; ++ci) {
             ws::ui::r3d::Vertex3D vertex;
-            vertex.pos[0] = corners[ci][0];
-            vertex.pos[1] = -corners[ci][1];
-            vertex.pos[2] = corners[ci][2];
-            vertex.normal[0] = face.normal[0];
-            vertex.normal[1] = -face.normal[1];
-            vertex.normal[2] = face.normal[2];
+            vertex.pos[0] = game_to_render(corners[ci][0], 0);
+            vertex.pos[1] = game_to_render(corners[ci][1], 1);
+            vertex.pos[2] = game_to_render(corners[ci][2], 2);
+            // The normal rides the same rotation (x, -y, -z).
+            vertex.normal[0] = game_to_render(face.normal[0], 0);
+            vertex.normal[1] = game_to_render(face.normal[1], 1);
+            vertex.normal[2] = game_to_render(face.normal[2], 2);
             vertex.uv[0] = static_cast<float>(ci & 1);
             vertex.uv[1] = static_cast<float>(ci >> 1);
             out.vertices.push_back(vertex);
