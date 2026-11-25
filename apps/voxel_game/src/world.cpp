@@ -229,9 +229,12 @@ void emit_quad(ws::ui::r3d::MeshData& out, Block /*type*/, int fi, int ox,
     vertex.pos[0] = game_to_render(corners[ci][0], 0);
     vertex.pos[1] = game_to_render(corners[ci][1], 1);
     vertex.pos[2] = game_to_render(corners[ci][2], 2);
-    vertex.normal[0] = game_to_render(nrm[0], 0);
-    vertex.normal[1] = game_to_render(nrm[1], 1);
-    vertex.normal[2] = game_to_render(nrm[2], 2);
+    // Normals are VECTORS: rotate by (x, -y, -z) only - the point
+    // transform's +0.5/-0.5/-0.5 translation contaminated every
+    // normal (a top face read (0.5, -1.5, -0.5) instead of (0, -1, 0)).
+    vertex.normal[0] = nrm[0];
+    vertex.normal[1] = -nrm[1];
+    vertex.normal[2] = -nrm[2];
     // UVs in TILE UNITS: [0, w] x [0, h], v flipped inside each unit
     // (the per-cell mesher's own orientation rule, generalized).
     vertex.uv[0] = signs[ci][0] * eu;
