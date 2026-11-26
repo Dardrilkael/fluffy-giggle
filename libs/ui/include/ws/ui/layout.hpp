@@ -74,7 +74,7 @@ inline constexpr float kBottomMargin = 16.0f;
 inline constexpr float kPanelPadding = 8.0f;
 inline constexpr float kPanelHeight = 64.0f;
 
-using Rect = layout::Rect;
+using Rect = ::ws::ui::layout::Rect;
 
 struct Slot {
   Rect bounds{};
@@ -83,7 +83,7 @@ struct Slot {
 
 [[nodiscard]] constexpr bool hit(
     const Rect& rect, float x, float y) noexcept {
-  return layout::hit(rect, x, y);
+  return ::ws::ui::layout::hit(rect, x, y);
 }
 
 [[nodiscard]] constexpr std::array<Slot, kSlots> layout(
