@@ -4,6 +4,7 @@
 
 #include "texture_atlas.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -167,11 +168,9 @@ void draw_world(const World& world,
                     tile_textures,
                 const ws::ui::r2d::Camera3D& camera, float aspect,
                 perf::Counters* counters) {
-  // Leaves have transparent pixels but the mesh pipeline blends without
-  // discarding fragments. Draw every opaque tile first so its depth is
-  // available, then draw foliage with depth testing enabled and depth
-  // writes disabled. Transparent texels blend as zero and leave the
-  // already-rendered terrain visible instead of poisoning the depth buffer.
+  // Leaves have binary transparent pixels. Draw opaque geometry first,
+  // then foliage with depth testing enabled but depth writes disabled:
+  // transparent texels blend as zero and reveal the already-rendered world.
   const int leaves_tile =
       atlas::kTileFor[static_cast<std::size_t>(Block::leaves)][0];
   const Frustum fr = extract_frustum(camera, aspect);
@@ -185,49 +184,77 @@ void draw_world(const World& world,
         world.chunk_meshes().size());
   }
 
-  // Pass 0: opaque blocks. Pass 1: alpha-textured leaves.
-  for (int pass = 0; pass < 2; ++pass) {
-    for (const World::ChunkMesh& chunk : world.chunk_meshes()) {
-      const bool foliage = chunk.tile == leaves_tile;
-      if (foliage != (pass == 1)) continue;
+  const auto chunk_visible = [&](const World::ChunkMesh& chunk) {
+    const float x0 = static_cast<float>(chunk.cx * kChunkSizeX);
+    const float z0 = static_cast<float>(chunk.cz * kChunkSizeZ);
+    const float rmin[3] = {x0, -static_cast<float>(kChunkSizeY),
+                           -(z0 + static_cast<float>(kChunkSizeZ))};
+    const float rmax[3] = {x0 + static_cast<float>(kChunkSizeX), 0.0f, -z0};
+    return aabb_visible(fr, rmin, rmax);
+  };
 
-      const float gmin[3] = {static_cast<float>(chunk.cx * kChunkSizeX),
-                             0.0f,
-                             static_cast<float>(chunk.cz * kChunkSizeZ)};
-      const float gmax[3] = {
-          static_cast<float>(chunk.cx * kChunkSizeX + kChunkSizeX),
-          static_cast<float>(kChunkSizeY),
-          static_cast<float>(chunk.cz * kChunkSizeZ + kChunkSizeZ)};
-      const float rmin[3] = {gmin[0], -gmax[1], -gmax[2]};
-      const float rmax[3] = {gmax[0], -gmin[1], -gmin[2]};
-      if (!aabb_visible(fr, rmin, rmax)) continue;
-
-      if (counters != nullptr) {
-        ++counters->draw_calls;
-        counters->triangles += chunk.index_count / 3;
-        const std::size_t chunk_index =
-            static_cast<std::size_t>(chunk.cz * kWorldChunksX + chunk.cx);
-        if (!visible_chunks[chunk_index]) {
-          visible_chunks[chunk_index] = true;
-          ++counters->chunk_vis;
-        }
+  const auto draw_chunk = [&](const World::ChunkMesh& chunk, bool foliage) {
+    if (counters != nullptr) {
+      ++counters->draw_calls;
+      counters->triangles += chunk.index_count / 3;
+      const std::size_t index =
+          static_cast<std::size_t>(chunk.cz * kWorldChunksX + chunk.cx);
+      if (!visible_chunks[index]) {
+        visible_chunks[index] = true;
+        ++counters->chunk_vis;
       }
-
-      ws::ui::r3d::Transform3D identity{};
-      ws::ui::r3d::MeshMaterial material;
-      material.texture =
-          chunk.tile >= 0 && chunk.tile < atlas::kTileCount
-              ? tile_textures[static_cast<std::size_t>(chunk.tile)]
-              : ws::ui::r2d::Texture{};
-      material.tint = ws::ui::r2d::rgba(255, 255, 255);
-      if (foliage) {
-        material.depth_write = false;
-        // The shadow pass currently has no alpha-tested fragment stage;
-        // omitting foliage casters avoids solid rectangular leaf shadows.
-        material.casts_shadow = false;
-      }
-      ws::ui::r3d::draw_mesh(chunk.mesh, identity, material);
     }
+
+    ws::ui::r3d::Transform3D identity{};
+    ws::ui::r3d::MeshMaterial material;
+    material.texture =
+        chunk.tile >= 0 && chunk.tile < atlas::kTileCount
+            ? tile_textures[static_cast<std::size_t>(chunk.tile)]
+            : ws::ui::r2d::Texture{};
+    material.tint = ws::ui::r2d::rgba(255, 255, 255);
+    if (foliage) {
+      material.depth_write = false;
+      // The shadow pass has no alpha-tested fragment stage; don't cast
+      // solid rectangular leaf-card shadows.
+      material.casts_shadow = false;
+    }
+    ws::ui::r3d::draw_mesh(chunk.mesh, identity, material);
+  };
+
+  // Pass 1: all opaque terrain, in its normal chunk order.
+  for (const World::ChunkMesh& chunk : world.chunk_meshes()) {
+    if (chunk.tile != leaves_tile && chunk_visible(chunk)) {
+      draw_chunk(chunk, false);
+    }
+  }
+
+  // Pass 2: foliage, far-to-near by chunk center. Back-to-front order
+  // reduces overlap artifacts between transparent leaf meshes while
+  // the opaque depth buffer still prevents foliage showing through walls.
+  std::array<const World::ChunkMesh*, kWorldChunksX * kWorldChunksZ>
+      foliage_meshes{};
+  std::size_t foliage_count = 0;
+  for (const World::ChunkMesh& chunk : world.chunk_meshes()) {
+    if (chunk.tile == leaves_tile && chunk_visible(chunk) &&
+        foliage_count < foliage_meshes.size()) {
+      foliage_meshes[foliage_count++] = &chunk;
+    }
+  }
+  const auto distance_sq = [&](const World::ChunkMesh* chunk) {
+    const float dx = static_cast<float>(chunk->cx * kChunkSizeX) +
+                     0.5f * static_cast<float>(kChunkSizeX) - camera.eye[0];
+    const float dy = -0.5f * static_cast<float>(kChunkSizeY) - camera.eye[1];
+    const float dz = -static_cast<float>(chunk->cz * kChunkSizeZ) -
+                     0.5f * static_cast<float>(kChunkSizeZ) - camera.eye[2];
+    return dx * dx + dy * dy + dz * dz;
+  };
+  std::sort(foliage_meshes.begin(),
+            foliage_meshes.begin() + static_cast<std::ptrdiff_t>(foliage_count),
+            [&](const World::ChunkMesh* a, const World::ChunkMesh* b) {
+              return distance_sq(a) > distance_sq(b);
+            });
+  for (std::size_t i = 0; i < foliage_count; ++i) {
+    draw_chunk(*foliage_meshes[i], true);
   }
 }
 
