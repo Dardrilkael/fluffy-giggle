@@ -125,6 +125,13 @@ endif()
 # The idle-frame pacing policy (src/app/frame_pacer.hpp): header-only and
 # pure, so its suite links nothing of the app loop (no Vulkan, no window).
 ws_add_test(ui_frame_pacer SOURCES tests/test_frame_pacer.cpp LINK ws::core)
+
+# Public, pure layout policies (half-open rectangles, menu groups, hotbars,
+# settings sliders). No renderer, input backend or platform dependency.
+ws_add_test(ui_layout SOURCES tests/test_layout.cpp LINK ws::core)
+if(TARGET test_ui_layout)
+  target_include_directories(test_ui_layout PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+endif()
 if(TARGET test_ui_frame_pacer)
   target_include_directories(test_ui_frame_pacer PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
