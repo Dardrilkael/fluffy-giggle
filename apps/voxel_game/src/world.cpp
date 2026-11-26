@@ -141,13 +141,17 @@ constexpr FaceDir kFaces[6] = {
 };
 
 // Each face's tangent basis (GAME space, y up): (u, v) with u x v = n.
+// Side faces deliberately keep U horizontal and V vertical so the top
+// edge of grass_block_side stays at the TOP of every visible block face.
+// The old east/north bases swapped those axes, rotating the grass fringe
+// onto a vertical edge on two sides of each block.
 constexpr float kUVB[6][2][3] = {
     {{1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}},  // top: u=+x (east) v=-z (north)
     {{1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}},   // bottom: u=+x v=+z
-    {{0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}},   // east: u=+y v=+z
-    {{0.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 0.0f}},   // west: u=+z v=+y
-    {{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}},   // south: u=+x v=+y
-    {{0.0f, 1.0f, 0.0f}, {1.0f, 0.0f, 0.0f}},   // north: u=+y v=+x
+    {{0.0f, 0.0f, -1.0f}, {0.0f, 1.0f, 0.0f}}, // east: u=-z v=+y
+    {{0.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 0.0f}},  // west: u=+z v=+y
+    {{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}},  // south: u=+x v=+y
+    {{-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}}, // north: u=-x v=+y
 };
 
 // Emits one merged quad for the greedy rectangle (slice sa, [pu, pu+w)
