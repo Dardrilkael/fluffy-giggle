@@ -1484,11 +1484,14 @@ TEST_CASE("async mesher: rapid edits publish only the latest CPU revision") {
 
   voxel::AsyncChunkMesher mesher;
   for (int i = 0; i < 24; ++i) {
-    CHECK(world.set_block(x, y, z,
-        (i & 1) ? voxel::Block::air : voxel::Block::stone));
+    (void)world.set_block(x, y, z,
+        (i & 1) ? voxel::Block::air : voxel::Block::stone);
     mesher.request(world, cx, cz);
   }
-  CHECK(world.set_block(x, y, z, voxel::Block::stone));
+  const voxel::Block final_block =
+      world.block_at(x, y, z) == voxel::Block::stone
+          ? voxel::Block::air : voxel::Block::stone;
+  CHECK(world.set_block(x, y, z, final_block));
   mesher.request(world, cx, cz);
 
   std::vector<voxel::CpuMeshData> expected, actual;
@@ -1530,8 +1533,12 @@ TEST_CASE("async mesher: a newer request invalidates a published result") {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   REQUIRE(completed);
-  CHECK(world.set_block(cx * voxel::kChunkSizeX + 4, 30,
-                        cz * voxel::kChunkSizeZ + 4, voxel::Block::stone));
+  const int edit_x = cx * voxel::kChunkSizeX + 4;
+  const int edit_z = cz * voxel::kChunkSizeZ + 4;
+  const voxel::Block replacement =
+      world.block_at(edit_x, 30, edit_z) == voxel::Block::stone
+          ? voxel::Block::air : voxel::Block::stone;
+  CHECK(world.set_block(edit_x, 30, edit_z, replacement));
   mesher.request(world, cx, cz);
 
   std::vector<voxel::CpuMeshData> result, expected;
