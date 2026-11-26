@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -102,6 +103,21 @@ using BlockStorage = ws::gameplay::ChunkedGrid3D<
   return static_cast<int>(BlockStorage::cell_index(x, y, z));
 }
 
+// Immutable worker input: one chunk plus a one-cell X/Z halo.
+struct ChunkMeshSnapshot {
+  static constexpr int kHaloSizeX = kChunkSizeX + 2;
+  static constexpr int kHaloSizeZ = kChunkSizeZ + 2;
+  std::array<Block, static_cast<std::size_t>(kHaloSizeX) * kChunkSizeY * kHaloSizeZ> blocks{};
+  int cx = 0, cz = 0;
+  std::uint64_t revision = 0;
+  [[nodiscard]] Block at(int x, int y, int z) const noexcept {
+    if (x < -1 || x > kChunkSizeX || y < 0 || y >= kChunkSizeY || z < -1 || z > kChunkSizeZ) return Block::air;
+    const auto i = (static_cast<std::size_t>(y) * kHaloSizeZ + static_cast<std::size_t>(z + 1)) * kHaloSizeX + static_cast<std::size_t>(x + 1);
+    return blocks[i];
+  }
+};
+void mesh_chunk_snapshot(const ChunkMeshSnapshot& snapshot, std::vector<CpuMeshData>& tile_meshes);
+
 // --- the world ---------------------------------------------------------------------
 
 class World {
@@ -125,10 +141,9 @@ class World {
   [[nodiscard]] std::vector<ChunkMeshData> build_chunk_meshes(
       int cx, int cz) const;
 
-  // Reusable tile-indexed output for hot rebuild paths. The caller retains
-  // each vector's capacity across edits; tile i always maps to atlas tile i.
-  void build_chunk_meshes(int cx, int cz,
-                          std::vector<CpuMeshData>& tile_meshes) const;
+  [[nodiscard]] ChunkMeshSnapshot snapshot_chunk(int cx, int cz, std::uint64_t revision) const;
+  // Reusable tile-indexed output for synchronous builds and worker scratch.
+  void build_chunk_meshes(int cx, int cz, std::vector<CpuMeshData>& tile_meshes) const;
 
   // Direct read-only access to contiguous chunk storage. Chunk-local
   // algorithms use this for interior cells and block_at() only for the halo.
