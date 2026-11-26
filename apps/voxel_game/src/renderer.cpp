@@ -336,7 +336,8 @@ void draw_world(const VoxelRenderer& renderer,
                 const std::array<ws::ui::r2d::Texture, atlas::kTileCount>&
                     tile_textures,
                 const ws::ui::r2d::Camera3D& camera, float aspect,
-                perf::Counters* counters) {
+                perf::Counters* counters, bool cast_shadows,
+                 bool receive_shadows) {
   // Leaves have binary transparent pixels. Draw opaque geometry first,
   // then foliage with depth testing enabled but depth writes disabled:
   // transparent texels blend as zero and reveal the already-rendered world.
@@ -401,6 +402,8 @@ void draw_world(const VoxelRenderer& renderer,
             ? tile_textures[static_cast<std::size_t>(chunk.tile)]
             : ws::ui::r2d::Texture{};
     material.tint = ws::ui::r2d::rgba(255, 255, 255);
+    material.casts_shadow = cast_shadows;
+    material.receives_shadow = receive_shadows;
     if (foliage) {
       material.depth_write = false;
       // The shadow pass has no alpha-tested fragment stage; don't cast
