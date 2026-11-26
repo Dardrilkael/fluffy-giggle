@@ -65,7 +65,7 @@ class FrameTimeWindow {
         if (count_ == 0) return out;
 
         // Sorting a bounded stack copy avoids mutating the live rolling
-        // window and keeps sampling itself O(1).
+        // window. add() remains O(1) and performs no allocation.
         std::array<float, kCapacity> ordered{};
         for (std::size_t i = 0; i < count_; ++i) {
             ordered[i] = samples_[i];
