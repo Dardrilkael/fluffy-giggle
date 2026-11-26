@@ -113,60 +113,49 @@ struct Slot {
 
 namespace settings {
 
-inline constexpr int kSliderCount = 3;
-inline constexpr float kPanelWidth = 520.0f;
-inline constexpr float kPanelHeight = 300.0f;
-inline constexpr float kSliderWidth = 340.0f;
-inline constexpr float kSliderHeight = 12.0f;
-inline constexpr float kSliderTop = 112.0f;
-inline constexpr float kSliderStep = 62.0f;
-
-struct Settings {
-  float mouse_sensitivity = 0.0025f;
-  float fov_degrees = 70.0f;
-  float render_distance = 260.0f;
-};
-
 struct Slider {
   Rect bounds{};
-  float minimum = 0.0f;
-  float maximum = 1.0f;
   int index = -1;
 };
 
-[[nodiscard]] constexpr std::array<Slider, kSliderCount> layout(
-    float frame_w, float frame_h) noexcept {
-  std::array<Slider, kSliderCount> out{};
-  const float x = (frame_w - kSliderWidth) * 0.5f;
-  const float y = (frame_h - kPanelHeight) * 0.5f + kSliderTop;
-  constexpr float min_values[kSliderCount] = {0.0005f, 60.0f, 32.0f};
-  constexpr float max_values[kSliderCount] = {0.0060f, 110.0f, 256.0f};
-  for (int i = 0; i < kSliderCount; ++i) {
-    out[static_cast<std::size_t>(i)] = {
-        Rect{x, y + static_cast<float>(i) * kSliderStep,
-             kSliderWidth, kSliderHeight},
-        min_values[i], max_values[i], i};
+// Generic stacked slider geometry. The number of rows and panel dimensions
+// are compile-time / call-site inputs; no game setting names or ranges live
+// in the UI library.
+template <std::size_t Count>
+[[nodiscard]] constexpr std::array<Slider, Count> layout(
+    float frame_w, float frame_h, float panel_w, float panel_h,
+    float slider_w, float slider_h, float top, float step) noexcept {
+  std::array<Slider, Count> out{};
+  const float x = (frame_w - slider_w) * 0.5f;
+  const float y = (frame_h - panel_h) * 0.5f + top;
+  for (std::size_t i = 0; i < Count; ++i) {
+    out[i] = {Rect{x, y + static_cast<float>(i) * step,
+                   slider_w, slider_h},
+              static_cast<int>(i)};
   }
   return out;
 }
 
+template <std::size_t Count>
 [[nodiscard]] constexpr int selected(
-    float frame_w, float frame_h, float x, float y) noexcept {
-  const auto sliders = layout(frame_w, frame_h);
+    const std::array<Slider, Count>& sliders, float x, float y,
+    float vertical_margin = 12.0f) noexcept {
   for (const Slider& slider : sliders) {
-    const Rect expanded{slider.bounds.x, slider.bounds.y - 12.0f,
-                        slider.bounds.w, slider.bounds.h + 24.0f};
+    const Rect expanded{slider.bounds.x,
+                        slider.bounds.y - vertical_margin,
+                        slider.bounds.w,
+                        slider.bounds.h + vertical_margin * 2.0f};
     if (::ws::ui::layout::hit(expanded, x, y)) return slider.index;
   }
   return -1;
 }
 
 [[nodiscard]] constexpr float value_from_x(
-    const Slider& slider, float x) noexcept {
-  if (slider.bounds.w <= 0.0f) return slider.minimum;
-  const float raw = (x - slider.bounds.x) / slider.bounds.w;
+    const Rect& bounds, float minimum, float maximum, float x) noexcept {
+  if (bounds.w <= 0.0f) return minimum;
+  const float raw = (x - bounds.x) / bounds.w;
   const float t = raw < 0.0f ? 0.0f : (raw > 1.0f ? 1.0f : raw);
-  return slider.minimum + (slider.maximum - slider.minimum) * t;
+  return minimum + (maximum - minimum) * t;
 }
 
 }  // namespace settings
