@@ -435,6 +435,8 @@ TEST_CASE("culling: non-90-degree horizontal frustum planes use tangent-scaled f
   CHECK(voxel::culling::aabb_visible(fr, right_inside, right_inside));
   const float left_outside[3] = {-14.0f, 0.0f, 10.0f};
   CHECK_FALSE(voxel::culling::aabb_visible(fr, left_outside, left_outside));
+  const float right_outside[3] = {14.0f, 0.0f, 10.0f};
+  CHECK_FALSE(voxel::culling::aabb_visible(fr, right_outside, right_outside));
 }
 
 TEST_CASE("culling: sampled chunk AABBs are never rejected when a sample is inside") {
@@ -527,6 +529,14 @@ TEST_CASE("culling: degenerate camera bases keep all AABBs instead of producing 
       eye, target, parallel_up, 1.2f, 1.7f, 0.1f, 260.0f);
   CHECK(voxel::culling::aabb_visible(zero_forward, far_min, far_max));
   CHECK(voxel::culling::aabb_visible(parallel_basis, far_min, far_max));
+  for (int plane = 0; plane < 6; ++plane) {
+    for (int component = 0; component < 4; ++component) {
+      CHECK(std::isfinite(zero_forward.planes[plane][component]));
+      CHECK(std::isfinite(parallel_basis.planes[plane][component]));
+      CHECK(zero_forward.planes[plane][component] == 0.0f);
+      CHECK(parallel_basis.planes[plane][component] == 0.0f);
+    }
+  }
 }
 
 TEST_CASE("player: large look deltas wrap yaw and spawn resets the camera") {
