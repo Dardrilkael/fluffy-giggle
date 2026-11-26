@@ -37,8 +37,13 @@ struct Counters {
     std::uint32_t triangles = 0;       // indices/3 drawn this frame
     std::uint32_t bodies = 0;          // live physics bodies
     std::uint32_t meshes = 0;          // live chunk meshes
-    std::uint32_t chunk_vis = 0;       // chunks whose meshes were drawn
+    std::uint32_t chunk_vis = 0;       // distinct (cx, cz) with drawn meshes
 };
+
+inline float ms_since(std::chrono::steady_clock::time_point t0,
+                     std::chrono::steady_clock::time_point t1) {
+    return std::chrono::duration<float, std::milli>(t1 - t0).count();
+}
 
 inline float ms_since(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<float, std::milli>(
