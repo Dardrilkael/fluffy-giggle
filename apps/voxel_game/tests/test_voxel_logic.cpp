@@ -881,6 +881,11 @@ TEST_CASE("bench: scale mode holds input and measures only after warmup") {
 }
 
 TEST_CASE("bench: shadow modes isolate receiver filtering from the depth pass") {
+  const voxel::bench::ShadowFlags defaults{};
+  CHECK_FALSE(defaults.cast);
+  CHECK_FALSE(defaults.receive);
+  CHECK(std::string_view(voxel::bench::shadow_mode_name(defaults)) == "off");
+
   const auto full = voxel::bench::shadow_flags_from_name("full");
   CHECK(full.cast);
   CHECK(full.receive);
