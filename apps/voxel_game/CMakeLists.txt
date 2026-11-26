@@ -39,7 +39,7 @@ if(WS_VOXEL_GPU_TESTS)
     SOURCES src/renderer.cpp src/world.cpp
             tests/test_voxel_frame_gpu.cpp
     LINK ws::ui
-    DEPENDS ws::gfx ws::physics)
+    DEPENDS ws::gfx ws::physics ws::gameplay)
   if(TARGET test_voxel_frame_gpu)
     target_include_directories(test_voxel_frame_gpu PRIVATE
       "${CMAKE_CURRENT_SOURCE_DIR}/src"
