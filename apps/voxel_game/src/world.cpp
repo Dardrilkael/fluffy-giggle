@@ -242,6 +242,9 @@ using FaceTileCache = std::vector<std::int8_t>;
   FaceTileCache face_tiles(6u * static_cast<std::size_t>(kBlocksPerChunk),
                            static_cast<std::int8_t>(-1));
   const auto chunk = world.chunk_data(cx, cz);
+  if (chunk.size() != static_cast<std::size_t>(kBlocksPerChunk)) {
+    return face_tiles;
+  }
   const int ox = cx * kChunkSizeX;
   const int oz = cz * kChunkSizeZ;
 
