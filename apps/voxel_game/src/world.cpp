@@ -238,16 +238,9 @@ void emit_quad(CpuMeshData& out, int fi, int ox,
 using FaceTileCache =
     std::array<std::int8_t, 6u * static_cast<std::size_t>(kBlocksPerChunk)>;
 
-[[nodiscard]] FaceTileCache classify_chunk_faces(
-    const World& world, int cx, int cz) {
+[[nodiscard]] FaceTileCache classify_chunk_faces(const ChunkMeshSnapshot& snapshot) {
   FaceTileCache face_tiles{};
   face_tiles.fill(static_cast<std::int8_t>(-1));
-  const auto chunk = world.chunk_data(cx, cz);
-  if (chunk.size() != static_cast<std::size_t>(kBlocksPerChunk)) {
-    return face_tiles;
-  }
-  const int ox = cx * kChunkSizeX;
-  const int oz = cz * kChunkSizeZ;
 
   // x is the fastest storage axis. Neighbor classification for all six
   // directions happens while each block is visited exactly once.
@@ -256,14 +249,12 @@ using FaceTileCache =
       for (int x = 0; x < kChunkSizeX; ++x) {
         const std::size_t cell =
             static_cast<std::size_t>(block_index(x, y, z));
-        const Block type = chunk[cell];
+        const Block type = snapshot.at(x, y, z);
         if (type == Block::air) continue;
 
         const std::size_t type_index = static_cast<std::size_t>(type);
         if (type_index >= static_cast<std::size_t>(Block::count_)) continue;
 
-        const int gx = ox + x;
-        const int gz = oz + z;
         for (int fi = 0; fi < 6; ++fi) {
           const int tile = atlas::kTileFor[type_index][fi];
           if (tile < 0 || tile >= atlas::kTileCount) continue;
@@ -272,14 +263,7 @@ using FaceTileCache =
           const int nx = x + face.dx;
           const int ny = y + face.dy;
           const int nz = z + face.dz;
-          const Block neighbor =
-              nx >= 0 && nx < kChunkSizeX &&
-                      ny >= 0 && ny < kChunkSizeY &&
-                      nz >= 0 && nz < kChunkSizeZ
-                  ? chunk[static_cast<std::size_t>(
-                        block_index(nx, ny, nz))]
-                  : world.block_at(gx + face.dx, y + face.dy,
-                                   gz + face.dz);
+          const Block neighbor = snapshot.at(nx, ny, nz);
 
           // Water is non-solid and only its top face is textured. It does
           // not emit against another water cell or a solid block.
@@ -573,24 +557,34 @@ std::vector<ChunkMeshData> World::build_chunk_meshes(
   return out;
 }
 
-void World::build_chunk_meshes(
-    int cx, int cz, std::vector<CpuMeshData>& tile_meshes) const {
-  tile_meshes.resize(atlas::kTileCount);
-  for (auto& geometry : tile_meshes) {
-    geometry.vertices.clear();
-    geometry.indices.clear();
-  }
-  if (cx < 0 || cx >= kWorldChunksX ||
-      cz < 0 || cz >= kWorldChunksZ) {
-    return;
-  }
+ChunkMeshSnapshot World::snapshot_chunk(int cx, int cz, std::uint64_t revision) const {
+  ChunkMeshSnapshot s{}; s.cx = cx; s.cz = cz; s.revision = revision;
+  if (cx < 0 || cx >= kWorldChunksX || cz < 0 || cz >= kWorldChunksZ) return s;
+  const auto chunk = chunk_data(cx, cz);
+  if (chunk.size() != static_cast<std::size_t>(kBlocksPerChunk)) return s;
+  const int ox = cx * kChunkSizeX, oz = cz * kChunkSizeZ;
+  for (int y = 0; y < kChunkSizeY; ++y)
+    for (int z = -1; z <= kChunkSizeZ; ++z)
+      for (int x = -1; x <= kChunkSizeX; ++x) {
+        const Block b = (x >= 0 && x < kChunkSizeX && z >= 0 && z < kChunkSizeZ)
+          ? chunk[static_cast<std::size_t>(block_index(x,y,z))]
+          : block_at(ox+x, y, oz+z);
+        const auto i = (static_cast<std::size_t>(y)*ChunkMeshSnapshot::kHaloSizeZ + static_cast<std::size_t>(z+1))*ChunkMeshSnapshot::kHaloSizeX + static_cast<std::size_t>(x+1);
+        s.blocks[i] = b;
+      }
+  return s;
+}
 
-  // Fixed-size face cache avoids a heap allocation on every rebuild.
-  // Reusable output vectors retain their high-water capacity between edits.
-  const FaceTileCache face_tiles = classify_chunk_faces(*this, cx, cz);
-  for (int fi = 0; fi < 6; ++fi) {
-    greedy_faces(face_tiles, fi, cx, cz, tile_meshes);
-  }
+void mesh_chunk_snapshot(const ChunkMeshSnapshot& snapshot, std::vector<CpuMeshData>& tile_meshes) {
+  tile_meshes.resize(atlas::kTileCount);
+  for (auto& g : tile_meshes) { g.vertices.clear(); g.indices.clear(); }
+  if (snapshot.cx < 0 || snapshot.cx >= kWorldChunksX || snapshot.cz < 0 || snapshot.cz >= kWorldChunksZ) return;
+  const FaceTileCache cache = classify_chunk_faces(snapshot);
+  for (int fi = 0; fi < 6; ++fi) greedy_faces(cache, fi, snapshot.cx, snapshot.cz, tile_meshes);
+}
+
+void World::build_chunk_meshes(int cx, int cz, std::vector<CpuMeshData>& tile_meshes) const {
+  mesh_chunk_snapshot(snapshot_chunk(cx, cz, 0), tile_meshes);
 }
 
 int World::surface_height(int x, int z) const {
