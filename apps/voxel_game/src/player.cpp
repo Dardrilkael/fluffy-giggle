@@ -60,20 +60,42 @@ void Player::tick(const MoveInput& input, float dt,
 
   constexpr float kJumpBufferSeconds = 0.12f;
   constexpr float kCoyoteSeconds = 0.10f;
+  constexpr float kGroundProbeDistance = 0.06f;
+
+  // Resolve support before integrating gravity. This treats every solid
+  // voxel as a valid floor (including placed blocks) and removes tiny gaps
+  // caused by collision skin / floating-point drift.
+  bool supported = false;
+  if (velocity_.y <= 0.0f) {
+    const auto support = grid.sweep_aabb(
+        bounds(), ws::math::Vec3{0.0f, -kGroundProbeDistance, 0.0f},
+        tuning_.collision_skin);
+    if (support.grounded()) {
+      position_ = (support.bounds.min + support.bounds.max) * 0.5f;
+      velocity_.y = 0.0f;
+      supported = true;
+    }
+  }
+  grounded_ = supported;
+
   jump_buffer_ = input.jump ? kJumpBufferSeconds
                             : std::max(0.0f, jump_buffer_ - dt);
   coyote_time_ = grounded_ ? kCoyoteSeconds
                            : std::max(0.0f, coyote_time_ - dt);
 
-  if (grounded_ && velocity_.y < 0.0f) velocity_.y = 0.0f;
-  if (jump_buffer_ > 0.0f && coyote_time_ > 0.0f) {
+  const bool jumping = jump_buffer_ > 0.0f && coyote_time_ > 0.0f;
+  if (jumping) {
     velocity_.y = tuning_.jump_speed;
     jump_buffer_ = 0.0f;
     coyote_time_ = 0.0f;
     grounded_ = false;
-  } else {
+  } else if (!grounded_) {
+    // Gravity is only integrated while airborne. A supported player has
+    // zero vertical velocity and does not accumulate downward acceleration.
     velocity_.y = std::max(velocity_.y + tuning_.gravity * dt,
                            -tuning_.max_fall);
+  } else {
+    velocity_.y = 0.0f;
   }
 
   const ws::math::Vec3 displacement = velocity_ * dt;
@@ -83,19 +105,17 @@ void Player::tick(const MoveInput& input, float dt,
   if (moved.hit_x) velocity_.x = 0.0f;
   if (moved.hit_y) velocity_.y = 0.0f;
   if (moved.hit_z) velocity_.z = 0.0f;
-  grounded_ = moved.grounded();
 
-  // A short downward support probe keeps grounding stable over seams and
-  // while standing still, without relying on contact-event timing.
-  if (!grounded_ && velocity_.y <= 0.0f) {
-    const auto probe = grid.sweep_aabb(
-        bounds(), ws::math::Vec3{0.0f, -0.04f, 0.0f},
-        tuning_.collision_skin);
-    if (probe.grounded()) {
-      position_ = (probe.bounds.min + probe.bounds.max) * 0.5f;
-      velocity_.y = 0.0f;
-      grounded_ = true;
-    }
+  // A downward collision is a floor; an upward collision is a ceiling.
+  // Never mark the player grounded when their head hits a block.
+  if (moved.grounded()) {
+    grounded_ = true;
+    velocity_.y = 0.0f;
+    coyote_time_ = kCoyoteSeconds;
+  } else if (jumping || velocity_.y > 0.0f) {
+    grounded_ = false;
+  } else {
+    grounded_ = supported;
   }
 }
 
