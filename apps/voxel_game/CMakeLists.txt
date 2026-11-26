@@ -3,7 +3,9 @@
 # the player's collision against a sparse static grid of surface blocks,
 # and ws::audio synthesizes the place/break one-shots. One dependency
 # set: ui, physics, audio - the bounce app's composition.
+find_package(Threads REQUIRED)
 ws_add_app(voxel_game DEPENDS ws::ui ws::physics ws::audio ws::gameplay)
+target_link_libraries(voxel_game PRIVATE Threads::Threads)
 
 # The headless logic suite: worldgen determinism, independent frustum
 # oracles, DDA raycasts, direct-grid movement, deterministic player replay,
@@ -45,6 +47,6 @@ if(WS_VOXEL_GPU_TESTS)
       "${CMAKE_CURRENT_SOURCE_DIR}/src"
       "${CMAKE_SOURCE_DIR}/libs/physics/include"
       "${CMAKE_SOURCE_DIR}/libs/ui/src")
-    target_link_libraries(test_voxel_frame_gpu PRIVATE volk stb)
+    target_link_libraries(test_voxel_frame_gpu PRIVATE volk stb Threads::Threads)
   endif()
 endif()
