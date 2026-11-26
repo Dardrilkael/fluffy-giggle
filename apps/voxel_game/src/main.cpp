@@ -230,6 +230,15 @@ class VoxelApp final : public ws::ui::App {
   }
 
   void on_setup() override {
+    // A benchmark distance override changes only the view range; the world,
+    // seed, spawn point and camera orientation remain identical between runs.
+    const float requested_render_distance =
+        voxel::bench::bench_render_distance_from_env();
+    if (requested_render_distance > 0.0f) {
+      settings_.render_distance =
+          std::clamp(requested_render_distance, 16.0f, 512.0f);
+    }
+
     // --- the world --------------------------------------------------------
     const auto generation_start = std::chrono::steady_clock::now();
     world_.generate(kSeed);
@@ -312,8 +321,20 @@ class VoxelApp final : public ws::ui::App {
     if (bench_seconds > 0.0f) {
       voxel::bench::Config cfg{};
       cfg.seconds = bench_seconds;
+      cfg.fixed_scene = voxel::bench::bench_fixed_scene_from_env();
+      cfg.warmup_seconds = 3.0f;
       bench_.start(cfg);
-      ws::core::info("voxel: benchmark - {} s of scripted phases",
+      const auto benchmark_frame = r2d::frame_size();
+      std::printf(
+          "bench:config,mode=%s,seed=%u,render_distance=%.1f,"
+          "width=%.0f,height=%.0f,warmup_s=%.1f,total_s=%.1f\n",
+          cfg.fixed_scene ? "scale" : "scripted", kSeed,
+          settings_.render_distance, benchmark_frame.width,
+          benchmark_frame.height, cfg.fixed_scene ? cfg.warmup_seconds : 0.0f,
+          bench_seconds);
+      std::fflush(stdout);
+      ws::core::info("voxel: benchmark mode={} total={} s",
+                     cfg.fixed_scene ? "fixed-scene scale" : "scripted",
                      bench_seconds);
     }
   }
@@ -331,6 +352,7 @@ class VoxelApp final : public ws::ui::App {
     const float frame_dt = std::clamp(dt, 0.0f, 0.05f);
     const auto frame_t0 = std::chrono::steady_clock::now();
     voxel::perf::FrameTimings timings{};
+    timings.wall_frame_ms = std::max(0.0f, dt * 1000.0f);
     // Renderer statistics expose only completed query results. The serial
     // prevents repeatedly counting the same asynchronously resolved sample.
     const auto renderer_stats = r2d::stats();
@@ -1126,8 +1148,17 @@ extern "C" void android_main(android_app* app) {
 int main() {
   ws::ui::AppConfig config;
   config.title = "ws voxel";
-  config.width = 1280;
-  config.height = 720;
+  config.width = voxel::bench::bench_dimension_from_env(
+      "WS_VOXEL_BENCH_WIDTH", 1280, 320, 7680);
+  config.height = voxel::bench::bench_dimension_from_env(
+      "WS_VOXEL_BENCH_HEIGHT", 720, 240, 4320);
+  config.vsync = voxel::bench::bench_vsync_from_env(true);
+  if (voxel::bench::bench_seconds_from_env() > 0.0f) {
+    std::printf("bench:launch,width=%d,height=%d,vsync=%s\n",
+                config.width, config.height,
+                config.vsync ? "on" : "off");
+    std::fflush(stdout);
+  }
   VoxelApp game{config};
   return game.run();
 }
