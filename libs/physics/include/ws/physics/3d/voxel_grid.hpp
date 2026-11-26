@@ -338,7 +338,11 @@ class VoxelGrid3D {
             if (mins[axis] < cell_max - 1.0e-6f) continue;
             distance = mins[axis] - cell_max;
           }
-          const float t = distance / delta;
+          // Convert the face distance to a normalized sweep fraction. Distance
+          // is positive for either travel direction, so divide by |delta|.
+          // Dividing by a negative delta silently discarded every downward
+          // collision (t < 0), allowing the player to fall through floors.
+          const float t = distance / std::abs(delta);
           if (t >= 0.0f && t <= nearest) {
             nearest = t;
             collided = true;
