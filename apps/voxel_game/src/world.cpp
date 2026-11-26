@@ -363,8 +363,13 @@ void greedy_faces(const World& world, Block type, int fi, int cx, int cz,
         if (world.block_at(gx, gy, gz) != type) {
           continue;
         }
-        if (is_solid(world.block_at(gx + face.dx, gy + face.dy,
-                                    gz + face.dz))) {
+        const Block neighbor =
+            world.block_at(gx + face.dx, gy + face.dy, gz + face.dz);
+        if (type == Block::water) {
+          // Water is non-solid, but adjacent water cells must not each
+          // emit a coincident top surface. Water only has a top tile.
+          if (neighbor == Block::water || is_solid(neighbor)) continue;
+        } else if (is_solid(neighbor)) {
           continue;  // hidden behind the neighbor: never emit
         }
         mask[static_cast<std::size_t>(pu) * v_len + pv] = true;
@@ -422,9 +427,6 @@ void greedy_faces(const World& world, Block type, int fi, int cx, int cz,
     const World& world, int cx, int cz, int tile) {
   ws::ui::r3d::MeshData out;
   for (int type = 1; type < static_cast<int>(Block::count_); ++type) {
-    if (type == static_cast<int>(Block::water)) {
-      continue;  // water never meshes
-    }
     for (int fi = 0; fi < 6; ++fi) {
       if (atlas::kTileFor[static_cast<std::size_t>(type)][fi] != tile) {
         continue;
