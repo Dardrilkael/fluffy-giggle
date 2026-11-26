@@ -62,6 +62,7 @@ class Player {
   [[nodiscard]] ws::math::Vec3 position() const noexcept { return position_; }
   [[nodiscard]] ws::math::Vec3 velocity() const noexcept { return velocity_; }
   [[nodiscard]] bool grounded() const noexcept { return grounded_; }
+  [[nodiscard]] float yaw_radians() const noexcept { return yaw_; }
 
  private:
   ws::math::Vec3 position_{};
