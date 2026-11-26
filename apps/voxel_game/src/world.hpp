@@ -179,7 +179,8 @@ class World {
   static bool solid_query(const void* context, int x, int y,
                           int z) noexcept;
 
-  // Chunk-major: chunks_[cz * kWorldChunksX + cx], each kBlocksPerChunk.
+    // One contiguous chunk-major block volume; each chunk span contains
+  // kBlocksPerChunk cells with x fastest and y slowest.
   ws::gameplay::ChunkedGrid3D<
       Block, kWorldChunksX, kWorldChunksZ,
       kChunkSizeX, kChunkSizeY, kChunkSizeZ> blocks_;
