@@ -75,8 +75,10 @@ regression in edit-time p95 frame time.
 - [x] Render-thread upload with a two-chunk-per-frame job budget.
 - [x] Prioritize queued chunks by current player X/Z distance at worker dequeue time; initial generation remains synchronous.
 - [x] Join worker before releasing snapshots during shutdown.
-- [x] Add opt-in GPU-harness regression coverage for rapid same-chunk edits,
-  newest-revision publication, per-material output agreement and worker shutdown.
+- [x] Extract the bounded worker queue into a CPU-only AsyncChunkMesher;
+  the renderer now only consumes completed CPU results and owns GPU uploads.
+- [x] Cover rapid same-chunk edits, newest-revision publication, coalescing,
+  result invalidation and worker shutdown in the normal headless logic suite.
 
 **Exit:** gameplay edits never synchronously mesh/upload; stale jobs cannot
 overwrite current geometry; queue memory is bounded.
