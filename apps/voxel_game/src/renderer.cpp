@@ -9,6 +9,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
@@ -166,32 +167,60 @@ void VoxelRenderer::set_priority_origin(float x, float z) {
 void VoxelRenderer::request_rebuild_chunk(const World& world, int cx, int cz) {
   async_mesher_.request(world, cx, cz);
 }
-void VoxelRenderer::upload_result(int cx, int cz,
-                                  const std::vector<CpuMeshData>& tiles) {
-  // Build the complete replacement off to the side. The currently visible
-  // chunk remains intact until every non-empty material mesh exists on the
-  // GPU; a partial upload must never leave a hole in the terrain.
-  std::vector<ChunkMesh> replacement;
-  replacement.reserve(tiles.size());
+void VoxelRenderer::upload_result(
+    int cx, int cz, const std::vector<CpuMeshData>& tiles,
+    perf::FrameTimings* timings) {
+  const auto upload_start = std::chrono::steady_clock::now();
+  std::uint64_t upload_bytes = 0;
+  const auto finish_upload = [&]() {
+    if (timings != nullptr) {
+      timings->upload_ms += perf::ms_since(upload_start);
+      timings->upload_bytes += upload_bytes;
+    }
+  };
+  const auto note_growth = [timings]() {
+    if (timings != nullptr) ++timings->upload_capacity_growths;
+  };
 
-  // Reserve the destination before creating GPU resources. Once creation
-  // succeeds, committing the staged meshes cannot reallocate the vector.
-  chunk_meshes_.reserve(chunk_meshes_.size() + tiles.size());
+  // Keep both the CPU conversion buffers and the atomic GPU replacement
+  // staging alive across edits. create_mesh consumes/copies this data before
+  // returning, so one reusable buffer is sufficient for each tile.
+  if (replacement_scratch_.capacity() < tiles.size()) {
+    replacement_scratch_.reserve(tiles.size());
+    note_growth();
+  }
+  replacement_scratch_.clear();
 
-  const auto discard_replacement = [&replacement]() {
-    for (const ChunkMesh& chunk : replacement) {
+  // Reserve the final destination before creating GPU resources. Once all
+  // creates succeed, committing the replacement cannot reallocate.
+  if (chunk_meshes_.capacity() < chunk_meshes_.size() + tiles.size()) {
+    chunk_meshes_.reserve(chunk_meshes_.size() + tiles.size());
+    note_growth();
+  }
+
+  const auto discard_replacement = [this]() {
+    for (const ChunkMesh& chunk : replacement_scratch_) {
       if (chunk.mesh.id != 0u)
         (void)ws::ui::r3d::destroy_mesh(chunk.mesh);
     }
-    replacement.clear();
+    replacement_scratch_.clear();
   };
 
   for (std::size_t tile = 0; tile < tiles.size(); ++tile) {
     const CpuMeshData& cpu = tiles[tile];
     if (cpu.vertices.empty()) continue;
 
-    ws::ui::r3d::MeshData upload;
-    upload.vertices.reserve(cpu.vertices.size());
+    upload_scratch_.vertices.clear();
+    upload_scratch_.indices.clear();
+    if (upload_scratch_.vertices.capacity() < cpu.vertices.size()) {
+      upload_scratch_.vertices.reserve(cpu.vertices.size());
+      note_growth();
+    }
+    if (upload_scratch_.indices.capacity() < cpu.indices.size()) {
+      upload_scratch_.indices.reserve(cpu.indices.size());
+      note_growth();
+    }
+
     for (const CpuMeshVertex& source : cpu.vertices) {
       ws::ui::r3d::Vertex3D vertex{};
       for (int axis = 0; axis < 3; ++axis) {
@@ -200,24 +229,31 @@ void VoxelRenderer::upload_result(int cx, int cz,
       }
       vertex.uv[0] = source.uv[0];
       vertex.uv[1] = source.uv[1];
-      upload.vertices.push_back(vertex);
+      upload_scratch_.vertices.push_back(vertex);
     }
-    upload.indices = cpu.indices;
+    upload_scratch_.indices.assign(cpu.indices.begin(), cpu.indices.end());
 
-    const auto mesh = ws::ui::r3d::create_mesh(upload);
+    upload_bytes +=
+        static_cast<std::uint64_t>(upload_scratch_.vertices.size()) *
+            sizeof(ws::ui::r3d::Vertex3D) +
+        static_cast<std::uint64_t>(upload_scratch_.indices.size()) *
+            sizeof(std::uint32_t);
+
+    const auto mesh = ws::ui::r3d::create_mesh(upload_scratch_);
     if (!mesh.has_value()) {
       ws::core::log_error(mesh.error());
       discard_replacement();
+      finish_upload();
       return;  // Keep the previous complete chunk visible.
     }
 
-    replacement.push_back(ChunkMesh{
+    replacement_scratch_.push_back(ChunkMesh{
         cx, cz, static_cast<int>(tile), *mesh,
-        static_cast<std::uint32_t>(upload.indices.size())});
+        static_cast<std::uint32_t>(upload_scratch_.indices.size())});
   }
 
-  // Commit: all replacement GPU objects are ready. Only now retire the
-  // previous chunk meshes, then append the staged set without reallocating.
+  // Atomic commit: only retire old GPU meshes after every replacement
+  // succeeded. The CPU staging vectors remain allocated for the next edit.
   for (auto it = chunk_meshes_.begin(); it != chunk_meshes_.end();) {
     if (it->cx == cx && it->cz == cz) {
       if (it->mesh.id != 0u)
@@ -227,11 +263,16 @@ void VoxelRenderer::upload_result(int cx, int cz,
       ++it;
     }
   }
-  chunk_meshes_.insert(chunk_meshes_.end(),
-                       std::make_move_iterator(replacement.begin()),
-                       std::make_move_iterator(replacement.end()));
+  chunk_meshes_.insert(
+      chunk_meshes_.end(),
+      std::make_move_iterator(replacement_scratch_.begin()),
+      std::make_move_iterator(replacement_scratch_.end()));
+  replacement_scratch_.clear();
+  finish_upload();
 }
-void VoxelRenderer::process_completed(std::size_t max_jobs) {
+
+void VoxelRenderer::process_completed(std::size_t max_jobs,
+                                      perf::FrameTimings* timings) {
   std::size_t count = 0;
   const std::size_t start = upload_cursor_;
   for (std::size_t offset = 0; offset < kChunkCount && count < max_jobs;
@@ -239,27 +280,50 @@ void VoxelRenderer::process_completed(std::size_t max_jobs) {
     const std::size_t slot = (start + offset) % kChunkCount;
     const int cx = static_cast<int>(slot % kWorldChunksX);
     const int cz = static_cast<int>(slot / kWorldChunksX);
-    if (!async_mesher_.take_completed(cx, cz, cpu_mesh_scratch_)) continue;
-    upload_result(cx, cz, cpu_mesh_scratch_);
+    float mesh_ms = 0.0f;
+    std::uint32_t vertices = 0;
+    std::uint32_t indices = 0;
+    if (!async_mesher_.take_completed(cx, cz, cpu_mesh_scratch_,
+                                      mesh_ms, vertices, indices)) {
+      continue;
+    }
+    if (timings != nullptr) {
+      timings->cpu_mesh_ms += mesh_ms;
+      ++timings->mesh_jobs;
+    }
+    upload_result(cx, cz, cpu_mesh_scratch_, timings);
     ++count;
     upload_cursor_ = (slot + 1) % kChunkCount;
   }
 }
+
 void VoxelRenderer::rebuild_chunk(const World& world, int cx, int cz) {
   world.build_chunk_meshes(cx, cz, cpu_mesh_scratch_);
   upload_result(cx, cz, cpu_mesh_scratch_);
 }
-void VoxelRenderer::rebuild_all(const World& world) {
+
+void VoxelRenderer::rebuild_all(const World& world,
+                                perf::FrameTimings* timings) {
   destroy_all();
-  for (int cz = 0; cz < kWorldChunksZ; ++cz)
-    for (int cx = 0; cx < kWorldChunksX; ++cx)
-      rebuild_chunk(world, cx, cz);
+  for (int cz = 0; cz < kWorldChunksZ; ++cz) {
+    for (int cx = 0; cx < kWorldChunksX; ++cx) {
+      const auto mesh_start = std::chrono::steady_clock::now();
+      world.build_chunk_meshes(cx, cz, cpu_mesh_scratch_);
+      if (timings != nullptr) {
+        timings->cpu_mesh_ms += perf::ms_since(mesh_start);
+        ++timings->mesh_jobs;
+      }
+      upload_result(cx, cz, cpu_mesh_scratch_, timings);
+    }
+  }
 }
+
 void VoxelRenderer::destroy_all() {
   for (const ChunkMesh& chunk : chunk_meshes_)
     if (chunk.mesh.id != 0u) (void)ws::ui::r3d::destroy_mesh(chunk.mesh);
   chunk_meshes_.clear();
-  // Keep CPU scratch capacity: destroy_all is also used before full rebuilds.
+  replacement_scratch_.clear();
+  // Retain CPU geometry and upload staging capacities for later rebuilds.
 }
 
 void draw_world(const VoxelRenderer& renderer,
