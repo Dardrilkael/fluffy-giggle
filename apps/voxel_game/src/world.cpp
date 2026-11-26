@@ -34,6 +34,13 @@ const std::uint32_t kTints[static_cast<std::size_t>(Block::count_)] = {
     ws::ui::r2d::rgba(106, 82, 51, 255),  // wood
     ws::ui::r2d::rgba(218, 210, 158, 255),  // sand
     ws::ui::r2d::rgba(50, 104, 170, 255),  // water
+    ws::ui::r2d::rgba(105, 105, 110, 255), // cobblestone
+    ws::ui::r2d::rgba(164, 126, 83, 255),  // planks
+    ws::ui::r2d::rgba(174, 76, 61, 255),   // bricks
+    ws::ui::r2d::rgba(160, 210, 220, 190), // glass
+    ws::ui::r2d::rgba(65, 125, 55, 255),   // leaves
+    ws::ui::r2d::rgba(45, 45, 48, 255),    // coal ore
+    ws::ui::r2d::rgba(170, 125, 95, 255),  // iron ore
 };
 
 // --- the noise -------------------------------------------------------------------
@@ -427,10 +434,27 @@ void World::generate(std::uint32_t seed) {
                 Block::water;
           }
           if (height > kWaterLevel + 1 && tree_at(wx, wz, seed)) {
-            for (int y = height + 1; y <= height + 4; ++y) {
-              chunk[static_cast<std::size_t>(block_index(lx, y, lz))] =
-                  Block::wood;
+            for (int y = height + 1; y <= height + 4; ++y)
+              chunk[static_cast<std::size_t>(block_index(lx, y, lz))] = Block::wood;
+            for (int dy = 3; dy <= 5; ++dy) {
+              const int radius = dy == 5 ? 1 : 2;
+              for (int dx = -radius; dx <= radius; ++dx)
+                for (int dz = -radius; dz <= radius; ++dz) {
+                  const int ax = lx + dx, az = lz + dz, ay = height + dy;
+                  if (ax < 0 || ax >= kChunkSizeX || az < 0 || az >= kChunkSizeZ || ay >= kChunkSizeY ||
+                      (dx == 0 && dz == 0 && dy <= 4)) continue;
+                  auto& leaf = chunk[static_cast<std::size_t>(block_index(ax, ay, az))];
+                  if (leaf == Block::air) leaf = Block::leaves;
+                }
             }
+          }
+          for (int y = 3; y < std::min(height - 3, 18); ++y) {
+            const std::uint32_t roll = static_cast<std::uint32_t>(wx * 73856093u) ^
+                static_cast<std::uint32_t>(y * 19349663u) ^
+                static_cast<std::uint32_t>(wz * 83492791u) ^ seed;
+            auto& cell = chunk[static_cast<std::size_t>(block_index(lx, y, lz))];
+            if (cell == Block::stone && (roll % 997u) == 0u)
+              cell = (y < 10 && (roll & 1u)) ? Block::coal_ore : Block::iron_ore;
           }
         }
       }
