@@ -142,6 +142,7 @@ struct MeshCommand {
     float shininess = 32.0f;  // (packed to 8 bits each at the flush)
     bool casts_shadow = true;     // r3d::MeshMaterial's shadow flags
     bool receives_shadow = true;
+    bool depth_write = true;      // false for alpha-blended foliage surfaces
     // The mesh's LOCAL bounding sphere, snapshotted from its registry entry
     // (the shadow fit places it with the draw's transform).
     float bound_center[3] = {0.0f, 0.0f, 0.0f};
