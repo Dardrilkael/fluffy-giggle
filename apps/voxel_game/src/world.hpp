@@ -1,18 +1,15 @@
 // apps/voxel_game - world.hpp: the voxel world's data model.
 //
-// THE DESIGN (pure CPU except the mesh registry handles):
-//   - Blocks: air, grass, dirt, stone, wood, sand, water, cobblestone,
-//     planks, bricks, glass, leaves, coal and iron ore. Per-face shading
-//     comes from the r3d pipeline's directional light.
+// THE DESIGN (CPU-only world data and geometry):
+//   - Blocks: compact IDs for air, terrain, vegetation and ores. Rendering
+//     policy and GPU mesh ownership live outside this data model.
 //   - Storage: 8x8 chunks of 16x64x16 blocks in one contiguous,
 //     chunk-major allocation. Within each chunk x is fastest, then z,
 //     then y: x + z*16 + y*256. Chunk spans are direct contiguous views.
-//   - Meshing: per (chunk, block type) merged mesh with face culling -
-//     a face between two solid blocks never emits (the neighbor rule).
-//     Each mesh is one VoxelRenderer upload upload; a rebuild is destroy +
-//     create (the registry's whole-draw model). At most 6 solid types
-//     per chunk -> 6 meshes per chunk, ~64 draws... per type-grouped
-//     chunk, ~300 total draws for the 8x8 world - the r3d ring's scale.
+//   - Meshing: CPU-only per-chunk/tile snapshots with greedy face merging.
+//     A face between two occluding solid blocks never emits. The result
+//     contains ordinary vertex/index arrays; VoxelRenderer owns GPU upload,
+//     mesh replacement and draw handles.
 //   - Interaction: the Amanatides & Woo DDA voxel raycast (game space)
 //     for place/remove.
 //
