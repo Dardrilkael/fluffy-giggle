@@ -903,6 +903,10 @@ struct App::Impl {
                 } else {
                     VkCommandBuffer cmd =
                         static_cast<VkCommandBuffer>(frame.command_buffer);
+                    // acquire() retired this frame slot's previous submit.
+                    // Timestamp the actual submitted GPU work, not CPU
+                    // command recording time or presentation/vsync wait.
+                    renderer2d_.begin_gpu_timing(cmd, frame.frame_index);
                     // The directional shadow map is a render pass of its
                     // own, so it records BEFORE the main pass begins (the
                     // command buffer is already open from acquire). A frame
@@ -941,6 +945,7 @@ struct App::Impl {
                     }
 
                     swapchain_.end_render_pass(frame);
+                    renderer2d_.end_gpu_timing(cmd, frame.frame_index);
                     swapchain_.submit(frame);
                     frame_rendered = true;
                 }
