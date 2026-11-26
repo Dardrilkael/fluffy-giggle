@@ -33,6 +33,13 @@ namespace voxel {
 // faces stay dimmer (the classic voxel read).
 [[nodiscard]] ws::ui::r3d::Light3D scene_light();
 
+// One reusable twelve-edge wireframe cube. Create/destroy with the app;
+// draw it after the world using the GAME-space voxel cell from the DDA.
+[[nodiscard]] ws::core::Result<ws::ui::r3d::Mesh> create_target_outline();
+[[nodiscard]] ws::core::Status destroy_target_outline(ws::ui::r3d::Mesh mesh);
+void draw_target_outline(ws::ui::r3d::Mesh mesh,
+                         const World::RayHit& target);
+
 // Sets the r3d scene for the frame: the camera from the player's pose
 // (mirrored), the scene light. Call inside on_update, before the
 // chunk draws.
