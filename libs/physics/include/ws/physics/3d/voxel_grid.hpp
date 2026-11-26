@@ -156,9 +156,15 @@ class VoxelGrid3D {
       entered_step = step[axis];
 
       // A ray cannot re-enter the finite grid after leaving it.
-      if (cell[axis] < desc_.origin[static_cast<std::size_t>(axis)] ||
-          cell[axis] >= desc_.origin[static_cast<std::size_t>(axis)] +
-                            desc_.dimensions[static_cast<std::size_t>(axis)]) {
+      const int grid_min =
+          desc_.origin[static_cast<std::size_t>(axis)];
+      const int grid_max =
+          grid_min + desc_.dimensions[static_cast<std::size_t>(axis)];
+      // If the ray began outside, keep walking while it heads toward the
+      // interval; once it leaves after entering, or moves farther away,
+      // it cannot hit the finite grid.
+      if ((cell[axis] < grid_min && step[axis] <= 0) ||
+          (cell[axis] >= grid_max && step[axis] >= 0)) {
         break;
       }
     }
