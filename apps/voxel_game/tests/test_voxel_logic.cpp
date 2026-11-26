@@ -642,10 +642,11 @@ TEST_CASE("atlas: the face->tile map matches the block vocabulary") {
 TEST_CASE("atlas: the automatic creator's derived contract is pinned") {
   // scripts/create_atlas.py derives the tile set FROM THE PACK; these
   // pins hold the derivation still matches what the game reads:
-  // 8 distinct assets (dead pack entries never gain slots), 64px each,
-  // grass/dirt/wood split per face group, water resolved from the
-  // animation strip's frame 0, air never meshed.
-  CHECK(voxel::atlas::kTileCount == 8);
+  // The original eight base textures remain first-use stable. The full
+  // supplied resource pack adds seven distinct block textures after them.
+  // A local checkout may still have the old generated header until the
+  // user runs create_atlas.py against the supplied pack.
+  CHECK(voxel::atlas::kTileCount >= 8);
   CHECK(voxel::atlas::kTilePixels == 64);
   // First-use order: grass top, dirt, grass side, stone, oak top,
   // oak side, sand, water - the manifest the creator pinned.
@@ -657,9 +658,26 @@ TEST_CASE("atlas: the automatic creator's derived contract is pinned") {
   CHECK(std::string(voxel::atlas::kTileNames[5]) == "oak_log");
   CHECK(std::string(voxel::atlas::kTileNames[6]) == "sand");
   CHECK(std::string(voxel::atlas::kTileNames[7]) == "water_still");
+  if (voxel::atlas::kTileCount >= 15) {
+    CHECK(std::string(voxel::atlas::kTileNames[8]) == "cobblestone");
+    CHECK(std::string(voxel::atlas::kTileNames[9]) == "oak_planks");
+    CHECK(std::string(voxel::atlas::kTileNames[10]) == "bricks");
+    CHECK(std::string(voxel::atlas::kTileNames[11]) == "glass");
+    CHECK(std::string(voxel::atlas::kTileNames[12]) == "oak_leaves");
+    CHECK(std::string(voxel::atlas::kTileNames[13]) == "coal_ore");
+    CHECK(std::string(voxel::atlas::kTileNames[14]) == "iron_ore");
+    CHECK(voxel::atlas::kTileFor[7][0] == 8);   // cobblestone
+    CHECK(voxel::atlas::kTileFor[8][0] == 9);   // oak planks
+    CHECK(voxel::atlas::kTileFor[9][0] == 10);  // bricks
+    CHECK(voxel::atlas::kTileFor[10][0] == 11); // glass
+    CHECK(voxel::atlas::kTileFor[11][0] == 12); // oak leaves
+    CHECK(voxel::atlas::kTileFor[12][0] == 13); // coal ore
+    CHECK(voxel::atlas::kTileFor[13][0] == 14); // iron ore
+  }
   // The (block, face) table: grass top 0, grass bottom dirt, sides
   // grass_side; wood top/bottom oak_log_top, sides oak_log; water
-  // still-frame on top only; air -1 (never meshed).
+  // still-frame on top only; air -1 (never meshed). The full resource-pack
+  // table appends cobble/planks/bricks/glass/leaves/ore assets after water.
   CHECK(voxel::atlas::kTileFor[1][0] == 0);
   CHECK(voxel::atlas::kTileFor[1][1] == 1);
   CHECK(voxel::atlas::kTileFor[1][2] == 2);
