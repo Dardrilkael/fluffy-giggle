@@ -318,6 +318,7 @@ class VoxelApp final : public ws::ui::App {
     last_time_ = now;
     const float frame_dt = std::clamp(dt, 0.0f, 0.05f);
     const auto frame_t0 = std::chrono::steady_clock::now();
+    voxel_renderer_.process_completed(2);
     voxel::perf::FrameTimings timings{};
     mesh_rebuild_ms_ = 0.0f;  // mesh and collision chunk rebuilds feed this
 
@@ -951,19 +952,19 @@ class VoxelApp final : public ws::ui::App {
   void rebuild_around(int x, int z) {
     const int cx = x / voxel::kChunkSizeX;
     const int cz = z / voxel::kChunkSizeZ;
-    voxel_renderer_.rebuild_chunk(world_, cx, cz);
+    voxel_renderer_.request_rebuild_chunk(world_, cx, cz);
     // If the block sits on a chunk boundary, rebuild the neighbor too.
     if (x % voxel::kChunkSizeX == 0 && cx > 0) {
-      voxel_renderer_.rebuild_chunk(world_, cx - 1, cz);
+      voxel_renderer_.request_rebuild_chunk(world_, cx - 1, cz);
     }
     if (x % voxel::kChunkSizeX == voxel::kChunkSizeX - 1 && cx < voxel::kWorldChunksX - 1) {
-      voxel_renderer_.rebuild_chunk(world_, cx + 1, cz);
+      voxel_renderer_.request_rebuild_chunk(world_, cx + 1, cz);
     }
     if (z % voxel::kChunkSizeZ == 0 && cz > 0) {
-      voxel_renderer_.rebuild_chunk(world_, cx, cz - 1);
+      voxel_renderer_.request_rebuild_chunk(world_, cx, cz - 1);
     }
     if (z % voxel::kChunkSizeZ == voxel::kChunkSizeZ - 1 && cz < voxel::kWorldChunksZ - 1) {
-      voxel_renderer_.rebuild_chunk(world_, cx, cz + 1);
+      voxel_renderer_.request_rebuild_chunk(world_, cx, cz + 1);
     }
   }
 
