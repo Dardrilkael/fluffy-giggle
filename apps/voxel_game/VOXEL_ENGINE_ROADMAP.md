@@ -35,9 +35,9 @@ only as a deliberate API migration, never by duplicating the implementation.
 
 - [x] Preserve deterministic world-generation and controller tests.
 - [x] Keep `WS_VOXEL_BENCH` as the repeatable CPU benchmark.
-- [ ] Measure generation, meshing and GPU upload separately.
-- [ ] Report frame-time p50/p95/p99.
-- [ ] Add GPU timestamps; current `draw_ms` is CPU submission time.
+- [x] Measure world generation, CPU meshing and CPU upload staging/submission separately; report payload bytes and generated vertex/index counts.
+- [x] Report rolling frame-time p50/p95/p99 and per-benchmark-phase percentiles.
+- [ ] Add GPU timestamps; draw timing is still CPU command submission, and upload timing is CPU staging/API-call time, not GPU completion.
 
 ### 1 — CPU meshing and renderer ownership
 
@@ -51,15 +51,14 @@ only as a deliberate API migration, never by duplicating the implementation.
 - [x] Add a headless CPU mesh validity test.
 - [ ] Verify CPU/GPU suites on CI and target PC.
 - [ ] Compare meshing time and edit-time frame spikes against baseline.
-- [ ] Reuse output buffer capacity across rebuilds.
+- [x] Reuse CPU mesh output capacity across rebuilds, including async result handoff through buffer swaps.
 - [x] Classify all exposed faces and tile IDs in one chunk traversal, then
   build greedy masks by tile without rereading voxel neighbors.
 - [x] Cache chunk bounds/frustum visibility once per chunk per frame.
 - [x] Keep tile-indexed CPU mesh vectors in the renderer and clear them
   without releasing capacity between rebuilds.
 - [x] Replace the per-rebuild heap face cache with a fixed-size cache.
-- [ ] Reuse the renderer API upload staging vectors and measure allocation
-  counts before/after; GPU upload still copies into its own mesh data.
+- [x] Reuse renderer upload-staging vectors and count renderer vector-capacity growths. The renderer API still copies into its own CPU/GPU mesh storage; those internal allocations are not included in this counter.
 - [ ] Verify CPU/GPU suites on CI and target PC.
 
 **Exit:** same world geometry, CPU meshing without an active renderer, and no
