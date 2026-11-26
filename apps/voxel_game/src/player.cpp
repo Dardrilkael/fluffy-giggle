@@ -16,6 +16,24 @@ namespace {
   return {std::cos(yaw), 0.0f, std::sin(yaw)};
 }
 
+// Move horizontal velocity toward a target without changing its direction
+// abruptly. The Y component is preserved for independent jump/gravity logic.
+[[nodiscard]] ws::math::Vec3 approach_horizontal(
+    ws::math::Vec3 current, ws::math::Vec3 target, float max_delta) noexcept {
+  const float dx = target.x - current.x;
+  const float dz = target.z - current.z;
+  const float distance = std::sqrt(dx * dx + dz * dz);
+  if (distance <= max_delta || distance < 1.0e-6f) {
+    current.x = target.x;
+    current.z = target.z;
+  } else {
+    const float scale = max_delta / distance;
+    current.x += dx * scale;
+    current.z += dz * scale;
+  }
+  return current;
+}
+
 }  // namespace
 
 bool Player::spawn(const ws::math::Vec3& center) noexcept {
@@ -55,8 +73,10 @@ void Player::tick(const MoveInput& input, float dt,
   if (input.left) move = move - yaw_right(yaw_);
   const float speed = input.sprint ? tuning_.sprint_speed : tuning_.walk_speed;
   const float move_len = std::sqrt(move.x * move.x + move.z * move.z);
-  velocity_.x = move_len > 1.0e-6f ? move.x / move_len * speed : 0.0f;
-  velocity_.z = move_len > 1.0e-6f ? move.z / move_len * speed : 0.0f;
+  if (move_len > 1.0e-6f) {
+    move.x = move.x / move_len * speed;
+    move.z = move.z / move_len * speed;
+  }
 
   constexpr float kJumpBufferSeconds = 0.12f;
   constexpr float kCoyoteSeconds = 0.10f;
@@ -77,6 +97,19 @@ void Player::tick(const MoveInput& input, float dt,
     }
   }
   grounded_ = supported;
+
+  // Ground movement builds speed quickly; in the air, steering is weaker
+  // and existing horizontal momentum is retained. Releasing movement applies
+  // friction rather than stopping the player instantly.
+  if (move_len > 1.0e-6f) {
+    const float acceleration =
+        grounded_ ? tuning_.ground_acceleration : tuning_.air_acceleration;
+    velocity_ = approach_horizontal(velocity_, move, acceleration * dt);
+  } else {
+    const float friction =
+        grounded_ ? tuning_.ground_friction : tuning_.air_drag;
+    velocity_ = approach_horizontal(velocity_, ws::math::Vec3{}, friction * dt);
+  }
 
   jump_buffer_ = input.jump ? kJumpBufferSeconds
                             : std::max(0.0f, jump_buffer_ - dt);
