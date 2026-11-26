@@ -23,6 +23,11 @@ struct TestGrid {
   }
 };
 
+[[nodiscard]] VoxelGrid3D make_grid() {
+  return VoxelGrid3D{VoxelGrid3D::Desc{
+      {-8, -4, -8}, {16, 12, 16}, nullptr, &TestGrid::floor_and_wall}};
+}
+
 }  // namespace
 
 TEST_CASE("voxel grid: DDA raycast returns the first occupied cell and face") {
