@@ -129,10 +129,10 @@ class World {
   void rebuild_all();
 
   // Every chunk's meshes (the renderer walks this: one draw_mesh per
-  // entry, at the entry's tint). index_count carries the mesh's own
-  // triangle count snapshot (create_mesh rounds down to whole
-  // triangles) - the perf counters read it without touching the
-  // renderer's registry.
+  // non-empty entry, at the entry's tint). index_count carries the mesh's
+  // own triangle count snapshot (create_mesh rounds down to whole triangles).
+  // Entries need not be grouped by (cx, cz); consumers must not infer chunk
+  // boundaries from vector ordering.
   struct ChunkMesh {
     int cx = 0;
     int cz = 0;
