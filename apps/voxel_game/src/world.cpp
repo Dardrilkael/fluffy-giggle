@@ -22,6 +22,13 @@
 
 namespace voxel {
 
+// The generated atlas is indexed directly by Block's underlying value.
+// A stale atlas is a hard compile error rather than an out-of-bounds read
+// that can scramble face materials across the terrain.
+static_assert(sizeof(atlas::kTileFor) / sizeof(atlas::kTileFor[0]) ==
+              static_cast<std::size_t>(Block::count_),
+              "texture_atlas.hpp is stale: run scripts/create_atlas.py");
+
 // --- the palette ------------------------------------------------------------------
 
 namespace {
