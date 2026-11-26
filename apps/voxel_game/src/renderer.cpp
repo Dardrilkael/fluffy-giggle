@@ -167,20 +167,16 @@ void draw_world(const World& world,
                     tile_textures,
                 const ws::ui::r2d::Camera3D& camera, float aspect,
                 perf::Counters* counters) {
-  // Every chunk mesh is built in RENDER space at world-grid positions
-  // already (the mesher's own note) - the identity transform draws it
-  // exactly where it was baked. One draw per (chunk, tile) mesh; the
-  // painter's order within layer 0 does not matter (the mesh path is
-  // depth-tested - the GPU's depth buffer resolves the geometry).
-  // The material carries the mesh's TILE texture (the uploaded pack's
-  // art, the merged quads' UVs already baked in the vertices, tile
-  // units + the shader's wrap) with a WHITE tint so the texels arrive
-  // as authored; the flat per-block tints are the untextured fallback.
-  // Chunk-level AABB frustum culling: a chunk's meshes draw only when
-  // the chunk's world AABB reaches into the camera's view - the
-  // Gribb-Hartmann plane test against the chunk's render-space bounds.
-  // One cull decision per chunk, shared by its (tile) meshes.
+  // Leaves have transparent pixels but the mesh pipeline blends without
+  // discarding fragments. Draw every opaque tile first so its depth is
+  // available, then draw foliage with depth testing enabled and depth
+  // writes disabled. Transparent texels blend as zero and leave the
+  // already-rendered terrain visible instead of poisoning the depth buffer.
+  const int leaves_tile =
+      atlas::kTileFor[static_cast<std::size_t>(Block::leaves)][0];
   const Frustum fr = extract_frustum(camera, aspect);
+  std::array<bool, kWorldChunksX * kWorldChunksZ> visible_chunks{};
+
   if (counters != nullptr) {
     counters->draw_calls = 0;
     counters->triangles = 0;
@@ -188,38 +184,50 @@ void draw_world(const World& world,
     counters->meshes = static_cast<std::uint32_t>(
         world.chunk_meshes().size());
   }
-  int last_cx = -1, last_cz = -1;
-  for (const World::ChunkMesh& chunk : world.chunk_meshes()) {
-    // The chunk's RENDER-space AABB: game (x, y, z) -> (x, -y, -z);
-    // the chunk spans [cx*16, cx*16+16] x [0, 64] x [cz*16, cz*16+16]
-    // in game space, so render-space min/max are the mapped corners.
-    const float gmin[3] = {static_cast<float>(chunk.cx * 16), 0.0f,
-                           static_cast<float>(chunk.cz * 16)};
-    const float gmax[3] = {static_cast<float>(chunk.cx * 16 + 16),
-                           static_cast<float>(64),
-                           static_cast<float>(chunk.cz * 16 + 16)};
-    const float rmin[3] = {gmin[0], -gmax[1], -gmax[2]};
-    const float rmax[3] = {gmax[0], -gmin[1], -gmin[2]};
-    if (!aabb_visible(fr, rmin, rmax)) {
-      continue;  // outside every chunk mesh's view: skip the draws
-    }
-    if (counters != nullptr) {
-      ++counters->draw_calls;
-      counters->triangles += chunk.index_count / 3;
-      if (chunk.cx != last_cx || chunk.cz != last_cz) {
-        ++counters->chunk_vis;
-        last_cx = chunk.cx;
-        last_cz = chunk.cz;
+
+  // Pass 0: opaque blocks. Pass 1: alpha-textured leaves.
+  for (int pass = 0; pass < 2; ++pass) {
+    for (const World::ChunkMesh& chunk : world.chunk_meshes()) {
+      const bool foliage = chunk.tile == leaves_tile;
+      if (foliage != (pass == 1)) continue;
+
+      const float gmin[3] = {static_cast<float>(chunk.cx * kChunkSizeX),
+                             0.0f,
+                             static_cast<float>(chunk.cz * kChunkSizeZ)};
+      const float gmax[3] = {
+          static_cast<float>(chunk.cx * kChunkSizeX + kChunkSizeX),
+          static_cast<float>(kChunkSizeY),
+          static_cast<float>(chunk.cz * kChunkSizeZ + kChunkSizeZ)};
+      const float rmin[3] = {gmin[0], -gmax[1], -gmax[2]};
+      const float rmax[3] = {gmax[0], -gmin[1], -gmin[2]};
+      if (!aabb_visible(fr, rmin, rmax)) continue;
+
+      if (counters != nullptr) {
+        ++counters->draw_calls;
+        counters->triangles += chunk.index_count / 3;
+        const std::size_t chunk_index =
+            static_cast<std::size_t>(chunk.cz * kWorldChunksX + chunk.cx);
+        if (!visible_chunks[chunk_index]) {
+          visible_chunks[chunk_index] = true;
+          ++counters->chunk_vis;
+        }
       }
+
+      ws::ui::r3d::Transform3D identity{};
+      ws::ui::r3d::MeshMaterial material;
+      material.texture =
+          chunk.tile >= 0 && chunk.tile < atlas::kTileCount
+              ? tile_textures[static_cast<std::size_t>(chunk.tile)]
+              : ws::ui::r2d::Texture{};
+      material.tint = ws::ui::r2d::rgba(255, 255, 255);
+      if (foliage) {
+        material.depth_write = false;
+        // The shadow pass currently has no alpha-tested fragment stage;
+        // omitting foliage casters avoids solid rectangular leaf shadows.
+        material.casts_shadow = false;
+      }
+      ws::ui::r3d::draw_mesh(chunk.mesh, identity, material);
     }
-    ws::ui::r3d::Transform3D identity{};  // translation 0, scale 1
-    ws::ui::r3d::MeshMaterial material;
-    material.texture =
-        chunk.tile >= 0 && chunk.tile < atlas::kTileCount
-            ? tile_textures[static_cast<std::size_t>(chunk.tile)]
-            : ws::ui::r2d::Texture{};
-    material.tint = ws::ui::r2d::rgba(255, 255, 255);
-    ws::ui::r3d::draw_mesh(chunk.mesh, identity, material);
   }
 }
 
