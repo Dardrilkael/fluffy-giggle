@@ -81,8 +81,10 @@ class VoxelRenderer {
   // Updates the world-space X/Z origin used to prioritize queued mesh jobs.
   // The CPU mesher reads it under its queue mutex; no jobs need re-enqueueing.
   void set_priority_origin(float x, float z);
-  void process_completed(std::size_t max_jobs = 2);
-  void rebuild_all(const World& world);
+  void process_completed(std::size_t max_jobs = 2,
+                         perf::FrameTimings* timings = nullptr);
+  void rebuild_all(const World& world,
+                   perf::FrameTimings* timings = nullptr);
   void destroy_all();
 
   [[nodiscard]] const std::vector<ChunkMesh>& chunk_meshes() const noexcept {
@@ -91,12 +93,16 @@ class VoxelRenderer {
 
  private:
   static constexpr std::size_t kChunkCount = static_cast<std::size_t>(kWorldChunksX*kWorldChunksZ);
-  void upload_result(int cx, int cz, const std::vector<CpuMeshData>& tiles);
+  void upload_result(int cx, int cz, const std::vector<CpuMeshData>& tiles,
+                     perf::FrameTimings* timings = nullptr);
   [[nodiscard]] static constexpr std::size_t chunk_slot(int cx,int cz) { return static_cast<std::size_t>(cz*kWorldChunksX+cx); }
   std::vector<ChunkMesh> chunk_meshes_;
-  // Tile-indexed CPU geometry scratch. clear() preserves capacity, avoiding
-  // repeated vertex/index allocations when the player edits the same chunks.
+  // CPU worker output stays reusable across completed jobs.
   std::vector<CpuMeshData> cpu_mesh_scratch_;
+  // Reused CPU upload staging; no per-chunk temporary MeshData allocation.
+  ws::ui::r3d::MeshData upload_scratch_;
+  // Atomic replacement staging; capacity is retained between chunk uploads.
+  std::vector<ChunkMesh> replacement_scratch_;
   std::size_t upload_cursor_=0;
   AsyncChunkMesher async_mesher_;
 };
