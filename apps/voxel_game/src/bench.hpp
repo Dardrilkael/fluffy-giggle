@@ -32,8 +32,8 @@ class Driver {
         phase_times_.clear();
         if (cfg_.print_header) {
             std::printf("phase,sec,fps,frame_ms,phys_ms,mesh_cpu_ms,"
-                        "upload_cpu_ms,draw_submit_ms,upload_bytes,"
-                        "mesh_vertices,mesh_indices,mesh_jobs,staging_growths,"
+                        "upload_cpu_ms,draw_submit_ms,gpu_frame_ms,gpu_samples,"
+                        "upload_bytes,mesh_vertices,mesh_indices,mesh_jobs,staging_growths,"
                         "draws,tris,bodies,meshes,chunkvis\n");
             std::fflush(stdout);
         }
@@ -86,15 +86,24 @@ class Driver {
         acc_mesh_jobs_ += t.mesh_jobs;
         acc_growths_ += t.upload_capacity_growths;
         acc_draw_ms_ += t.draw_ms;
+        if (t.gpu_frame_valid) {
+            acc_gpu_ms_ += t.gpu_frame_ms;
+            ++acc_gpu_samples_;
+            gpu_phase_times_.add(t.gpu_frame_ms);
+        }
 
         if (elapsed_ - last_report_ >= 1.0f) {
             const float n = static_cast<float>(frames_);
             std::printf("%s,%.1f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,"
-                        "%llu,%llu,%llu,%u,%u,%u,%u,%u,%u,%u\n",
+                        "%.3f,%u,%llu,%llu,%llu,%u,%u,%u,%u,%u,%u,%u\n",
                         phase_name(), last_report_ + 1.0f,
                         static_cast<float>(frames_), acc_frame_ms_ / n,
                         acc_phys_ms_ / n, acc_mesh_ms_ / n,
                         acc_upload_ms_ / n, acc_draw_ms_ / n,
+                        acc_gpu_samples_ != 0
+                            ? acc_gpu_ms_ / static_cast<float>(acc_gpu_samples_)
+                            : 0.0f,
+                        acc_gpu_samples_,
                         static_cast<unsigned long long>(acc_upload_bytes_),
                         static_cast<unsigned long long>(acc_mesh_vertices_),
                         static_cast<unsigned long long>(acc_mesh_indices_),
@@ -115,6 +124,7 @@ class Driver {
             phase_start_ = elapsed_;
             phase_frames_ = 0;
             phase_times_.clear();
+            gpu_phase_times_.clear();
         }
         return elapsed_ >= cfg_.seconds;
     }
@@ -152,14 +162,21 @@ class Driver {
         acc_mesh_jobs_ = 0;
         acc_growths_ = 0;
         acc_draw_ms_ = 0.0f;
+        acc_gpu_ms_ = 0.0f;
+        acc_gpu_samples_ = 0;
     }
 
     void print_phase_percentiles() const {
         const auto p = phase_times_.percentiles();
+        const auto gpu = gpu_phase_times_.percentiles();
         std::printf("bench:percentiles,%s,n=%u,window=%zu,"
-                    "p50_ms=%.3f,p95_ms=%.3f,p99_ms=%.3f\n",
+                    "p50_ms=%.3f,p95_ms=%.3f,p99_ms=%.3f,"
+                    "gpu_n=%zu,gpu_p50_ms=%.3f,gpu_p95_ms=%.3f,"
+                    "gpu_p99_ms=%.3f\n",
                     phase_name(), phase_frames_, phase_times_.sample_count(),
-                    p.p50_ms, p.p95_ms, p.p99_ms);
+                    p.p50_ms, p.p95_ms, p.p99_ms,
+                    gpu_phase_times_.sample_count(),
+                    gpu.p50_ms, gpu.p95_ms, gpu.p99_ms);
         std::fflush(stdout);
     }
 
@@ -176,6 +193,8 @@ class Driver {
     float acc_mesh_ms_ = 0.0f;
     float acc_upload_ms_ = 0.0f;
     float acc_draw_ms_ = 0.0f;
+    float acc_gpu_ms_ = 0.0f;
+    std::uint32_t acc_gpu_samples_ = 0;
     std::uint64_t acc_upload_bytes_ = 0;
     std::uint64_t acc_mesh_vertices_ = 0;
     std::uint64_t acc_mesh_indices_ = 0;
@@ -183,6 +202,7 @@ class Driver {
     std::uint32_t acc_growths_ = 0;
     float last_report_ = 0.0f;
     perf::FrameTimeWindow phase_times_{};
+    perf::FrameTimeWindow gpu_phase_times_{};
 };
 
 // Reads WS_VOXEL_BENCH ("12" -> 12 s); 0 when unset/invalid.
