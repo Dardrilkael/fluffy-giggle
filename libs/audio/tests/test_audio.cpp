@@ -414,3 +414,24 @@ TEST_CASE("early reflections: capacity and malformed inputs fail safely") {
   CHECK(profile.add({8, 0.5f}) == true);
   CHECK(profile.add({9, 0.5f}) == false);
 }
+
+
+TEST_CASE("engine: transient processed PCM owns its buffer until stop") {
+  ws::audio::AudioEngine engine;
+  REQUIRE(engine.init().has_value());
+
+  auto samples = sine_pcm(8000, 8000, 440.0);
+  const ws::audio::SoundDesc desc{samples.data(), 8000, 1, 8000};
+  const auto source = engine.play(desc, 0.0f);
+  REQUIRE(source.has_value());
+  CHECK(engine.is_playing(*source));
+  CHECK(engine.set_position(*source, 2.0f, 1.0f, -3.0f).has_value());
+  CHECK(engine.stop(*source).has_value());
+  CHECK_FALSE(engine.is_playing(*source));
+
+  const ws::audio::SoundDesc invalid{nullptr, 10, 1, 8000};
+  const auto rejected = engine.play(invalid);
+  REQUIRE_FALSE(rejected.has_value());
+  CHECK(rejected.error().code ==
+        static_cast<std::int32_t>(ws::audio::AudioError::invalid_sound_data));
+}
