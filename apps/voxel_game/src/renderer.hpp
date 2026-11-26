@@ -18,6 +18,7 @@
 #include <array>
 #include <condition_variable>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -101,7 +102,7 @@ class VoxelRenderer {
   std::vector<CpuMeshData> cpu_mesh_scratch_;
   std::array<std::uint64_t,kChunkCount> revisions_{};
   std::array<MeshResult,kChunkCount> completed_{};
-  std::array<MeshJob,kQueueCapacity> jobs_{};
+  std::unique_ptr<MeshJob[]> jobs_;
   std::size_t queue_head_=0, queue_count_=0;
   std::size_t upload_cursor_=0;
   std::mutex queue_mutex_;
