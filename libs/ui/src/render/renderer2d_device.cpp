@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -36,6 +37,24 @@ namespace {
 // The white texture is the registry's index 0: Texture{} and every failed
 // load resolve to it.
 constexpr std::uint32_t kWhiteIndex = 0;
+
+// Select a supported shadow-map size once during renderer initialization.
+// Invalid input preserves the 2048 default; devices with a lower limit use
+// the largest supported size that fits their maxImageDimension2D.
+std::uint32_t configured_shadow_map_size(std::uint32_t device_limit) {
+    std::uint32_t requested = kDefaultShadowMapSize;
+    if (const char* value = std::getenv("WS_SHADOW_MAP_RESOLUTION")) {
+        if (std::strcmp(value, "2048") == 0) requested = 2048;
+        else if (std::strcmp(value, "1024") == 0) requested = 1024;
+        else if (std::strcmp(value, "512") == 0) requested = 512;
+        else if (std::strcmp(value, "256") == 0) requested = 256;
+    }
+    constexpr std::uint32_t supported[] = {2048, 1024, 512, 256};
+    for (const std::uint32_t size : supported) {
+        if (size <= requested && size <= device_limit) return size;
+    }
+    return std::min(kDefaultShadowMapSize, device_limit);
+}
 
 // The chunk's clip as a scissor rect: intersected with the frame extent
 // (kFullClip means "everything"), edges rounded outward by a sub-pixel so
@@ -98,6 +117,10 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
     // a pipeline layout that cannot work.
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(physical_device_, &properties);
+    shadow_map_size_ = configured_shadow_map_size(
+        properties.limits.maxImageDimension2D);
+    ws::core::info("ui: r2d shadow map resolution={}x{}", shadow_map_size_,
+                   shadow_map_size_);
     if (properties.limits.maxPushConstantsSize < sizeof(batch::Mat4)) {
         ws::core::error("ui: r2d init failed - push constant limit is {} bytes",
                         properties.limits.maxPushConstantsSize);
@@ -1517,7 +1540,7 @@ bool Renderer2D::create_shadow_resources() {
         ShadowSlot& map = shadow_slots_[slot];
         gfx::ImageOut image{};
         const ws::core::Status created = gpu_->create_image(
-            {kShadowMapSize, kShadowMapSize,
+            {shadow_map_size_, shadow_map_size_,
              static_cast<std::uint32_t>(shadow_format_),
              VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
                  VK_IMAGE_USAGE_SAMPLED_BIT,
@@ -1544,8 +1567,8 @@ bool Renderer2D::create_shadow_resources() {
         fb.renderPass = shadow_pass_;
         fb.attachmentCount = 1;
         fb.pAttachments = &map.view;
-        fb.width = kShadowMapSize;
-        fb.height = kShadowMapSize;
+        fb.width = shadow_map_size_;
+        fb.height = shadow_map_size_;
         fb.layers = 1;
         if (vkCreateFramebuffer(device_, &fb, nullptr, &map.framebuffer) !=
             VK_SUCCESS) {
@@ -1784,7 +1807,7 @@ void Renderer2D::record_shadow_pass(VkCommandBuffer cmd, uint32_t frame_slot) {
     }
     const r3d::detail::ShadowFit fit = r3d::detail::fit_shadow_map(
         light_.dir, casters.data(), casters.size(), receivers.data(),
-        receivers.size(), kShadowMapSize);
+        receivers.size(), shadow_map_size_);
     if (!fit.valid) {
         return;  // nothing casts: the scene block says "no map"
     }
@@ -1795,17 +1818,17 @@ void Renderer2D::record_shadow_pass(VkCommandBuffer cmd, uint32_t frame_slot) {
     begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     begin.renderPass = shadow_pass_;
     begin.framebuffer = shadow_slots_[frame_slot].framebuffer;
-    begin.renderArea.extent = {kShadowMapSize, kShadowMapSize};
+    begin.renderArea.extent = {shadow_map_size_, shadow_map_size_};
     begin.clearValueCount = 1;
     begin.pClearValues = &clear;
     vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_shadow_);
     VkViewport viewport{};
-    viewport.width = static_cast<float>(kShadowMapSize);
-    viewport.height = static_cast<float>(kShadowMapSize);
+    viewport.width = static_cast<float>(shadow_map_size_);
+    viewport.height = static_cast<float>(shadow_map_size_);
     viewport.maxDepth = 1.0f;
     vkCmdSetViewport(cmd, 0, 1, &viewport);
-    const VkRect2D scissor{{0, 0}, {kShadowMapSize, kShadowMapSize}};
+    const VkRect2D scissor{{0, 0}, {shadow_map_size_, shadow_map_size_}};
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     const VkDeviceSize offset = 0;
