@@ -108,9 +108,9 @@ A faster filter is not acceptable if it introduces severe visual artifacts.
 
 ## Planned implementation order
 
-- [ ] Inspect current shadow-map creation and renderer configuration.
-- [ ] Add a runtime-configurable shadow-map resolution (default unchanged).
-- [ ] Print the actual shadow-map dimensions in benchmark configuration.
+- [x] Inspect current shadow-map creation and renderer configuration.
+- [x] Add runtime-configurable shadow-map resolution (default unchanged): `WS_SHADOW_MAP_RESOLUTION` accepts 2048, 1024, 512 or 256; invalid values use the default. The renderer clamps to the device's `maxImageDimension2D`.
+- [x] Log the actual selected shadow-map dimensions during renderer initialization (verify this in each benchmark log).
 - [ ] Build Release and run the existing voxel logic tests.
 - [ ] Execute Experiment A and save all raw CSV/log files.
 - [ ] Analyze resolution scaling and choose a quality/performance point.
