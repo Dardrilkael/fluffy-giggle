@@ -116,7 +116,7 @@ constexpr float kUVB[6][2][3] = {
 // Emits one merged quad for the greedy rectangle (slice sa, [pu, pu+w)
 // x [pv, pv+h) on face fi's plane lattice. The lattice walk mirrors
 // the mask build exactly - the two can never disagree where a cell is.
-void emit_quad(CpuMeshData& out, Block /*type*/, int fi, int ox,
+void emit_quad(CpuMeshData& out, int fi, int ox,
                 int oz, int sa, int pu, int pv, int w, int h,
                 int u_len, int v_len) {
   const FaceDir& face = kFaces[fi];
@@ -234,17 +234,76 @@ void emit_quad(CpuMeshData& out, Block /*type*/, int fi, int ox,
   out.indices.push_back(base + 0);
 }
 
-// The greedy sweep for one (chunk, tile, face direction): builds the
-// exposed-face mask on the face's plane lattice, then carves greedy
-// rectangles out of it.
-void greedy_faces(const World& world, Block type, int fi, int cx, int cz,
-                  CpuMeshData& out) {
+// Cache the texture tile for every exposed face in one chunk traversal.
+// -1 means that the face is hidden. Tile identity is the render-material
+// boundary, so equal textures can merge even when the block IDs differ.
+using FaceTileCache = std::vector<std::int8_t>;
+
+[[nodiscard]] FaceTileCache classify_chunk_faces(
+    const World& world, int cx, int cz) {
+  FaceTileCache face_tiles(6u * static_cast<std::size_t>(kBlocksPerChunk),
+                           static_cast<std::int8_t>(-1));
+  const auto chunk = world.chunk_data(cx, cz);
+  const int ox = cx * kChunkSizeX;
+  const int oz = cz * kChunkSizeZ;
+
+  // x is the fastest storage axis. Neighbor classification for all six
+  // directions happens while each block is visited exactly once.
+  for (int y = 0; y < kChunkSizeY; ++y) {
+    for (int z = 0; z < kChunkSizeZ; ++z) {
+      for (int x = 0; x < kChunkSizeX; ++x) {
+        const std::size_t cell =
+            static_cast<std::size_t>(block_index(x, y, z));
+        const Block type = chunk[cell];
+        if (type == Block::air) continue;
+
+        const std::size_t type_index = static_cast<std::size_t>(type);
+        if (type_index >= static_cast<std::size_t>(Block::count_)) continue;
+
+        const int gx = ox + x;
+        const int gz = oz + z;
+        for (int fi = 0; fi < 6; ++fi) {
+          const int tile = atlas::kTileFor[type_index][fi];
+          if (tile < 0 || tile >= atlas::kTileCount) continue;
+
+          const FaceDir& face = kFaces[fi];
+          const int nx = x + face.dx;
+          const int ny = y + face.dy;
+          const int nz = z + face.dz;
+          const Block neighbor =
+              nx >= 0 && nx < kChunkSizeX &&
+                      ny >= 0 && ny < kChunkSizeY &&
+                      nz >= 0 && nz < kChunkSizeZ
+                  ? chunk[static_cast<std::size_t>(
+                        block_index(nx, ny, nz))]
+                  : world.block_at(gx + face.dx, y + face.dy,
+                                   gz + face.dz);
+
+          // Water is non-solid and only its top face is textured. It does
+          // not emit against another water cell or a solid block.
+          if (type == Block::water) {
+            if (neighbor == Block::water || is_solid(neighbor)) continue;
+          } else if (is_solid(neighbor)) {
+            continue;
+          }
+
+          face_tiles[static_cast<std::size_t>(fi) * kBlocksPerChunk + cell] =
+              static_cast<std::int8_t>(tile);
+        }
+      }
+    }
+  }
+  return face_tiles;
+}
+
+// Merge one face direction from the cached tile IDs. Per-plane masks are
+// grouped by tile, and consumed cells are cleared in-place (no second used
+// bitset). This stage never reads voxel data or checks neighbors.
+void greedy_faces(const FaceTileCache& face_tiles, int fi, int cx, int cz,
+                  std::array<CpuMeshData, atlas::kTileCount>& outputs) {
   const FaceDir& face = kFaces[fi];
   const int ox = cx * kChunkSizeX;
   const int oz = cz * kChunkSizeZ;
-  const auto chunk = world.chunk_data(cx, cz);
-  // The plane lattice axes (chunk-local): u/v are the face basis'
-  // integer directions; the slice axis is the face's normal axis.
   const int ux = static_cast<int>(kUVB[fi][0][0]);
   const int uy = static_cast<int>(kUVB[fi][0][1]);
   const int uz = static_cast<int>(kUVB[fi][0][2]);
@@ -258,7 +317,7 @@ void greedy_faces(const World& world, Block type, int fi, int cx, int cz,
   const int a_len = (face.dy != 0) ? kChunkSizeY
                     : (face.dx != 0) ? kChunkSizeX
                                      : kChunkSizeZ;
-  // One lattice point -> its chunk-local cell (the emit_quad walk).
+
   const auto cell_of = [&](int s, int pU, int pV) {
     int lx = 0, ly = 0, lz = 0;
     lx += ux != 0 ? (ux > 0 ? pU : u_len - 1 - pU) : 0;
@@ -272,86 +331,73 @@ void greedy_faces(const World& world, Block type, int fi, int cx, int cz,
     if (face.dz != 0) lz = s;
     return std::array<int, 3>{lx, ly, lz};
   };
-  // The mask + used grid, per slice (the sweep only merges within one
-  // slice: two cells at different slice positions are NOT coplanar).
-  // Max plane: 16 * 64 = 1024 cells. Reuse fixed stack scratch rather than
-  // allocating vector<bool> bitsets for every face/tile rebuild.
+
   constexpr std::size_t kMaxPlaneArea =
       static_cast<std::size_t>(kChunkSizeY) * kChunkSizeX;
-  std::array<std::uint8_t, kMaxPlaneArea> mask{};
-  std::array<std::uint8_t, kMaxPlaneArea> used{};
-  const std::size_t plane_area =
-      static_cast<std::size_t>(u_len) * static_cast<std::size_t>(v_len);
+  std::array<std::array<std::uint8_t, kMaxPlaneArea>,
+             atlas::kTileCount> masks{};
+  const std::size_t face_offset =
+      static_cast<std::size_t>(fi) * kBlocksPerChunk;
+
   for (int sa = 0; sa < a_len; ++sa) {
-    std::fill_n(mask.begin(), plane_area, std::uint8_t{0});
-    std::fill_n(used.begin(), plane_area, std::uint8_t{0});
-    bool any = false;
+    std::array<bool, atlas::kTileCount> active_tiles{};
+    // Populate every tile's mask in one plane traversal.
     for (int pu = 0; pu < u_len; ++pu) {
       for (int pv = 0; pv < v_len; ++pv) {
-        const auto c = cell_of(sa, pu, pv);
-        const int gx = ox + c[0];
-        const int gy = c[1];
-        const int gz = oz + c[2];
-        if (chunk[static_cast<std::size_t>(
-                block_index(c[0], c[1], c[2]))] != type) continue;
+        const auto cell = cell_of(sa, pu, pv);
+        const std::size_t source_index = face_offset +
+            static_cast<std::size_t>(block_index(cell[0], cell[1], cell[2]));
+        const std::int8_t tile_id = face_tiles[source_index];
+        if (tile_id < 0) continue;
 
-        const int nx = c[0] + face.dx;
-        const int ny = c[1] + face.dy;
-        const int nz = c[2] + face.dz;
-        const Block neighbor =
-            nx >= 0 && nx < kChunkSizeX && ny >= 0 && ny < kChunkSizeY &&
-                    nz >= 0 && nz < kChunkSizeZ
-                ? chunk[static_cast<std::size_t>(block_index(nx, ny, nz))]
-                : world.block_at(gx + face.dx, gy + face.dy, gz + face.dz);
-        if (type == Block::water) {
-          // Water is non-solid, but adjacent water cells must not each
-          // emit a coincident top surface. Water only has a top tile.
-          if (neighbor == Block::water || is_solid(neighbor)) continue;
-        } else if (is_solid(neighbor)) {
-          continue;  // hidden behind the neighbor: never emit
-        }
-        mask[static_cast<std::size_t>(pu) * v_len + pv] = true;
-        any = true;
+        const std::size_t tile = static_cast<std::size_t>(tile_id);
+        const std::size_t mask_index =
+            static_cast<std::size_t>(pu) * v_len + pv;
+        masks[tile][mask_index] = 1;
+        active_tiles[tile] = true;
       }
     }
-    if (!any) {
-      continue;
-    }
-    // Carve greedy rectangles.
-    for (int pu = 0; pu < u_len; ++pu) {
-      for (int pv = 0; pv < v_len; ++pv) {
-        const std::size_t idx =
-            static_cast<std::size_t>(pu) * v_len + pv;
-        if (!mask[idx] || used[idx]) {
-          continue;
-        }
-        int w = 1;
-        while (pu + w < u_len && mask[idx + static_cast<std::size_t>(w) * v_len]
-               && !used[idx + static_cast<std::size_t>(w) * v_len]) {
-          ++w;
-        }
-        int h = 1;
-        bool grew = true;
-        while (grew && pv + h < v_len) {
-          for (int k = 0; k < w; ++k) {
-            const std::size_t probe = static_cast<std::size_t>(pu + k) *
-                v_len + static_cast<std::size_t>(pv + h);
-            if (!mask[probe] || used[probe]) {
-              grew = false;
-              break;
+
+    // No voxel reads in the greedy stage. Absent material masks are skipped.
+    for (int tile = 0; tile < atlas::kTileCount; ++tile) {
+      if (!active_tiles[static_cast<std::size_t>(tile)]) continue;
+      auto& mask = masks[static_cast<std::size_t>(tile)];
+
+      for (int pu = 0; pu < u_len; ++pu) {
+        for (int pv = 0; pv < v_len; ++pv) {
+          const std::size_t idx =
+              static_cast<std::size_t>(pu) * v_len + pv;
+          if (mask[idx] == 0) continue;
+
+          int w = 1;
+          while (pu + w < u_len &&
+                 mask[idx + static_cast<std::size_t>(w) * v_len] != 0) {
+            ++w;
+          }
+          int h = 1;
+          bool grew = true;
+          while (grew && pv + h < v_len) {
+            for (int k = 0; k < w; ++k) {
+              const std::size_t probe =
+                  static_cast<std::size_t>(pu + k) * v_len +
+                  static_cast<std::size_t>(pv + h);
+              if (mask[probe] == 0) {
+                grew = false;
+                break;
+              }
+            }
+            if (grew) ++h;
+          }
+
+          for (int dw = 0; dw < w; ++dw) {
+            for (int dh = 0; dh < h; ++dh) {
+              mask[static_cast<std::size_t>(pu + dw) * v_len +
+                   static_cast<std::size_t>(pv + dh)] = 0;
             }
           }
-          if (grew) {
-            ++h;
-          }
+          emit_quad(outputs[static_cast<std::size_t>(tile)], fi, ox, oz,
+                    sa, pu, pv, w, h, u_len, v_len);
         }
-        for (int dw = 0; dw < w; ++dw) {
-          for (int dh = 0; dh < h; ++dh) {
-            used[static_cast<std::size_t>(pu + dw) * v_len +
-                 static_cast<std::size_t>(pv + dh)] = true;
-          }
-        }
-        emit_quad(out, type, fi, ox, oz, sa, pu, pv, w, h, u_len, v_len);
       }
     }
   }
@@ -359,21 +405,7 @@ void greedy_faces(const World& world, Block type, int fi, int cx, int cz,
 
 }  // namespace
 
-// One (chunk, tile) mesh: every face of every block whose kTileFor
-// entry selects this tile, merged greedily per face direction.
-[[nodiscard]] CpuMeshData build_chunk_tile_mesh(
-    const World& world, int cx, int cz, int tile) {
-  CpuMeshData out;
-  for (int type = 1; type < static_cast<int>(Block::count_); ++type) {
-    for (int fi = 0; fi < 6; ++fi) {
-      if (atlas::kTileFor[static_cast<std::size_t>(type)][fi] != tile) {
-        continue;
-      }
-      greedy_faces(world, static_cast<Block>(type), fi, cx, cz, out);
-    }
-  }
-  return out;
-}
+
 }  // namespace
 
 // --- the API ----------------------------------------------------------------------
@@ -527,9 +559,18 @@ std::vector<ChunkMeshData> World::build_chunk_meshes(
   if (cx < 0 || cx >= kWorldChunksX || cz < 0 || cz >= kWorldChunksZ) {
     return out;
   }
+
+  // Classify each block's exposed faces exactly once, then greedy-merge the
+  // compact face/tile cache. No material-specific chunk rescans remain.
+  const FaceTileCache face_tiles = classify_chunk_faces(*this, cx, cz);
+  std::array<CpuMeshData, atlas::kTileCount> tile_meshes{};
+  for (int fi = 0; fi < 6; ++fi) {
+    greedy_faces(face_tiles, fi, cx, cz, tile_meshes);
+  }
+
   out.reserve(atlas::kTileCount);
   for (int tile = 0; tile < atlas::kTileCount; ++tile) {
-    CpuMeshData geometry = build_chunk_tile_mesh(*this, cx, cz, tile);
+    auto& geometry = tile_meshes[static_cast<std::size_t>(tile)];
     if (geometry.vertices.empty()) continue;
     out.push_back(ChunkMeshData{tile, std::move(geometry)});
   }
