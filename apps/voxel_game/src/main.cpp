@@ -478,19 +478,19 @@ class VoxelApp final : public ws::ui::App {
     if (do_break || do_place) {
       const auto& hit = target_hit_;
       if (do_break && hit.hit) {  // break
-        const voxel::Block broken = world_.block_at(hit.cell[0], hit.cell[1], hit.cell[2]);
-        if (world_.set_block(hit.cell[0], hit.cell[1], hit.cell[2],
+        const voxel::Block broken = world_.block_at(hit.cell.x, hit.cell.y, hit.cell.z);
+        if (world_.set_block(hit.cell.x, hit.cell.y, hit.cell.z,
                              voxel::Block::air)) {
           (void)inventory_.add(block_drop(broken), 1);
-          rebuild_around(hit.cell[0], hit.cell[2]);
+          rebuild_around(hit.cell.x, hit.cell.z);
           play_sound(kSoundBreak, 0.9f,
-                     Vec3{hit.cell[0] + 0.5f, hit.cell[1] + 0.5f,
-                          hit.cell[2] + 0.5f});
+                     Vec3{hit.cell.x + 0.5f, hit.cell.y + 0.5f,
+                          hit.cell.z + 0.5f});
         }
       } else if (do_place && hit.hit) {  // place
-        const int px = hit.cell[0] + hit.normal[0];
-        const int py = hit.cell[1] + hit.normal[1];
-        const int pz = hit.cell[2] + hit.normal[2];
+        const int px = hit.cell.x + hit.normal.x;
+        const int py = hit.cell.y + hit.normal.y;
+        const int pz = hit.cell.z + hit.normal.z;
         const auto& selected = inventory_.slot(static_cast<std::size_t>(hotbar_));
         voxel::Block place{};
         const bool placeable = !selected.empty() && item_to_block(selected.item, place);
