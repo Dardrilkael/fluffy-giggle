@@ -33,8 +33,8 @@ class Driver {
         if (cfg_.print_header) {
             std::printf("phase,sec,fps,frame_ms,phys_ms,mesh_cpu_ms,"
                         "upload_cpu_ms,draw_submit_ms,upload_bytes,"
-                        "mesh_jobs,staging_growths,draws,tris,bodies,"
-                        "meshes,chunkvis\n");
+                        "mesh_vertices,mesh_indices,mesh_jobs,staging_growths,"
+                        "draws,tris,bodies,meshes,chunkvis\n");
             std::fflush(stdout);
         }
     }
@@ -81,6 +81,8 @@ class Driver {
         acc_mesh_ms_ += t.cpu_mesh_ms;
         acc_upload_ms_ += t.upload_ms;
         acc_upload_bytes_ += t.upload_bytes;
+        acc_mesh_vertices_ += t.mesh_vertices;
+        acc_mesh_indices_ += t.mesh_indices;
         acc_mesh_jobs_ += t.mesh_jobs;
         acc_growths_ += t.upload_capacity_growths;
         acc_draw_ms_ += t.draw_ms;
@@ -88,12 +90,14 @@ class Driver {
         if (elapsed_ - last_report_ >= 1.0f) {
             const float n = static_cast<float>(frames_);
             std::printf("%s,%.1f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,"
-                        "%llu,%u,%u,%u,%u,%u,%u,%u\n",
+                        "%llu,%llu,%llu,%u,%u,%u,%u,%u,%u,%u,%u\n",
                         phase_name(), last_report_ + 1.0f,
                         static_cast<float>(frames_), acc_frame_ms_ / n,
                         acc_phys_ms_ / n, acc_mesh_ms_ / n,
                         acc_upload_ms_ / n, acc_draw_ms_ / n,
                         static_cast<unsigned long long>(acc_upload_bytes_),
+                        static_cast<unsigned long long>(acc_mesh_vertices_),
+                        static_cast<unsigned long long>(acc_mesh_indices_),
                         acc_mesh_jobs_, acc_growths_, c.draw_calls,
                         c.triangles, c.bodies, c.meshes, c.chunk_vis);
             std::fflush(stdout);
@@ -143,6 +147,8 @@ class Driver {
         acc_mesh_ms_ = 0.0f;
         acc_upload_ms_ = 0.0f;
         acc_upload_bytes_ = 0;
+        acc_mesh_vertices_ = 0;
+        acc_mesh_indices_ = 0;
         acc_mesh_jobs_ = 0;
         acc_growths_ = 0;
         acc_draw_ms_ = 0.0f;
@@ -171,6 +177,8 @@ class Driver {
     float acc_upload_ms_ = 0.0f;
     float acc_draw_ms_ = 0.0f;
     std::uint64_t acc_upload_bytes_ = 0;
+    std::uint64_t acc_mesh_vertices_ = 0;
+    std::uint64_t acc_mesh_indices_ = 0;
     std::uint32_t acc_mesh_jobs_ = 0;
     std::uint32_t acc_growths_ = 0;
     float last_report_ = 0.0f;
