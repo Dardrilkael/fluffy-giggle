@@ -319,6 +319,8 @@ class VoxelApp final : public ws::ui::App {
     // second; request_stop lands at the end of the run.
     const float bench_seconds = voxel::bench::bench_seconds_from_env();
     if (bench_seconds > 0.0f) {
+      benchmark_shadow_flags_ =
+          voxel::bench::bench_shadow_flags_from_env();
       voxel::bench::Config cfg{};
       cfg.seconds = bench_seconds;
       cfg.fixed_scene = voxel::bench::bench_fixed_scene_from_env();
@@ -327,11 +329,13 @@ class VoxelApp final : public ws::ui::App {
       const auto benchmark_frame = r2d::frame_size();
       std::printf(
           "bench:config,mode=%s,seed=%u,render_distance=%.1f,"
-          "width=%.0f,height=%.0f,warmup_s=%.1f,total_s=%.1f\n",
+          "width=%.0f,height=%.0f,warmup_s=%.1f,total_s=%.1f,"
+          "shadow_mode=%s\n",
           cfg.fixed_scene ? "scale" : "scripted", kSeed,
           settings_.render_distance, benchmark_frame.width,
           benchmark_frame.height, cfg.fixed_scene ? cfg.warmup_seconds : 0.0f,
-          bench_seconds);
+          bench_seconds,
+          voxel::bench::shadow_mode_name(benchmark_shadow_flags_));
       std::fflush(stdout);
       ws::core::info("voxel: benchmark mode={} total={} s",
                      cfg.fixed_scene ? "fixed-scene scale" : "scripted",
@@ -404,7 +408,10 @@ class VoxelApp final : public ws::ui::App {
       r2d::begin(); r2d::set_layer(0);
       r2d::draw_quad(0, 0, frame.width, frame.height, r2d::rgba(135,196,250));
       const auto cam = voxel::begin_scene(player_, settings_.fov_degrees, settings_.render_distance);
-      voxel::draw_world(voxel_renderer_, tile_textures_, cam, frame.width / frame.height);
+      voxel::draw_world(voxel_renderer_, tile_textures_, cam,
+                         frame.width / frame.height, nullptr,
+                         benchmark_shadow_flags_.cast,
+                         benchmark_shadow_flags_.receive);
       r2d::end();
       r2d::begin(); r2d::set_layer(10);
       draw_hud(frame);
@@ -424,7 +431,9 @@ class VoxelApp final : public ws::ui::App {
 
       const auto cam = voxel::begin_scene(player_, settings_.fov_degrees, settings_.render_distance);
       voxel::draw_world(voxel_renderer_, tile_textures_, cam,
-                         frame.width / frame.height);
+                         frame.width / frame.height, nullptr,
+                         benchmark_shadow_flags_.cast,
+                         benchmark_shadow_flags_.receive);
       r2d::end();
 
       r2d::begin();
@@ -457,7 +466,10 @@ class VoxelApp final : public ws::ui::App {
       r2d::begin(); r2d::set_layer(0);
       r2d::draw_quad(0, 0, frame.width, frame.height, r2d::rgba(135,196,250));
       const auto cam = voxel::begin_scene(player_, settings_.fov_degrees, settings_.render_distance);
-      voxel::draw_world(voxel_renderer_, tile_textures_, cam, frame.width / frame.height);
+      voxel::draw_world(voxel_renderer_, tile_textures_, cam,
+                         frame.width / frame.height, nullptr,
+                         benchmark_shadow_flags_.cast,
+                         benchmark_shadow_flags_.receive);
       r2d::end();
       r2d::begin(); r2d::set_layer(10); draw_hud(frame); draw_inventory_panels(frame); r2d::end();
       return;
@@ -567,7 +579,9 @@ class VoxelApp final : public ws::ui::App {
     const auto cam = voxel::begin_scene(player_, settings_.fov_degrees, settings_.render_distance);
     const auto draw_t0 = std::chrono::steady_clock::now();
     voxel::draw_world(voxel_renderer_, tile_textures_, cam,
-                       frame.width / frame.height, &last_counters_);
+                       frame.width / frame.height, &last_counters_,
+                       benchmark_shadow_flags_.cast,
+                       benchmark_shadow_flags_.receive);
     voxel::draw_target_outline(target_outline_, target_hit_);
     const auto draw_t1 = std::chrono::steady_clock::now();
     r2d::end();
@@ -1128,6 +1142,7 @@ class VoxelApp final : public ws::ui::App {
   bool gpu_frame_valid_ = false;
   std::chrono::steady_clock::time_point percentile_clock_{};
   voxel::bench::Driver bench_{};
+  voxel::bench::ShadowFlags benchmark_shadow_flags_{};
   std::uint32_t bench_frame_ = 0;
 };
 
