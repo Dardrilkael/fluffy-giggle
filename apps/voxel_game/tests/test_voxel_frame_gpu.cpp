@@ -646,11 +646,11 @@ TEST_CASE("async meshing: rapid edits publish only the newest chunk revision") {
 
     std::vector<voxel::CpuMeshData> expected_tiles;
     rig.world().build_chunk_meshes(cx, cz, expected_tiles);
-    std::uint64_t expected_indices = 0;
+    std::array<std::uint64_t, voxel::atlas::kTileCount> expected_indices{};
     std::uint64_t expected_vertices = 0;
-    for (const auto& tile : expected_tiles) {
-        expected_indices += tile.indices.size();
-        expected_vertices += tile.vertices.size();
+    for (std::size_t tile = 0; tile < expected_tiles.size(); ++tile) {
+        expected_indices[tile] = expected_tiles[tile].indices.size();
+        expected_vertices += expected_tiles[tile].vertices.size();
     }
 
     // Completion is asynchronous; pump only from this render/test thread.
@@ -660,13 +660,12 @@ TEST_CASE("async meshing: rapid edits publish only the newest chunk revision") {
     bool matched = false;
     while (std::chrono::steady_clock::now() < deadline) {
         rig.async_renderer().process_completed(1);
-        std::uint64_t actual_indices = 0;
-        std::uint64_t actual_vertices = 0;
+        std::array<std::uint64_t, voxel::atlas::kTileCount> actual_indices{};
         for (const auto& mesh : rig.async_renderer().chunk_meshes()) {
-            if (mesh.cx == cx && mesh.cz == cz) {
-                actual_indices += mesh.index_count;
-                // GPU mesh records retain the index count; vertex count is
-                // intentionally not duplicated in the renderer's hot record.
+            if (mesh.cx == cx && mesh.cz == cz && mesh.tile >= 0 &&
+                mesh.tile < voxel::atlas::kTileCount) {
+                actual_indices[static_cast<std::size_t>(mesh.tile)] +=
+                    mesh.index_count;
             }
         }
         if (actual_indices == expected_indices) {
