@@ -37,7 +37,7 @@ only as a deliberate API migration, never by duplicating the implementation.
 - [x] Keep `WS_VOXEL_BENCH` as the repeatable CPU benchmark.
 - [x] Measure world generation, CPU meshing and CPU upload staging/submission separately; report payload bytes and generated vertex/index counts.
 - [x] Report rolling frame-time p50/p95/p99 and per-benchmark-phase percentiles.
-- [ ] Add GPU timestamps; draw timing is still CPU command submission, and upload timing is CPU staging/API-call time, not GPU completion.
+- [x] Add per-frame-slot Vulkan timestamp queries around the submitted shadow + main render passes; collect only after the slot fence, without stalling or including presentation/vsync. Unsupported queues report GPU timing unavailable.
 
 ### 1 — CPU meshing and renderer ownership
 
@@ -164,7 +164,7 @@ Choose by measurement.
 | Dirty, queued and stale chunks | Async queue health |
 | Visible chunks and draw calls | Culling/submission efficiency |
 | Frame time p50/p95/p99 | Smoothness and spikes |
-| GPU frame time | Actual rendering bottleneck |
+| GPU frame time | Actual submitted graphics work; Vulkan timestamp interval, excluding CPU recording and presentation |
 | Resident bytes/chunk | Memory efficiency |
 
 Every performance change needs before/after measurements using the same seed,
