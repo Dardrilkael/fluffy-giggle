@@ -163,11 +163,13 @@ void VoxelRenderer::rebuild_chunk(const World& world, int cx, int cz) {
       ++it;
     }
   }
-  auto cpu_meshes = world.build_chunk_meshes(cx, cz);
-  for (auto& cpu : cpu_meshes) {
+  world.build_chunk_meshes(cx, cz, cpu_mesh_scratch_);
+  for (std::size_t tile = 0; tile < cpu_mesh_scratch_.size(); ++tile) {
+    const CpuMeshData& cpu = cpu_mesh_scratch_[tile];
+    if (cpu.vertices.empty()) continue;
     ws::ui::r3d::MeshData upload;
-    upload.vertices.reserve(cpu.geometry.vertices.size());
-    for (const CpuMeshVertex& source : cpu.geometry.vertices) {
+    upload.vertices.reserve(cpu.vertices.size());
+    for (const CpuMeshVertex& source : cpu.vertices) {
       ws::ui::r3d::Vertex3D vertex{};
       for (int axis = 0; axis < 3; ++axis) {
         vertex.pos[axis] = source.pos[axis];
@@ -177,14 +179,14 @@ void VoxelRenderer::rebuild_chunk(const World& world, int cx, int cz) {
       vertex.uv[1] = source.uv[1];
       upload.vertices.push_back(vertex);
     }
-    upload.indices = std::move(cpu.geometry.indices);
+    upload.indices = cpu.indices;
     const auto mesh = ws::ui::r3d::create_mesh(upload);
     if (!mesh.has_value()) {
       ws::core::log_error(mesh.error());
       continue;
     }
     chunk_meshes_.push_back(ChunkMesh{
-        cx, cz, cpu.tile, *mesh,
+        cx, cz, static_cast<int>(tile), *mesh,
         static_cast<std::uint32_t>(upload.indices.size())});
   }
 }
@@ -198,6 +200,7 @@ void VoxelRenderer::destroy_all() {
   for (const ChunkMesh& chunk : chunk_meshes_)
     if (chunk.mesh.id != 0u) (void)ws::ui::r3d::destroy_mesh(chunk.mesh);
   chunk_meshes_.clear();
+  // Keep CPU scratch capacity: destroy_all is also used before full rebuilds.
 }
 
 void draw_world(const VoxelRenderer& renderer,
