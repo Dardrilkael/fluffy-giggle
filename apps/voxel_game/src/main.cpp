@@ -265,7 +265,7 @@ class VoxelApp final : public ws::ui::App {
     }
 
     // --- the chunk meshes (the renderer's one-time upload) -----------------
-    world_.rebuild_all();
+    voxel_renderer_.rebuild_all(world_);
 
     // --- the HUD font -------------------------------------------------------
     font_ = r2d::load_default_font(16.0f,
@@ -355,7 +355,7 @@ class VoxelApp final : public ws::ui::App {
       r2d::begin(); r2d::set_layer(0);
       r2d::draw_quad(0, 0, frame.width, frame.height, r2d::rgba(135,196,250));
       const auto cam = voxel::begin_scene(player_, settings_.fov_degrees, settings_.render_distance);
-      voxel::draw_world(world_, tile_textures_, cam, frame.width / frame.height);
+      voxel::draw_world(voxel_renderer_, tile_textures_, cam, frame.width / frame.height);
       r2d::end();
       r2d::begin(); r2d::set_layer(10);
       draw_hud(frame);
@@ -374,7 +374,7 @@ class VoxelApp final : public ws::ui::App {
       r2d::end();
 
       const auto cam = voxel::begin_scene(player_, settings_.fov_degrees, settings_.render_distance);
-      voxel::draw_world(world_, tile_textures_, cam,
+      voxel::draw_world(voxel_renderer_, tile_textures_, cam,
                          frame.width / frame.height);
       r2d::end();
 
@@ -408,7 +408,7 @@ class VoxelApp final : public ws::ui::App {
       r2d::begin(); r2d::set_layer(0);
       r2d::draw_quad(0, 0, frame.width, frame.height, r2d::rgba(135,196,250));
       const auto cam = voxel::begin_scene(player_, settings_.fov_degrees, settings_.render_distance);
-      voxel::draw_world(world_, tile_textures_, cam, frame.width / frame.height);
+      voxel::draw_world(voxel_renderer_, tile_textures_, cam, frame.width / frame.height);
       r2d::end();
       r2d::begin(); r2d::set_layer(10); draw_hud(frame); draw_inventory_panels(frame); r2d::end();
       return;
@@ -517,7 +517,7 @@ class VoxelApp final : public ws::ui::App {
 
     const auto cam = voxel::begin_scene(player_, settings_.fov_degrees, settings_.render_distance);
     const auto draw_t0 = std::chrono::steady_clock::now();
-    voxel::draw_world(world_, tile_textures_, cam,
+    voxel::draw_world(voxel_renderer_, tile_textures_, cam,
                        frame.width / frame.height, &last_counters_);
     voxel::draw_target_outline(target_outline_, target_hit_);
     const auto draw_t1 = std::chrono::steady_clock::now();
@@ -951,19 +951,19 @@ class VoxelApp final : public ws::ui::App {
   void rebuild_around(int x, int z) {
     const int cx = x / voxel::kChunkSizeX;
     const int cz = z / voxel::kChunkSizeZ;
-    world_.rebuild_chunk(cx, cz);
+    voxel_renderer_.rebuild_chunk(world_, cx, cz);
     // If the block sits on a chunk boundary, rebuild the neighbor too.
     if (x % voxel::kChunkSizeX == 0 && cx > 0) {
-      world_.rebuild_chunk(cx - 1, cz);
+      voxel_renderer_.rebuild_chunk(world_, cx - 1, cz);
     }
     if (x % voxel::kChunkSizeX == voxel::kChunkSizeX - 1 && cx < voxel::kWorldChunksX - 1) {
-      world_.rebuild_chunk(cx + 1, cz);
+      voxel_renderer_.rebuild_chunk(world_, cx + 1, cz);
     }
     if (z % voxel::kChunkSizeZ == 0 && cz > 0) {
-      world_.rebuild_chunk(cx, cz - 1);
+      voxel_renderer_.rebuild_chunk(world_, cx, cz - 1);
     }
     if (z % voxel::kChunkSizeZ == voxel::kChunkSizeZ - 1 && cz < voxel::kWorldChunksZ - 1) {
-      world_.rebuild_chunk(cx, cz + 1);
+      voxel_renderer_.rebuild_chunk(world_, cx, cz + 1);
     }
   }
 
@@ -999,6 +999,7 @@ class VoxelApp final : public ws::ui::App {
   static constexpr int kSoundPlace = 1;
 
   voxel::World world_;
+  voxel::VoxelRenderer voxel_renderer_;
   voxel::Player player_;
   voxel::settings_menu::Settings settings_{};
   bool settings_open_ = false;
