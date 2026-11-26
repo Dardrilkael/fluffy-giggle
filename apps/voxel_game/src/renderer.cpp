@@ -204,13 +204,15 @@ void VoxelRenderer::upload_result(int cx,int cz,const std::vector<CpuMeshData>& 
 }
 void VoxelRenderer::process_completed(std::size_t max_jobs) {
   std::size_t count=0;
-  for(std::size_t slot=0;slot<kChunkCount&&count<max_jobs;++slot) {
+  for(std::size_t offset=0;offset<kChunkCount&&count<max_jobs;++offset) {
+    const std::size_t slot=(upload_cursor_+offset)%kChunkCount;
     MeshResult result;
     { std::lock_guard<std::mutex> lock(queue_mutex_); if(!completed_[slot].ready) continue;
       if(completed_[slot].revision!=revisions_[slot]){completed_[slot].ready=false;continue;}
       result=std::move(completed_[slot]);completed_[slot].ready=false;
     }
-    upload_result(static_cast<int>(slot%kWorldChunksX),static_cast<int>(slot/kWorldChunksX),result.tiles);++count;
+    upload_result(static_cast<int>(slot%kWorldChunksX),static_cast<int>(slot/kWorldChunksX),result.tiles);
+    ++count; upload_cursor_=(slot+1)%kChunkCount;
   }
 }
 void VoxelRenderer::rebuild_chunk(const World& world, int cx, int cz) {
