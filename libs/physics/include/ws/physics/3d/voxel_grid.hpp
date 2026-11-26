@@ -108,11 +108,30 @@ class VoxelGrid3D {
       }
     }
 
+    for (int axis = 0; axis < 3; ++axis) {
+      const int cell_min = desc_.origin[static_cast<std::size_t>(axis)];
+      const int cell_max = cell_min +
+                           desc_.dimensions[static_cast<std::size_t>(axis)];
+      if (step[axis] == 0 &&
+          (cell[axis] < cell_min || cell[axis] >= cell_max)) {
+        return out;
+      }
+    }
+
     int entered_axis = -1;
     int entered_step = 0;
     float distance = 0.0f;
-    const int max_steps =
-        desc_.dimensions.x + desc_.dimensions.y + desc_.dimensions.z + 4;
+    const auto outside_steps = [](int value, int origin_cell) noexcept {
+      const long long diff = static_cast<long long>(value) - origin_cell;
+      return diff < 0 ? -diff : diff;
+    };
+    const long long step_budget =
+        static_cast<long long>(desc_.dimensions.x) + desc_.dimensions.y +
+        desc_.dimensions.z + outside_steps(cell[0], desc_.origin.x) +
+        outside_steps(cell[1], desc_.origin.y) +
+        outside_steps(cell[2], desc_.origin.z) + 4;
+    const int max_steps = static_cast<int>(
+        std::min(step_budget, 1'000'000LL));
     for (int guard = 0; guard < max_steps; ++guard) {
       if (is_solid(cell[0], cell[1], cell[2])) {
         out.hit = true;
@@ -183,6 +202,11 @@ class VoxelGrid3D {
     if (!valid()) return result;
     skin = std::max(0.0f, skin);
 
+    // Recover from a small pre-existing overlap first (e.g. after a
+    // teleported spawn or edited block). The bounded pass count prevents
+    // pathological geometry from creating an unbounded loop.
+    depenetrate(result, skin);
+
     // Resolve vertical motion first, then horizontal axes. A blocked axis
     // loses only its own displacement; the remaining axes still slide.
     sweep_axis(result, 1, displacement.y, skin);
@@ -192,6 +216,67 @@ class VoxelGrid3D {
   }
 
  private:
+  void depenetrate(MoveResult& result, float skin) const noexcept {
+    for (int pass = 0; pass < 8; ++pass) {
+      const Aabb& box = result.bounds;
+      const int x0 = static_cast<int>(std::floor(box.min.x));
+      const int y0 = static_cast<int>(std::floor(box.min.y));
+      const int z0 = static_cast<int>(std::floor(box.min.z));
+      const int x1 = static_cast<int>(std::floor(box.max.x));
+      const int y1 = static_cast<int>(std::floor(box.max.y));
+      const int z1 = static_cast<int>(std::floor(box.max.z));
+      float best = std::numeric_limits<float>::infinity();
+      int best_axis = -1;
+      float best_sign = 0.0f;
+      for (int y = y0; y <= y1; ++y) {
+        for (int z = z0; z <= z1; ++z) {
+          for (int x = x0; x <= x1; ++x) {
+            if (!is_solid(x, y, z)) continue;
+            const float cell_min[3] = {static_cast<float>(x),
+                                       static_cast<float>(y),
+                                       static_cast<float>(z)};
+            const float cell_max[3] = {cell_min[0] + 1.0f,
+                                       cell_min[1] + 1.0f,
+                                       cell_min[2] + 1.0f};
+            const float box_min[3] = {box.min.x, box.min.y, box.min.z};
+            const float box_max[3] = {box.max.x, box.max.y, box.max.z};
+            bool overlaps = true;
+            for (int axis = 0; axis < 3; ++axis) {
+              if (box_max[axis] <= cell_min[axis] ||
+                  box_min[axis] >= cell_max[axis]) {
+                overlaps = false;
+                break;
+              }
+            }
+            if (!overlaps) continue;
+            for (int axis = 0; axis < 3; ++axis) {
+              const float push_negative = box_max[axis] - cell_min[axis];
+              const float push_positive = cell_max[axis] - box_min[axis];
+              if (push_negative < best) {
+                best = push_negative;
+                best_axis = axis;
+                best_sign = -1.0f;
+              }
+              if (push_positive < best) {
+                best = push_positive;
+                best_axis = axis;
+                best_sign = 1.0f;
+              }
+            }
+          }
+        }
+      }
+      if (best_axis < 0 || !std::isfinite(best)) break;
+      const float applied = (best + skin) * best_sign;
+      result.bounds.min[static_cast<std::size_t>(best_axis)] += applied;
+      result.bounds.max[static_cast<std::size_t>(best_axis)] += applied;
+      result.applied[static_cast<std::size_t>(best_axis)] += applied;
+      if (best_axis == 0) result.hit_x = true;
+      if (best_axis == 1) result.hit_y = true;
+      if (best_axis == 2) result.hit_z = true;
+    }
+  }
+
   void sweep_axis(MoveResult& result, int axis, float delta,
                   float skin) const noexcept {
     if (std::abs(delta) < 1.0e-8f) return;
@@ -258,7 +343,7 @@ class VoxelGrid3D {
       if (axis == 1) result.hit_y = true;
       if (axis == 2) result.hit_z = true;
     }
-    result.applied[static_cast<std::size_t>(axis)] = applied;
+    result.applied[static_cast<std::size_t>(axis)] += applied;
     result.bounds.min[static_cast<std::size_t>(axis)] += applied;
     result.bounds.max[static_cast<std::size_t>(axis)] += applied;
   }
