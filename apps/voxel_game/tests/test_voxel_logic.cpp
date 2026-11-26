@@ -1320,6 +1320,8 @@ TEST_CASE("perf: frame evidence structs start clear and duration conversion is e
   CHECK(timings.cpu_mesh_ms == 0.0f);
   CHECK(timings.upload_ms == 0.0f);
   CHECK(timings.draw_ms == 0.0f);
+  CHECK(timings.gpu_frame_ms == 0.0f);
+  CHECK_FALSE(timings.gpu_frame_valid);
   CHECK(timings.upload_bytes == 0);
   CHECK(timings.mesh_vertices == 0);
   CHECK(timings.mesh_indices == 0);
