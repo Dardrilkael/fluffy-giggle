@@ -205,6 +205,7 @@ void Renderer2D::record_mesh(const r3d::MeshMaterial& material,
     cmd.shininess = material.shininess;
     cmd.casts_shadow = material.casts_shadow;
     cmd.receives_shadow = material.receives_shadow;
+    cmd.depth_write = material.depth_write;
     for (int i = 0; i < 3; ++i) {
         cmd.bound_center[i] = entry.bound_center[i];
     }
