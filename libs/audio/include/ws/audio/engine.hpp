@@ -77,6 +77,13 @@ class AudioEngine {
   [[nodiscard]] ws::core::Result<SourceHandle> play(SoundHandle sound,
                                                     float gain = 1.0f);
 
+  // Copies a caller-owned PCM one-shot into a transient backend buffer.
+  // The buffer is retired with the source on stop() or update(). This is
+  // intended for short DSP-processed effects; use SoundHandle for assets
+  // reused many times without per-play buffer creation.
+  [[nodiscard]] ws::core::Result<SourceHandle> play(
+      const SoundDesc& desc, float gain = 1.0f);
+
   // Stops playback and frees the slot. Stopping a finished source is the
   // same operation: the handle goes stale either way.
   [[nodiscard]] ws::core::Status stop(SourceHandle source);
