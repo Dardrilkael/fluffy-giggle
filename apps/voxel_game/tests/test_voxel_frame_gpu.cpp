@@ -204,8 +204,7 @@ public:
                                ws::ui::r2d::rgba(135, 196, 250));
         ws::ui::r2d::end();
 
-        const auto cam = voxel::begin_scene(
-            player_, static_cast<float>(kW) / static_cast<float>(kH));
+        const auto cam = voxel::begin_scene(player_);
         voxel::draw_world(*world_, tiles_, cam,
                           static_cast<float>(kW) / static_cast<float>(kH));
         ws::ui::r2d::end();
