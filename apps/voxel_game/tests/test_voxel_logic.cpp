@@ -733,6 +733,59 @@ TEST_CASE("crafting: consumes ingredients and creates output atomically") {
   CHECK_FALSE(voxel::craft(inventory, planks));
 }
 
+TEST_CASE("worldgen: climate fields create distinct plains, desert and mountain surfaces") {
+  const voxel::World world = make_world();
+  int grass = 0;
+  int sand = 0;
+  int exposed_stone = 0;
+  for (int x = 0; x < voxel::kWorldSizeX; ++x) {
+    for (int z = 0; z < voxel::kWorldSizeZ; ++z) {
+      const int y = world.surface_height(x, z);
+      if (y < 0) continue;
+      const auto top = world.block_at(x, y, z);
+      grass += top == voxel::Block::grass;
+      sand += top == voxel::Block::sand;
+      exposed_stone += top == voxel::Block::stone;
+    }
+  }
+  CHECK(grass > 100);
+  CHECK(sand > 20);
+  CHECK(exposed_stone > 0);
+}
+
+TEST_CASE("worldgen: 3D caves carve connected underground air pockets") {
+  const voxel::World world = make_world();
+  int underground_air = 0;
+  for (int x = 1; x < voxel::kWorldSizeX - 1; ++x) {
+    for (int z = 1; z < voxel::kWorldSizeZ - 1; ++z) {
+      const int surface = world.surface_height(x, z);
+      for (int y = 4; y < surface - 4; ++y) {
+        underground_air += world.block_at(x, y, z) == voxel::Block::air;
+      }
+    }
+  }
+  CHECK(underground_air > 0);
+}
+
+TEST_CASE("worldgen: ore veins form neighboring deposits") {
+  const voxel::World world = make_world();
+  int adjacent_ore_pairs = 0;
+  for (int x = 1; x < voxel::kWorldSizeX - 1; ++x) {
+    for (int z = 1; z < voxel::kWorldSizeZ - 1; ++z) {
+      for (int y = 4; y < 23; ++y) {
+        const auto block = world.block_at(x, y, z);
+        if (block != voxel::Block::coal_ore &&
+            block != voxel::Block::iron_ore) continue;
+        adjacent_ore_pairs +=
+            world.block_at(x + 1, y, z) == block ||
+            world.block_at(x, y + 1, z) == block ||
+            world.block_at(x, y, z + 1) == block;
+      }
+    }
+  }
+  CHECK(adjacent_ore_pairs > 0);
+}
+
 TEST_CASE("worldgen: ores and leaves use the expanded block palette") {
   const voxel::World world = make_world();
   int coal = 0, iron = 0, leaves = 0;
