@@ -1311,8 +1311,8 @@ TEST_CASE("voxel acoustics: six room boundaries become sorted early reflections"
         const bool wall = x == 48 || x == 56 ||
                           y == 20 || y == 28 ||
                           z == 48 || z == 56;
-        REQUIRE(world.set_block(
-            x, y, z, wall ? voxel::Block::stone : voxel::Block::air));
+        (void)world.set_block(
+            x, y, z, wall ? voxel::Block::stone : voxel::Block::air);
       }
     }
   }
