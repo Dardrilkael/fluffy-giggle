@@ -820,6 +820,72 @@ class VoxelApp final : public ws::ui::App {
     }
   }
 
+  // --- the settings panel ------------------------------------------------------------
+  void settings_action(const r2d::FrameSize& frame) {
+    if (!clicked_) return;
+    clicked_ = false;
+    const int index = voxel::settings_menu::selected(
+        static_cast<float>(frame.width), static_cast<float>(frame.height),
+        mouse_x_, mouse_y_);
+    if (index < 0) return;
+    const auto sliders = voxel::settings_menu::layout(
+        static_cast<float>(frame.width), static_cast<float>(frame.height));
+    const float value = voxel::settings_menu::value_from_x(
+        sliders[static_cast<std::size_t>(index)], mouse_x_);
+    if (index == 0) {
+      settings_.mouse_sensitivity = value;
+      player_.set_mouse_sensitivity(value);
+    } else if (index == 1) {
+      settings_.fov_degrees = value;
+    } else {
+      settings_.render_distance = value;
+    }
+  }
+
+  void draw_settings_panel(const r2d::FrameSize& frame) {
+    if (font_.empty()) return;
+    const float x = (frame.width - voxel::settings_menu::kPanelWidth) * 0.5f;
+    const float y = (frame.height - voxel::settings_menu::kPanelHeight) * 0.5f;
+    r2d::draw_quad(0, 0, frame.width, frame.height, r2d::rgba(7,10,15,155));
+    r2d::draw_rounded_quad(x, y + 5, voxel::settings_menu::kPanelWidth,
+                           voxel::settings_menu::kPanelHeight, 12, r2d::rgba(0,0,0,110));
+    r2d::draw_rounded_quad(x, y, voxel::settings_menu::kPanelWidth,
+                           voxel::settings_menu::kPanelHeight, 12, r2d::rgba(25,29,35,250));
+    r2d::draw_rounded_quad(x + 2, y + 2, voxel::settings_menu::kPanelWidth - 4,
+                           48, 10, r2d::rgba(42,49,57,255));
+    (void)r2d::draw_text(x + 22, y + 15, "SETTINGS", font_, r2d::rgba(247,244,232));
+    (void)r2d::draw_text(x + 365, y + 17, "P / ESC  CLOSE", font_, r2d::rgba(177,187,174));
+    const auto sliders = voxel::settings_menu::layout(
+        static_cast<float>(frame.width), static_cast<float>(frame.height));
+    const float values[voxel::settings_menu::kSliderCount] = {
+        settings_.mouse_sensitivity, settings_.fov_degrees, settings_.render_distance};
+    const char* labels[voxel::settings_menu::kSliderCount] = {
+        "Mouse sensitivity", "Field of view", "Render distance"};
+    char formatted[voxel::settings_menu::kSliderCount][32]{};
+    std::snprintf(formatted[0], sizeof(formatted[0]), "%.4f", values[0]);
+    std::snprintf(formatted[1], sizeof(formatted[1]), "%.0f deg", values[1]);
+    std::snprintf(formatted[2], sizeof(formatted[2]), "%.0f blocks", values[2]);
+    for (int i = 0; i < voxel::settings_menu::kSliderCount; ++i) {
+      const auto& slider = sliders[static_cast<std::size_t>(i)];
+      const float t = (values[i] - slider.minimum) / (slider.maximum - slider.minimum);
+      const float knob_x = slider.bounds.x + t * slider.bounds.w;
+      (void)r2d::draw_text(slider.bounds.x, slider.bounds.y - 30.0f, labels[i],
+                           font_, r2d::rgba(232,235,225));
+      (void)r2d::draw_text(slider.bounds.x + slider.bounds.w - 90.0f,
+                           slider.bounds.y - 30.0f, formatted[i], font_,
+                           r2d::rgba(177,211,151));
+      r2d::draw_rounded_quad(slider.bounds.x, slider.bounds.y, slider.bounds.w,
+                             slider.bounds.h, 6, r2d::rgba(62,70,72,255));
+      r2d::draw_rounded_quad(slider.bounds.x, slider.bounds.y, slider.bounds.w * t,
+                             slider.bounds.h, 6, r2d::rgba(112,151,83,255));
+      r2d::draw_rounded_quad(knob_x - 7.0f, slider.bounds.y - 5.0f, 14.0f,
+                             slider.bounds.h + 10.0f, 6, r2d::rgba(226,235,211,255));
+    }
+    (void)r2d::draw_text(x + 32, y + 272,
+        "Click a track to adjust  |  Changes apply immediately",
+        font_, r2d::rgba(164,174,164));
+  }
+
   // --- the pause menu ----------------------------------------------------------------
   // The layout + hit test live in menu.hpp (engine-free, pinned by the
   // logic suite); this side owns the state (paused_, the cursor mode,
@@ -921,6 +987,8 @@ class VoxelApp final : public ws::ui::App {
 
   voxel::World world_;
   voxel::Player player_;
+  voxel::settings_menu::Settings settings_{};
+  bool settings_open_ = false;
   ws::ui::r3d::Mesh target_outline_{};
   voxel::World::RayHit target_hit_{};
   int hotbar_ = 0;
