@@ -5,8 +5,9 @@
 # set: ui, physics, audio - the bounce app's composition.
 ws_add_app(voxel_game DEPENDS ws::ui ws::physics ws::audio)
 
-# The headless logic suite: worldgen determinism, the culling rule,
-# the shared DDA raycast, and direct-grid collision integration. LINK
+# The headless logic suite: worldgen determinism, independent frustum
+# oracles, DDA raycasts, direct-grid movement, deterministic player replay,
+# and menu/settings geometry. LINK
 # names the default-link override (ws::ui - the suite's TUs include
 # world.cpp, which includes ws/ui headers), and DEPENDS carries the rest
 # (ws_add_test's LINK is SINGLE-value).
