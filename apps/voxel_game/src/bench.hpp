@@ -90,7 +90,7 @@ class Driver {
         if (elapsed_ - last_report_ >= 1.0f) {
             const float n = static_cast<float>(frames_);
             std::printf("%s,%.1f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,"
-                        "%llu,%llu,%llu,%u,%u,%u,%u,%u,%u,%u,%u\n",
+                        "%llu,%llu,%llu,%u,%u,%u,%u,%u,%u,%u\n",
                         phase_name(), last_report_ + 1.0f,
                         static_cast<float>(frames_), acc_frame_ms_ / n,
                         acc_phys_ms_ / n, acc_mesh_ms_ / n,
