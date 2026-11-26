@@ -17,7 +17,7 @@ if(MSVC)
   target_compile_definitions(ws_core PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
-ws_add_test(core SOURCES tests/test_core.cpp)
+ws_add_test(core SOURCES tests/test_core.cpp tests/test_time.cpp)
 
 # The test also uses std::fopen/fclose in file sink tests.
 if(MSVC)
