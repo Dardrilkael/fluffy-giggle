@@ -3,6 +3,7 @@
 
 #include <array>
 #include <condition_variable>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -90,7 +91,9 @@ class AsyncChunkMesher {
 
   // Transfers the latest completed CPU result to the caller. This is the
   // only consumer operation; callers decide when/how to upload it.
-  bool take_completed(int cx, int cz, std::vector<CpuMeshData>& out) {
+  bool take_completed(int cx, int cz, std::vector<CpuMeshData>& out,
+                      float& mesh_ms, std::uint32_t& vertex_count,
+                      std::uint32_t& index_count) {
     if (cx < 0 || cx >= kWorldChunksX || cz < 0 || cz >= kWorldChunksZ)
       return false;
     std::lock_guard<std::mutex> lock(mutex_);
@@ -103,6 +106,9 @@ class AsyncChunkMesher {
       return false;
     }
     out = std::move(result.tiles);
+    mesh_ms = result.mesh_ms;
+    vertex_count = result.vertex_count;
+    index_count = result.index_count;
     result.ready = false;
     return true;
   }
@@ -122,6 +128,9 @@ class AsyncChunkMesher {
   struct Result {
     bool ready = false;
     std::uint64_t revision = 0;
+    float mesh_ms = 0.0f;
+    std::uint32_t vertex_count = 0;
+    std::uint32_t index_count = 0;
     std::vector<CpuMeshData> tiles;
   };
 
@@ -155,7 +164,14 @@ class AsyncChunkMesher {
 
       Result result;
       result.revision = job.snapshot.revision;
+      const auto mesh_start = std::chrono::steady_clock::now();
       mesh_chunk_snapshot(job.snapshot, result.tiles);
+      result.mesh_ms = std::chrono::duration<float, std::milli>(
+          std::chrono::steady_clock::now() - mesh_start).count();
+      for (const CpuMeshData& tile : result.tiles) {
+        result.vertex_count += static_cast<std::uint32_t>(tile.vertices.size());
+        result.index_count += static_cast<std::uint32_t>(tile.indices.size());
+      }
       const std::size_t slot = slot_of(job.snapshot.cx, job.snapshot.cz);
       {
         std::lock_guard<std::mutex> lock(mutex_);
