@@ -17,6 +17,13 @@ struct PlayerTuning {
   float jump_speed = 7.75f;
   float walk_speed = 6.0f;
   float sprint_speed = 10.5f;
+  // Horizontal acceleration and friction (world units / second^2).
+  // Ground control is responsive; air control is deliberately weaker so
+  // jumps preserve momentum instead of instantly changing direction.
+  float ground_acceleration = 32.0f;
+  float ground_friction = 18.0f;
+  float air_acceleration = 9.0f;
+  float air_drag = 1.2f;
   float max_fall = 55.0f;
   float eye_height = 1.72f;
   float mouse_sensitivity = 0.0025f;
