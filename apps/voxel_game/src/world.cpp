@@ -375,8 +375,7 @@ bool is_solid(Block block) {
 }
 
 void World::generate(std::uint32_t seed) {
-  chunks_.assign(static_cast<std::size_t>(kWorldChunksX) * kWorldChunksZ, {});
-  for (auto& chunk : chunks_) chunk.assign(kBlocksPerChunk, Block::air);
+  blocks_.reset(Block::air);
 
   // Generate columns in world coordinates so every field is continuous
   // across chunk boundaries. Climate fields choose biomes; independent
@@ -428,7 +427,7 @@ void World::generate(std::uint32_t seed) {
       const int cz = wz / kChunkSizeZ;
       const int lx = wx % kChunkSizeX;
       const int lz = wz % kChunkSizeZ;
-      auto& chunk = chunks_[static_cast<std::size_t>(cz * kWorldChunksX + cx)];
+      auto chunk = blocks_.chunk(cx, cz);
 
       for (int y = kWorldFloor; y <= height; ++y) {
         Block block = Block::stone;
@@ -494,32 +493,16 @@ void World::generate(std::uint32_t seed) {
 }
 
 Block World::block_at(int x, int y, int z) const {
-  if (x < 0 || x >= kWorldSizeX || z < 0 || z >= kWorldSizeZ || y < 0 ||
-      y >= kChunkSizeY) {
-    return Block::air;
-  }
-  const int cx = x / kChunkSizeX;
-  const int cz = z / kChunkSizeZ;
-  const auto& chunk =
-      chunks_[static_cast<std::size_t>(cz * kWorldChunksX + cx)];
-  return chunk[static_cast<std::size_t>(block_index(x % kChunkSizeX, y,
-                                                    z % kChunkSizeZ))];
+  const Block* block = blocks_.try_at(x, y, z);
+  return block != nullptr ? *block : Block::air;
 }
 
 bool World::set_block(int x, int y, int z, Block block) {
-  if (x < 0 || x >= kWorldSizeX || z < 0 || z >= kWorldSizeZ || y < 0 ||
-      y >= kChunkSizeY) {
+  Block* slot = blocks_.try_at(x, y, z);
+  if (slot == nullptr || *slot == block) {
     return false;
   }
-  const int cx = x / kChunkSizeX;
-  const int cz = z / kChunkSizeZ;
-  auto& chunk = chunks_[static_cast<std::size_t>(cz * kWorldChunksX + cx)];
-  auto& slot = chunk[static_cast<std::size_t>(block_index(x % kChunkSizeX, y,
-                                                          z % kChunkSizeZ))];
-  if (slot == block) {
-    return false;
-  }
-  slot = block;
+  *slot = block;
   return true;
 }
 
