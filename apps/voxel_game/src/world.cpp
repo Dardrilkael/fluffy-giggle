@@ -389,112 +389,112 @@ void World::generate(std::uint32_t seed) {
         const int wz = chunk_origin_z + lz;
         for (int lx = 0; lx < kChunkSizeX; ++lx) {
           const int wx = chunk_origin_x + lx;
-      const float continental = fbm2d(wx * 0.010f, wz * 0.010f,
-                                     seed ^ 0x31415926u);
-      const float hills = fbm2d(wx * 0.027f, wz * 0.027f,
-                              seed ^ 0x27182818u);
-      const float ridge_noise = value_noise2d(wx * 0.018f, wz * 0.018f,
-                                        seed ^ 0xA341316Cu);
-      const float ridge = 1.0f - std::abs(ridge_noise * 2.0f - 1.0f);
-      const float mountain_mask = smooth01((continental - 0.48f) * 3.2f);
-      const float temperature = fbm2d(wx * 0.009f, wz * 0.009f,
-                                    seed ^ 0xB5297A4Du);
-      const float moisture = fbm2d(wx * 0.013f, wz * 0.013f,
-                                 seed ^ 0x68E31DA4u);
-      const bool desert = temperature > 0.53f && moisture < 0.43f;
-      const bool forest = moisture > 0.54f && temperature > 0.30f;
-      const bool mountains = mountain_mask > 0.48f && ridge > 0.38f;
-
-      float terrain = 13.0f + (continental - 0.5f) * 19.0f +
-                      (hills - 0.5f) * 11.0f +
-                      mountain_mask * ridge * 23.0f;
-      terrain = std::clamp(terrain, 3.0f, 46.0f);
-
-      // A low-frequency warped noise field creates winding river corridors.
-      // The channel floor approaches the water plane; nearby banks become sand.
-      const float river_field = value_noise2d(wx * 0.016f, wz * 0.016f,
-                                        seed ^ 0xC0FFEE11u);
-      const float river_distance = std::abs(river_field - 0.5f);
-      const bool river = river_distance < 0.035f && !mountains;
-      const bool river_bank = river_distance < 0.065f && !mountains;
-      if (river) terrain = std::min(terrain, 10.0f + river_distance * 35.0f);
-
-      const int height = std::clamp(static_cast<int>(terrain + 0.5f),
-                                    kWorldFloor + 1, kChunkSizeY - 9);
-      const bool shoreline = height <= kWaterLevel + 1;
-      const Block surface_block =
-          (desert || river_bank || shoreline) ? Block::sand
-          : (mountains ? Block::stone : Block::grass);
-      const float tree_density = forest ? 0.075f : 0.012f;
-      const bool has_tree = !desert && !mountains && !river_bank &&
-                            height > kWaterLevel + 1 &&
-                            tree_at(wx, wz, seed, tree_density);
-
-
-      for (int y = kWorldFloor; y <= height; ++y) {
-        Block block = Block::stone;
-        if (y == height) {
-          block = surface_block;
-        } else if (surface_block == Block::stone) {
-          block = Block::stone;  // exposed mountain rock continues below cap
-        } else if (y >= height - (surface_block == Block::sand ? 2 : 4)) {
-          block = surface_block == Block::sand ? Block::sand : Block::dirt;
-        }
-
-        // 3D coherent density carves connected cave pockets below the
-        // surface. Keep a solid roof and floor so caves do not open
-        // randomly through the surface or world bottom.
-        if (y > kWorldFloor + 2 && y < height - 4) {
-          const float cave_a = value_noise3d(wx * 0.075f, y * 0.075f,
-                                       wz * 0.075f, seed ^ 0xDEADBEEFu);
-          const float cave_b = value_noise3d(wx * 0.145f, y * 0.145f,
-                                       wz * 0.145f, seed ^ 0x8BADF00Du);
-          if (cave_a > 0.64f && cave_b > 0.48f) block = Block::air;
-        }
-
-        // Ore is placed in clustered 3D veins rather than isolated rolls.
-        if (block == Block::stone && y >= 4 && y <= 22) {
-          const float vein = value_noise3d(wx * 0.19f, y * 0.22f, wz * 0.19f,
-                                     seed ^ 0x51ED270Bu);
-          const float pockets = value_noise3d(wx * 0.065f, y * 0.08f,
-                                        wz * 0.065f, seed ^ 0xBADC0DEu);
-          if (vein > 0.69f && pockets > 0.48f) {
-            block = y < 11 ? Block::coal_ore : Block::iron_ore;
+          const float continental = fbm2d(wx * 0.010f, wz * 0.010f,
+                                         seed ^ 0x31415926u);
+          const float hills = fbm2d(wx * 0.027f, wz * 0.027f,
+                                  seed ^ 0x27182818u);
+          const float ridge_noise = value_noise2d(wx * 0.018f, wz * 0.018f,
+                                            seed ^ 0xA341316Cu);
+          const float ridge = 1.0f - std::abs(ridge_noise * 2.0f - 1.0f);
+          const float mountain_mask = smooth01((continental - 0.48f) * 3.2f);
+          const float temperature = fbm2d(wx * 0.009f, wz * 0.009f,
+                                        seed ^ 0xB5297A4Du);
+          const float moisture = fbm2d(wx * 0.013f, wz * 0.013f,
+                                     seed ^ 0x68E31DA4u);
+          const bool desert = temperature > 0.53f && moisture < 0.43f;
+          const bool forest = moisture > 0.54f && temperature > 0.30f;
+          const bool mountains = mountain_mask > 0.48f && ridge > 0.38f;
+    
+          float terrain = 13.0f + (continental - 0.5f) * 19.0f +
+                          (hills - 0.5f) * 11.0f +
+                          mountain_mask * ridge * 23.0f;
+          terrain = std::clamp(terrain, 3.0f, 46.0f);
+    
+          // A low-frequency warped noise field creates winding river corridors.
+          // The channel floor approaches the water plane; nearby banks become sand.
+          const float river_field = value_noise2d(wx * 0.016f, wz * 0.016f,
+                                            seed ^ 0xC0FFEE11u);
+          const float river_distance = std::abs(river_field - 0.5f);
+          const bool river = river_distance < 0.035f && !mountains;
+          const bool river_bank = river_distance < 0.065f && !mountains;
+          if (river) terrain = std::min(terrain, 10.0f + river_distance * 35.0f);
+    
+          const int height = std::clamp(static_cast<int>(terrain + 0.5f),
+                                        kWorldFloor + 1, kChunkSizeY - 9);
+          const bool shoreline = height <= kWaterLevel + 1;
+          const Block surface_block =
+              (desert || river_bank || shoreline) ? Block::sand
+              : (mountains ? Block::stone : Block::grass);
+          const float tree_density = forest ? 0.075f : 0.012f;
+          const bool has_tree = !desert && !mountains && !river_bank &&
+                                height > kWaterLevel + 1 &&
+                                tree_at(wx, wz, seed, tree_density);
+    
+    
+          for (int y = kWorldFloor; y <= height; ++y) {
+            Block block = Block::stone;
+            if (y == height) {
+              block = surface_block;
+            } else if (surface_block == Block::stone) {
+              block = Block::stone;  // exposed mountain rock continues below cap
+            } else if (y >= height - (surface_block == Block::sand ? 2 : 4)) {
+              block = surface_block == Block::sand ? Block::sand : Block::dirt;
+            }
+    
+            // 3D coherent density carves connected cave pockets below the
+            // surface. Keep a solid roof and floor so caves do not open
+            // randomly through the surface or world bottom.
+            if (y > kWorldFloor + 2 && y < height - 4) {
+              const float cave_a = value_noise3d(wx * 0.075f, y * 0.075f,
+                                           wz * 0.075f, seed ^ 0xDEADBEEFu);
+              const float cave_b = value_noise3d(wx * 0.145f, y * 0.145f,
+                                           wz * 0.145f, seed ^ 0x8BADF00Du);
+              if (cave_a > 0.64f && cave_b > 0.48f) block = Block::air;
+            }
+    
+            // Ore is placed in clustered 3D veins rather than isolated rolls.
+            if (block == Block::stone && y >= 4 && y <= 22) {
+              const float vein = value_noise3d(wx * 0.19f, y * 0.22f, wz * 0.19f,
+                                         seed ^ 0x51ED270Bu);
+              const float pockets = value_noise3d(wx * 0.065f, y * 0.08f,
+                                            wz * 0.065f, seed ^ 0xBADC0DEu);
+              if (vein > 0.69f && pockets > 0.48f) {
+                block = y < 11 ? Block::coal_ore : Block::iron_ore;
+              }
+            }
+            chunk[static_cast<std::size_t>(block_index(lx, y, lz))] = block;
           }
-        }
-        chunk[static_cast<std::size_t>(block_index(lx, y, lz))] = block;
-      }
-
-      // Water fills low ground, including the carved river channels.
-      for (int y = height + 1; y <= kWaterLevel; ++y) {
-        chunk[static_cast<std::size_t>(block_index(lx, y, lz))] = Block::water;
-      }
-
-      if (has_tree) {
-        for (int y = height + 1; y <= height + 4; ++y) {
-          chunk[static_cast<std::size_t>(block_index(lx, y, lz))] = Block::wood;
-        }
-        for (int dy = 3; dy <= 5; ++dy) {
-          const int radius = dy == 5 ? 1 : 2;
-          for (int dx = -radius; dx <= radius; ++dx) {
-            for (int dz = -radius; dz <= radius; ++dz) {
-              const int ax = lx + dx;
-              const int az = lz + dz;
-              const int ay = height + dy;
-              if (ax < 0 || ax >= kChunkSizeX || az < 0 ||
-                  az >= kChunkSizeZ || ay >= kChunkSizeY ||
-                  (dx == 0 && dz == 0 && dy <= 4)) continue;
-              auto& leaf = chunk[static_cast<std::size_t>(block_index(ax, ay, az))];
-              if (leaf == Block::air) leaf = Block::leaves;
+    
+          // Water fills low ground, including the carved river channels.
+          for (int y = height + 1; y <= kWaterLevel; ++y) {
+            chunk[static_cast<std::size_t>(block_index(lx, y, lz))] = Block::water;
+          }
+    
+          if (has_tree) {
+            for (int y = height + 1; y <= height + 4; ++y) {
+              chunk[static_cast<std::size_t>(block_index(lx, y, lz))] = Block::wood;
+            }
+            for (int dy = 3; dy <= 5; ++dy) {
+              const int radius = dy == 5 ? 1 : 2;
+              for (int dx = -radius; dx <= radius; ++dx) {
+                for (int dz = -radius; dz <= radius; ++dz) {
+                  const int ax = lx + dx;
+                  const int az = lz + dz;
+                  const int ay = height + dy;
+                  if (ax < 0 || ax >= kChunkSizeX || az < 0 ||
+                      az >= kChunkSizeZ || ay >= kChunkSizeY ||
+                      (dx == 0 && dz == 0 && dy <= 4)) continue;
+                  auto& leaf = chunk[static_cast<std::size_t>(block_index(ax, ay, az))];
+                  if (leaf == Block::air) leaf = Block::leaves;
+                }
+              }
             }
           }
-        }
         }
       }
     }
   }
 }
-
 Block World::block_at(int x, int y, int z) const {
   const Block* block = blocks_.try_at(x, y, z);
   return block != nullptr ? *block : Block::air;
