@@ -506,6 +506,8 @@ void World::generate(std::uint32_t seed) {
         Block block = Block::stone;
         if (y == height) {
           block = surface_block;
+        } else if (surface_block == Block::stone) {
+          block = Block::stone;  // exposed mountain rock continues below cap
         } else if (y >= height - (surface_block == Block::sand ? 2 : 4)) {
           block = surface_block == Block::sand ? Block::sand : Block::dirt;
         }
