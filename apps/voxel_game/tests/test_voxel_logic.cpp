@@ -13,6 +13,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <array>
 #include <cstdint>
 #include <string>
 
@@ -22,6 +23,7 @@
 #include <ws/math/vecmath.hpp>
 
 #include "bench.hpp"
+#include "frustum.hpp"
 #include "perf.hpp"
 #include "menu.hpp"
 #include "player.hpp"
@@ -416,6 +418,141 @@ TEST_CASE("frame: the camera reads the rotated world the right way round") {
   CHECK(ws::math::dot(w_s, fwd) < -9.0f);
 }
 
+TEST_CASE("culling: non-90-degree horizontal frustum planes use tangent-scaled forward") {
+  const float eye[3] = {0.0f, 0.0f, 0.0f};
+  const float target[3] = {0.0f, 0.0f, 1.0f};
+  const float up[3] = {0.0f, -1.0f, 0.0f};
+  const auto fr = voxel::culling::extract_frustum(
+      eye, target, up, 70.0f * std::numbers::pi_v<float> / 180.0f,
+      16.0f / 9.0f, 0.03f, 260.0f);
+
+  // At forward distance 10, the true 70-degree/16:9 left edge is
+  // x ~= -12.44. This point is inside the real frustum but was rejected
+  // by the old forward + tan_hx * right normal (edge at about -8).
+  const float left_inside[3] = {-10.0f, 0.0f, 10.0f};
+  CHECK(voxel::culling::aabb_visible(fr, left_inside, left_inside));
+  const float right_inside[3] = {10.0f, 0.0f, 10.0f};
+  CHECK(voxel::culling::aabb_visible(fr, right_inside, right_inside));
+  const float left_outside[3] = {-14.0f, 0.0f, 10.0f};
+  CHECK_FALSE(voxel::culling::aabb_visible(fr, left_outside, left_outside));
+}
+
+TEST_CASE("culling: sampled chunk AABBs are never rejected when a sample is inside") {
+  const float eye[3] = {64.0f, -32.0f, -64.0f};
+  const float target[3] = {64.0f, -32.0f, -63.0f};
+  const float up[3] = {0.0f, -1.0f, 0.0f};
+  const auto fr = voxel::culling::extract_frustum(
+      eye, target, up, 70.0f * std::numbers::pi_v<float> / 180.0f,
+      16.0f / 9.0f, 0.03f, 260.0f);
+
+  // Point-sized AABBs must exactly agree with an independent brute-force
+  // check of all six plane half-spaces over a deterministic sample grid.
+  int inside_points = 0;
+  int outside_points = 0;
+  for (int z = -144; z <= 16; z += 4) {
+    for (int y = -80; y <= 16; y += 4) {
+      for (int x = -16; x <= 144; x += 4) {
+        const float p[3] = {static_cast<float>(x), static_cast<float>(y),
+                            static_cast<float>(z)};
+        bool brute_inside = true;
+        for (int plane = 0; plane < 6; ++plane) {
+          const float* q = fr.planes[plane];
+          if (q[0] * p[0] + q[1] * p[1] + q[2] * p[2] + q[3] < 0.0f) {
+            brute_inside = false;
+            break;
+          }
+        }
+        CHECK(voxel::culling::aabb_visible(fr, p, p) == brute_inside);
+        inside_points += brute_inside ? 1 : 0;
+        outside_points += brute_inside ? 0 : 1;
+      }
+    }
+  }
+  CHECK(inside_points > 0);
+  CHECK(outside_points > 0);
+
+  // The support-vertex AABB test is conservative at frustum corners, so
+  // the key chunk invariant is no false negatives against dense samples.
+  int sampled_visible_chunks = 0;
+  for (int cz = 0; cz < voxel::kWorldChunksZ; ++cz) {
+    for (int cx = 0; cx < voxel::kWorldChunksX; ++cx) {
+      const float lo[3] = {
+          static_cast<float>(cx * voxel::kChunkSizeX),
+          -static_cast<float>(voxel::kChunkSizeY),
+          -static_cast<float>((cz + 1) * voxel::kChunkSizeZ)};
+      const float hi[3] = {
+          static_cast<float>((cx + 1) * voxel::kChunkSizeX), 0.0f,
+          -static_cast<float>(cz * voxel::kChunkSizeZ)};
+      bool sample_inside = false;
+      for (int iz = 0; iz <= 8 && !sample_inside; ++iz) {
+        for (int iy = 0; iy <= 4 && !sample_inside; ++iy) {
+          for (int ix = 0; ix <= 8 && !sample_inside; ++ix) {
+            const float p[3] = {
+                lo[0] + (hi[0] - lo[0]) * static_cast<float>(ix) / 8.0f,
+                lo[1] + (hi[1] - lo[1]) * static_cast<float>(iy) / 4.0f,
+                lo[2] + (hi[2] - lo[2]) * static_cast<float>(iz) / 8.0f};
+            bool inside = true;
+            for (int plane = 0; plane < 6; ++plane) {
+              const float* q = fr.planes[plane];
+              if (q[0] * p[0] + q[1] * p[1] + q[2] * p[2] + q[3] < 0.0f) {
+                inside = false;
+                break;
+              }
+            }
+            sample_inside = inside;
+          }
+        }
+      }
+      if (sample_inside) {
+        ++sampled_visible_chunks;
+        CHECK(voxel::culling::aabb_visible(fr, lo, hi));
+      }
+    }
+  }
+  CHECK(sampled_visible_chunks > 0);
+}
+
+TEST_CASE("culling: degenerate camera bases keep all AABBs instead of producing NaNs") {
+  const float eye[3] = {1.0f, 2.0f, 3.0f};
+  const float same_target[3] = {1.0f, 2.0f, 3.0f};
+  const float target[3] = {1.0f, 2.0f, 4.0f};
+  const float parallel_up[3] = {0.0f, 0.0f, 1.0f};
+  const float valid_up[3] = {0.0f, 1.0f, 0.0f};
+  const float far_min[3] = {10000.0f, 10000.0f, 10000.0f};
+  const float far_max[3] = {10001.0f, 10001.0f, 10001.0f};
+
+  const auto zero_forward = voxel::culling::extract_frustum(
+      eye, same_target, valid_up, 1.2f, 1.7f, 0.1f, 260.0f);
+  const auto parallel_basis = voxel::culling::extract_frustum(
+      eye, target, parallel_up, 1.2f, 1.7f, 0.1f, 260.0f);
+  CHECK(voxel::culling::aabb_visible(zero_forward, far_min, far_max));
+  CHECK(voxel::culling::aabb_visible(parallel_basis, far_min, far_max));
+}
+
+TEST_CASE("player: large look deltas wrap yaw and spawn resets the camera") {
+  voxel::World world = make_world();
+  const auto grid = world.collision_grid();
+  voxel::Player player;
+  REQUIRE(player.spawn(ws::math::Vec3{64.5f, 40.0f, 64.5f}));
+
+  voxel::Player::MoveInput look{};
+  look.look_dx = 10000.0f;  // 25 radians at the default sensitivity
+  look.look_dy = 1000.0f;
+  player.tick(look, 1.0f / 60.0f, grid);
+
+  const float expected = std::remainder(
+      25.0f, 2.0f * std::numbers::pi_v<float>);
+  CHECK(player.yaw_radians() == doctest::Approx(expected).epsilon(0.0001));
+  CHECK(player.yaw_radians() >= -std::numbers::pi_v<float>);
+  CHECK(player.yaw_radians() <= std::numbers::pi_v<float>);
+
+  REQUIRE(player.spawn(ws::math::Vec3{64.5f, 40.0f, 64.5f}));
+  const auto look_direction = player.look_direction();
+  CHECK(look_direction.x == doctest::Approx(0.0f));
+  CHECK(look_direction.y == doctest::Approx(0.0f));
+  CHECK(look_direction.z == doctest::Approx(-1.0f));
+}
+
 TEST_CASE("player: swept grid controller lands, stays supported, and jumps") {
   voxel::World world = make_world();
   const auto grid = world.collision_grid();
@@ -531,11 +668,13 @@ TEST_CASE("voxel grid: world edits are visible without rebuilding collision data
 }
 
 TEST_CASE("menu: the pause layout centers the pair on the frame") {
+  const auto title = voxel::menu::layout_title(320.0f, 240.0f, 60.0f);
+  CHECK(title.x == doctest::Approx(130.0f));
+  CHECK(title.y == doctest::Approx(24.0f));
   // Two buttons, resume above quit, the pair centered both ways: the
   // classic pause-menu read. Any frame size.
   const float fw = 320.0f, fh = 240.0f;
-  voxel::menu::Button b[voxel::menu::kButtonCount];
-  voxel::menu::layout(fw, fh, b);
+  const auto b = voxel::menu::layout(fw, fh);
   // Horizontal: centered - both buttons share x, the frame's middle.
   CHECK(b[0].x == doctest::Approx((fw - voxel::menu::kButtonW) * 0.5f));
   CHECK(b[1].x == b[0].x);
@@ -552,8 +691,7 @@ TEST_CASE("menu: the pause layout centers the pair on the frame") {
 
 TEST_CASE("menu: the click hits the right button, edges exact") {
   const float fw = 320.0f, fh = 240.0f;
-  voxel::menu::Button b[voxel::menu::kButtonCount];
-  voxel::menu::layout(fw, fh, b);
+  const auto b = voxel::menu::layout(fw, fh);
 
   // The center of each button is that button's.
   CHECK(voxel::menu::click_action(fw, fh, b[0].x + b[0].w * 0.5f,
