@@ -57,7 +57,11 @@ py scripts/create_atlas.py --check
 ```
 
 The generator writes the matching PNG data and block-to-face table into
-`src/texture_atlas.hpp`, plus `download/atlas_preview.png`. The game
+`src/texture_atlas.hpp`, plus `download/atlas_preview.png`. It also bakes
+Minecraft's temperate-biome tint into the grayscale `grass_block_top`
+and `oak_leaves` masks (preserving leaf transparency); without this,
+grass tops and leaves appear gray because the game does not yet have a
+biome-color shader. Re-run the generator after updating it. The game
 now has a compile-time guard that rejects an atlas whose block rows no
 longer match the `Block` enum.
 
