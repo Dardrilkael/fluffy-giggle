@@ -26,7 +26,7 @@ struct SourceHandle {
 // Raw PCM handed to the engine: the bridge from WavSound (load_wav) or a
 // synth. Interleaved 16-bit, 1 or 2 channels. load_sound() and transient
 // play() copy the samples into engine-owned OpenAL buffers before returning,
- // so caller memory may die with the descriptor.
+// so caller memory may die with the descriptor.
 struct SoundDesc {
   const std::int16_t* samples = nullptr;
   std::uint32_t frame_count = 0;
