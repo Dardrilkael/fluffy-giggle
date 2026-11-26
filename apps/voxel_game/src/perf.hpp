@@ -19,6 +19,8 @@
 #pragma once
 
 #include <chrono>
+
+#include <ws/core/time.hpp>
 #include <cstdint>
 
 namespace voxel::perf {
@@ -41,14 +43,12 @@ struct Counters {
 };
 
 inline float ms_since(std::chrono::steady_clock::time_point t0,
-                     std::chrono::steady_clock::time_point t1) {
-    return std::chrono::duration<float, std::milli>(t1 - t0).count();
+                     std::chrono::steady_clock::time_point t1) noexcept {
+  return ws::core::time::milliseconds_between(t0, t1);
 }
 
-inline float ms_since(std::chrono::steady_clock::time_point t0) {
-    return std::chrono::duration<float, std::milli>(
-               std::chrono::steady_clock::now() - t0)
-        .count();
+inline float ms_since(std::chrono::steady_clock::time_point t0) noexcept {
+  return ws::core::time::milliseconds_since(t0);
 }
 
 }  // namespace voxel::perf
