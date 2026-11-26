@@ -16,24 +16,25 @@
 namespace voxel::bench {
 
 struct ShadowFlags {
-    bool cast = true;
-    bool receive = true;
+    // Preserve the game's current default: directional shadows are opt-in.
+    bool cast = false;
+    bool receive = false;
 };
 
 // "full" renders the map and filters receivers; "no-receive" retains the
 // depth-only shadow pass but skips all fragment PCF lookups; "off" does both.
 [[nodiscard]] inline constexpr ShadowFlags shadow_flags_from_name(
     std::string_view name) noexcept {
-    if (name == "off") return {false, false};
+    if (name == "full") return {true, true};
     if (name == "no-receive") return {true, false};
-    return {true, true};
+    return {false, false};
 }
 
 [[nodiscard]] inline constexpr const char* shadow_mode_name(
     ShadowFlags flags) noexcept {
-    if (!flags.cast && !flags.receive) return "off";
+    if (flags.cast && flags.receive) return "full";
     if (flags.cast && !flags.receive) return "no-receive";
-    return "full";
+    return "off";
 }
 
 struct Config {
