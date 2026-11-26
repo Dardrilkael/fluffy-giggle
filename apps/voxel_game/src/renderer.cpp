@@ -28,6 +28,81 @@ load_tile_textures() {
 }
 
 
+namespace {
+
+void append_outline_bar(ws::ui::r3d::MeshData& out,
+                        const ws::ui::r3d::MeshData& unit_cube,
+                        float cx, float cy, float cz,
+                        float sx, float sy, float sz) {
+  const auto base = static_cast<std::uint32_t>(out.vertices.size());
+  for (const auto& source : unit_cube.vertices) {
+    auto vertex = source;
+    vertex.pos[0] = source.pos[0] * sx + cx;
+    vertex.pos[1] = source.pos[1] * sy + cy;
+    vertex.pos[2] = source.pos[2] * sz + cz;
+    out.vertices.push_back(vertex);
+  }
+  for (const std::uint32_t index : unit_cube.indices) {
+    out.indices.push_back(base + index);
+  }
+}
+
+}  // namespace
+
+ws::core::Result<ws::ui::r3d::Mesh> create_target_outline() {
+  // Twelve slim cuboids form a crisp wireframe just outside the voxel.
+  // Build once and move the mesh per frame; no per-frame GPU allocations.
+  constexpr float edge = 1.025f;
+  constexpr float thickness = 0.018f;
+  const auto cube = ws::ui::r3d::generate_cube(1.0f);
+  ws::ui::r3d::MeshData outline;
+  outline.vertices.reserve(cube.vertices.size() * 12);
+  outline.indices.reserve(cube.indices.size() * 12);
+  for (int sy : {-1, 1}) {
+    for (int sz : {-1, 1}) {
+      append_outline_bar(outline, cube, 0.0f,
+                         static_cast<float>(sy) * 0.5f * edge,
+                         static_cast<float>(sz) * 0.5f * edge,
+                         edge, thickness, thickness);
+    }
+  }
+  for (int sx : {-1, 1}) {
+    for (int sz : {-1, 1}) {
+      append_outline_bar(outline, cube,
+                         static_cast<float>(sx) * 0.5f * edge, 0.0f,
+                         static_cast<float>(sz) * 0.5f * edge,
+                         thickness, edge, thickness);
+    }
+  }
+  for (int sx : {-1, 1}) {
+    for (int sy : {-1, 1}) {
+      append_outline_bar(outline, cube,
+                         static_cast<float>(sx) * 0.5f * edge,
+                         static_cast<float>(sy) * 0.5f * edge, 0.0f,
+                         thickness, thickness, edge);
+    }
+  }
+  return ws::ui::r3d::create_mesh(outline);
+}
+
+ws::core::Status destroy_target_outline(ws::ui::r3d::Mesh mesh) {
+  return ws::ui::r3d::destroy_mesh(mesh);
+}
+
+void draw_target_outline(ws::ui::r3d::Mesh mesh,
+                         const World::RayHit& target) {
+  if (!target.hit || mesh.id == 0) return;
+  ws::ui::r3d::Transform3D transform{};
+  transform.translation[0] = static_cast<float>(target.cell[0]) + 0.5f;
+  transform.translation[1] = -static_cast<float>(target.cell[1]) - 0.5f;
+  transform.translation[2] = -static_cast<float>(target.cell[2]) - 0.5f;
+  ws::ui::r3d::MeshMaterial material;
+  material.tint = ws::ui::r2d::rgba(255, 222, 118, 255);
+  material.casts_shadow = false;
+  material.receives_shadow = false;
+  ws::ui::r3d::draw_mesh(mesh, transform, material);
+}
+
 ws::ui::r3d::Light3D scene_light() {
   // The direction TO the light (r3d::set_light normalizes): from the
   // east and overhead in GAME space, mapped to render space by the
