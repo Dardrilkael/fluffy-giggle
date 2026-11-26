@@ -94,12 +94,13 @@ struct Recipe {
 // Small, deterministic starter recipe book. A recipe is crafted atomically:
 // ingredients are only removed after all requirements have been checked.
 inline constexpr std::array<Recipe, 6> kRecipes{{
-    {{{{Item::wood, 1}, {}, {}, {}}}, 1, Item::planks, 4},
-    {{{{Item::planks, 2}, {}, {}, {}}}, 1, Item::sticks, 4},
-    {{{{Item::stone, 4}, {}, {}, {}}}, 1, Item::cobblestone, 4},
-    {{{{Item::cobblestone, 4}, {}, {}, {}}}, 1, Item::bricks, 1},
-    {{{{Item::sand, 4}, {}, {}, {}}}, 1, Item::glass, 1},
-    {{{{Item::coal, 1}, {Item::iron_ore, 1}, {}, {}}}, 2, Item::iron_ingot, 1},
+    Recipe{{Ingredient{Item::wood, 1}, {}, {}, {}}, 1, Item::planks, 4},
+    Recipe{{Ingredient{Item::planks, 2}, {}, {}, {}}, 1, Item::sticks, 4},
+    Recipe{{Ingredient{Item::stone, 4}, {}, {}, {}}, 1, Item::cobblestone, 4},
+    Recipe{{Ingredient{Item::cobblestone, 4}, {}, {}, {}}, 1, Item::bricks, 1},
+    Recipe{{Ingredient{Item::sand, 4}, {}, {}, {}}, 1, Item::glass, 1},
+    Recipe{{Ingredient{Item::coal, 1}, Ingredient{Item::iron_ore, 1}, {}, {}},
+           2, Item::iron_ingot, 1},
 }};
 
 [[nodiscard]] inline bool can_craft(const Inventory& inventory,
