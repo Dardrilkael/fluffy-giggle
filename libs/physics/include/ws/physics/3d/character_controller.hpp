@@ -1,7 +1,6 @@
-// apps/voxel_game - player.hpp: first-person character controller.
-// Movement and collision are driven by ws::physics3d::VoxelGrid3D. The
-// general rigid-body world remains available to other game entities, but
-// the player and static terrain do not allocate rigid bodies.
+// Backend-independent character controller over a static voxel grid.
+// The controller owns only its pose, tuning and movement state; collision
+// queries are delegated to the caller's zero-copy VoxelGrid3D view.
 
 #pragma once
 
