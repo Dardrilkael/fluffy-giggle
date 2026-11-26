@@ -30,6 +30,7 @@ class Driver {
         reset_report_window();
         phase_frames_ = 0;
         phase_times_.clear();
+        gpu_phase_times_.clear();
         if (cfg_.print_header) {
             std::printf("phase,sec,fps,frame_ms,phys_ms,mesh_cpu_ms,"
                         "upload_cpu_ms,draw_submit_ms,gpu_frame_ms,gpu_samples,"
