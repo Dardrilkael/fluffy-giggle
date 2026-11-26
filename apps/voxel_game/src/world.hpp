@@ -1,10 +1,9 @@
 // apps/voxel_game - world.hpp: the voxel world's data model.
 //
 // THE DESIGN (pure CPU except the mesh registry handles):
-//   - Blocks: a 7-entry palette (air, grass, dirt, stone, wood, sand,
-//     water), one tint per type - per-face shading (top bright, sides
-//     darker) comes from the r3d pipeline's own directional light, not
-//     baked colors, so one tint per type is enough.
+//   - Blocks: air, grass, dirt, stone, wood, sand, water, cobblestone,
+//     planks, bricks, glass, leaves, coal and iron ore. Per-face shading
+//     comes from the r3d pipeline's directional light.
 //   - Storage: 8x8 chunks of 16x64x16 blocks, one flat vector each,
 //     linear index x + z*16 + y*256 (y the slow axis: a column's stack
 //     is contiguous - the walk the mesher and the height probe make).
@@ -103,8 +102,10 @@ inline constexpr int kWorldSizeZ = kWorldChunksZ * kChunkSizeZ;
 
 class World {
  public:
-  // Generates the seeded terrain into the block table (deterministic
-  // per seed - value-noise fbm over a hashed lattice, no third party).
+  // Generates seeded biome terrain: temperature/moisture climate fields,
+  // plains/desert/forest/mountain surfaces, winding rivers, 3D cave
+  // pockets and clustered ore veins. All fields are deterministic per
+  // seed and continuous across chunk boundaries.
   void generate(std::uint32_t seed);
 
   // The block at game-space integer coordinates; outside the region
