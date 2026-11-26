@@ -377,11 +377,18 @@ bool is_solid(Block block) {
 void World::generate(std::uint32_t seed) {
   blocks_.reset(Block::air);
 
-  // Generate columns in world coordinates so every field is continuous
-  // across chunk boundaries. Climate fields choose biomes; independent
-  // detail fields shape hills, mountain ridges and river valleys.
-  for (int wz = 0; wz < kWorldSizeZ; ++wz) {
-    for (int wx = 0; wx < kWorldSizeX; ++wx) {
+  // Generate chunk-by-chunk for contiguous writes. Every noise field
+  // still uses WORLD coordinates, so adjacent chunks share continuous
+  // terrain; all calculations for a column are independent of traversal order.
+  for (int cz = 0; cz < kWorldChunksZ; ++cz) {
+    for (int cx = 0; cx < kWorldChunksX; ++cx) {
+      auto chunk = blocks_.chunk(cx, cz);
+      const int chunk_origin_x = cx * kChunkSizeX;
+      const int chunk_origin_z = cz * kChunkSizeZ;
+      for (int lz = 0; lz < kChunkSizeZ; ++lz) {
+        const int wz = chunk_origin_z + lz;
+        for (int lx = 0; lx < kChunkSizeX; ++lx) {
+          const int wx = chunk_origin_x + lx;
       const float continental = fbm2d(wx * 0.010f, wz * 0.010f,
                                      seed ^ 0x31415926u);
       const float hills = fbm2d(wx * 0.027f, wz * 0.027f,
@@ -423,11 +430,6 @@ void World::generate(std::uint32_t seed) {
                             height > kWaterLevel + 1 &&
                             tree_at(wx, wz, seed, tree_density);
 
-      const int cx = wx / kChunkSizeX;
-      const int cz = wz / kChunkSizeZ;
-      const int lx = wx % kChunkSizeX;
-      const int lz = wz % kChunkSizeZ;
-      auto chunk = blocks_.chunk(cx, cz);
 
       for (int y = kWorldFloor; y <= height; ++y) {
         Block block = Block::stone;
@@ -486,6 +488,7 @@ void World::generate(std::uint32_t seed) {
               if (leaf == Block::air) leaf = Block::leaves;
             }
           }
+        }
         }
       }
     }
