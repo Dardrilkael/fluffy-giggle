@@ -26,6 +26,8 @@ struct FrameTimings {
     float upload_ms = 0.0f;
     float draw_ms = 0.0f;  // CPU draw-command recording/submission only
     std::uint64_t upload_bytes = 0;
+    std::uint64_t mesh_vertices = 0;
+    std::uint64_t mesh_indices = 0;
     std::uint32_t mesh_jobs = 0;
     std::uint32_t upload_capacity_growths = 0;
 };
