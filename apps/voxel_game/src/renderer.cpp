@@ -204,8 +204,9 @@ void VoxelRenderer::upload_result(int cx,int cz,const std::vector<CpuMeshData>& 
 }
 void VoxelRenderer::process_completed(std::size_t max_jobs) {
   std::size_t count=0;
+  const std::size_t start=upload_cursor_;
   for(std::size_t offset=0;offset<kChunkCount&&count<max_jobs;++offset) {
-    const std::size_t slot=(upload_cursor_+offset)%kChunkCount;
+    const std::size_t slot=(start+offset)%kChunkCount;
     MeshResult result;
     { std::lock_guard<std::mutex> lock(queue_mutex_); if(!completed_[slot].ready) continue;
       if(completed_[slot].revision!=revisions_[slot]){completed_[slot].ready=false;continue;}
