@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <ws/audio/engine.hpp>
+#include <ws/audio/early_reflections.hpp>
 #include <ws/audio/errors.hpp>
 #include <ws/audio/wav.hpp>
 
@@ -346,4 +347,70 @@ TEST_CASE("engine enforces its slot caps") {
   REQUIRE(!extra_source.has_value());
   CHECK(extra_source.error().code ==
         static_cast<std::int32_t>(ws::audio::AudioError::too_many_sources));
+}
+
+
+TEST_CASE("early reflections: geometry distance maps to round-trip delay") {
+  const auto tap = ws::audio::reflection_from_distance(10.0f, 0.8f, 44100);
+  REQUIRE(tap.delay_frames > 0);
+  CHECK(tap.delay_frames == 2572);
+  CHECK(tap.gain == doctest::Approx(0.8f));
+  CHECK(ws::audio::reflection_from_distance(-1.0f, 0.8f, 44100).delay_frames == 0);
+  CHECK(ws::audio::reflection_from_distance(1.0f, 0.8f, 0).delay_frames == 0);
+}
+
+TEST_CASE("early reflections: impulse produces bounded delayed echoes") {
+  const std::int16_t input[] = {10000, 0, 0, 0};
+  std::int16_t output[8]{};
+  ws::audio::EarlyReflectionProfile profile{};
+  profile.dry_gain = 1.0f;
+  profile.wet_gain = 0.5f;
+  REQUIRE(profile.add({2, 0.5f}));
+  const auto frames = ws::audio::process_early_reflections(
+      input, 4, 1, output, 8, profile);
+  CHECK(frames == 6);
+  CHECK(output[0] == 10000);
+  CHECK(output[2] == 2500);
+  CHECK(output[3] == 0);
+  CHECK(output[4] == 0);
+  CHECK(output[5] == 0);
+}
+
+TEST_CASE("early reflections: stereo channels remain independent") {
+  const std::int16_t input[] = {10000, -10000, 0, 0};
+  std::int16_t output[8]{};
+  ws::audio::EarlyReflectionProfile profile{};
+  profile.dry_gain = 1.0f;
+  profile.wet_gain = 1.0f;
+  REQUIRE(profile.add({1, 0.25f}));
+  const auto frames = ws::audio::process_early_reflections(
+      input, 2, 2, output, 4, profile);
+  CHECK(frames == 3);
+  CHECK(output[0] == 10000);
+  CHECK(output[1] == -10000);
+  CHECK(output[2] == 2500);
+  CHECK(output[3] == -2500);
+}
+
+TEST_CASE("early reflections: capacity and malformed inputs fail safely") {
+  const std::int16_t input[] = {12000, 0};
+  std::int16_t output[2]{};
+  ws::audio::EarlyReflectionProfile profile{};
+  profile.dry_gain = 2.0f;
+  profile.wet_gain = 1.0f;
+  REQUIRE(profile.add({2, 0.5f}));
+  CHECK(ws::audio::process_early_reflections(
+            input, 2, 1, output, 2, profile) == 0);
+  CHECK(ws::audio::process_early_reflections(
+            input, 2, 3, output, 2, profile) == 0);
+  CHECK(ws::audio::process_early_reflections(
+            nullptr, 2, 1, output, 2, profile) == 0);
+  CHECK(profile.add({1, 0.5f}) == true);
+  CHECK(profile.add({3, 0.5f}) == true);
+  CHECK(profile.add({4, 0.5f}) == true);
+  CHECK(profile.add({5, 0.5f}) == true);
+  CHECK(profile.add({6, 0.5f}) == true);
+  CHECK(profile.add({7, 0.5f}) == true);
+  CHECK(profile.add({8, 0.5f}) == true);
+  CHECK(profile.add({9, 0.5f}) == false);
 }
