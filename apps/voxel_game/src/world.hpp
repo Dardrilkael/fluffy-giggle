@@ -37,6 +37,7 @@
 #include <vector>
 
 #include <ws/physics/3d/voxel_grid.hpp>
+#include <ws/gameplay/chunked_grid3d.hpp>
 #include <ws/ui/renderer3d.hpp>  // MeshData, Mesh (the registry handle)
 
 namespace voxel {
@@ -179,7 +180,9 @@ class World {
                           int z) noexcept;
 
   // Chunk-major: chunks_[cz * kWorldChunksX + cx], each kBlocksPerChunk.
-  std::vector<std::vector<Block>> chunks_;
+  ws::gameplay::ChunkedGrid3D<
+      Block, kWorldChunksX, kWorldChunksZ,
+      kChunkSizeX, kChunkSizeY, kChunkSizeZ> blocks_;
   std::vector<ChunkMesh> chunk_meshes_;
 };
 
