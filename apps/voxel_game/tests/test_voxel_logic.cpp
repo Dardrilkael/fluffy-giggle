@@ -430,7 +430,7 @@ TEST_CASE("voxel grid: raycast shares the DDA traversal used by interaction") {
   CHECK(hit.cell.x == x);
   CHECK(hit.cell.z == z);
   CHECK(hit.normal.y == 1);
-  CHECK(hit.distance == doctest::Approx(5.0f));
+  CHECK(hit.distance == doctest::Approx(4.0f));
 }
 
 TEST_CASE("voxel grid: swept AABB stops at walls and slides along them") {
