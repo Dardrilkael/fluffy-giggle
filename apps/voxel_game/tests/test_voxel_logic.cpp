@@ -34,6 +34,7 @@
 #include "texture_atlas.hpp"
 #include "world.hpp"
 #include "inventory.hpp"
+#include "voxel_audio.hpp"
 
 namespace {
 
@@ -1296,4 +1297,38 @@ TEST_CASE("perf: frame evidence structs start clear and duration conversion is e
   CHECK(counters.bodies == 0);
   CHECK(counters.meshes == 0);
   CHECK(counters.chunk_vis == 0);
+}
+
+
+TEST_CASE("voxel acoustics: six room boundaries become sorted early reflections") {
+  voxel::World world;
+  world.generate(0xAC0571C5u);
+
+  // Build a deterministic 9x9x9 stone room with an air interior.
+  for (int y = 20; y <= 28; ++y) {
+    for (int z = 48; z <= 56; ++z) {
+      for (int x = 48; x <= 56; ++x) {
+        const bool wall = x == 48 || x == 56 ||
+                          y == 20 || y == 28 ||
+                          z == 48 || z == 56;
+        REQUIRE(world.set_block(
+            x, y, z, wall ? voxel::Block::stone : voxel::Block::air));
+      }
+    }
+  }
+
+  const auto response = voxel::acoustics::room_response(
+      world, ws::math::Vec3{52.5f, 24.5f, 52.5f}, 44100);
+  REQUIRE(response.count == 6);
+  CHECK(response.dry_gain == doctest::Approx(0.92f));
+  CHECK(response.wet_gain == doctest::Approx(0.36f));
+  for (std::size_t i = 0; i < response.count; ++i) {
+    CHECK(response.taps[i].delay_frames == 900);
+    CHECK(response.taps[i].gain > 0.0f);
+    CHECK(response.taps[i].gain < 1.0f);
+    if (i > 0) {
+      CHECK(response.taps[i - 1].delay_frames <=
+            response.taps[i].delay_frames);
+    }
+  }
 }
