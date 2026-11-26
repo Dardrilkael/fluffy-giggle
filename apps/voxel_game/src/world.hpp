@@ -145,9 +145,8 @@ class World {
   [[nodiscard]] int surface_height(int x, int z) const;
 
   // Surface-membership helper: true when a solid cell has at least one
-  // non-solid 6-neighbor. Retained for gameplay queries/tests; the
-  // physics broadphase now uses exact merged solid cuboids instead of
-  // a body per exposed cell.
+  // non-solid 6-neighbor. Kept for terrain diagnostics/tests; runtime
+  // collision queries use collision_grid() and the full solid occupancy.
   [[nodiscard]] bool is_exposed(int x, int y, int z) const;
 
   // --- the DDA raycast ----------------------------------------------------------
