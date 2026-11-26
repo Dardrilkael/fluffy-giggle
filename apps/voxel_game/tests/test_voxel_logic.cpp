@@ -49,6 +49,33 @@ namespace {
 
 }  // namespace
 
+TEST_CASE("perf: frame-time percentiles use nearest-rank and rolling samples") {
+  voxel::perf::FrameTimeWindow window;
+  CHECK(window.sample_count() == 0);
+  const auto empty = window.percentiles();
+  CHECK(empty.p50_ms == 0.0f);
+  CHECK(empty.p95_ms == 0.0f);
+  CHECK(empty.p99_ms == 0.0f);
+
+  for (int ms = 1; ms <= 100; ++ms)
+    window.add(static_cast<float>(ms));
+  const auto p = window.percentiles();
+  CHECK(window.sample_count() == 100);
+  CHECK(p.p50_ms == 50.0f);
+  CHECK(p.p95_ms == 95.0f);
+  CHECK(p.p99_ms == 99.0f);
+
+  window.clear();
+  CHECK(window.sample_count() == 0);
+  for (std::size_t i = 1; i <= voxel::perf::FrameTimeWindow::kCapacity + 1; ++i)
+    window.add(static_cast<float>(i));
+  const auto rolling = window.percentiles();
+  CHECK(window.sample_count() == voxel::perf::FrameTimeWindow::kCapacity);
+  CHECK(rolling.p50_ms == 4097.0f);
+  CHECK(rolling.p95_ms == 7784.0f);
+  CHECK(rolling.p99_ms == 8112.0f);
+}
+
 TEST_CASE("worldgen: deterministic per seed, distinct across seeds") {
   voxel::World a = make_world();
   voxel::World b = make_world();
