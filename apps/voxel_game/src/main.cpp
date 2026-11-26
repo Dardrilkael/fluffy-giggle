@@ -202,7 +202,7 @@ class VoxelApp final : public ws::ui::App {
     ws::input::EventDispatcher d{e};
     (void)d.dispatch<ws::input::MouseMovedEvent>(
         [this](const ws::input::MouseMovedEvent& ev) {
-          if (!paused_ && have_last_mouse_) {
+          if (!paused_ && !inventory_open_ && !crafting_open_ && have_last_mouse_) {
             look_dx_ += ev.x - last_mouse_x_;
             look_dy_ += ev.y - last_mouse_y_;
           }
@@ -568,7 +568,7 @@ class VoxelApp final : public ws::ui::App {
         (void)r2d::draw_text(sx + 34, by + 34, amount, font_,
                              r2d::rgba(255,255,255));
       }
-      char key[2] = {static_cast<char>('1' + i), '\\0'};
+      char key[2] = {static_cast<char>('1' + i), '\0'};
       (void)r2d::draw_text(sx + 5, by + 4, key, font_,
                            selected ? r2d::rgba(236,246,217)
                                     : r2d::rgba(170,180,174));
