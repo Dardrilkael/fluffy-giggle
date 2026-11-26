@@ -123,7 +123,7 @@ struct Slider {
 // in the UI library.
 template <std::size_t Count>
 [[nodiscard]] constexpr std::array<Slider, Count> layout(
-    float frame_w, float frame_h, float panel_w, float panel_h,
+    float frame_w, float frame_h, float panel_h,
     float slider_w, float slider_h, float top, float step) noexcept {
   std::array<Slider, Count> out{};
   const float x = (frame_w - slider_w) * 0.5f;

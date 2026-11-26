@@ -34,7 +34,7 @@ struct Slider {
     float frame_w, float frame_h) noexcept {
   const auto geometry =
       ws::ui::layout::settings::layout<kSliderCount>(
-          frame_w, frame_h, kPanelWidth, kPanelHeight,
+          frame_w, frame_h, kPanelHeight,
           kSliderWidth, kSliderHeight, kSliderTop, kSliderStep);
   constexpr float min_values[kSliderCount] = {0.0005f, 60.0f, 32.0f};
   constexpr float max_values[kSliderCount] = {0.0060f, 110.0f, 256.0f};
