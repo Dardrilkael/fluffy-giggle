@@ -15,16 +15,11 @@
 
 #include <cstdint>
 #include <string>
-#include <vector>
 
 #include <cmath>
 #include <numbers>
 
 #include <ws/math/vecmath.hpp>
-#include <ws/physics/3d/body.hpp>
-#include <ws/physics/3d/shape.hpp>
-#include <ws/physics/3d/world.hpp>
-#include <ws/physics/common.hpp>  // kMaxBodiesPerWorld (the shell budget)
 
 #include "bench.hpp"
 #include "perf.hpp"
@@ -358,93 +353,6 @@ TEST_CASE("shell: a dig exposes the wall behind it, a place buries what it cover
   CHECK(world.is_exposed(x, 40, z));
 }
 
-TEST_CASE("shell: the count fits the body budget - the capacity regression") {
-  // The shipped bug: the first build's surface-BAND grid needed ~50k
-  // bodies against max_bodies = 20000, so create_body failed at the
-  // 20001st cell, flooded the log, and the player's own body (created
-  // after the grid) was refused too - a dead world that rendered
-  // nothing. The shell (17,254 cells for this seed - the terrain's
-  // natural flats keep it far thinner than the band's blind walk)
-  // must fit comfortably inside the cap with room for the player and
-  // every edit's re-derivation.
-  const voxel::World world = make_world();
-  int shell = 0;
-  for (int x = 0; x < voxel::kWorldSizeX; ++x) {
-    for (int z = 0; z < voxel::kWorldSizeZ; ++z) {
-      const int top = world.surface_height(x, z);
-      for (int y = top; y >= 0; --y) {
-        shell += world.is_exposed(x, y, z) ? 1 : 0;
-      }
-    }
-  }
-  MESSAGE("shell cells: " << shell);
-  // The shell is populated (a real skin, not a degenerate one)...
-  CHECK(shell > 10000);
-  // ...comfortable under the old, buggy 20000 budget even before the
-  // cap question (the band never was)...
-  CHECK(shell < 20000);
-  // ...and miles under the lib's published cap.
-  CHECK(shell < static_cast<int>(ws::physics::kMaxBodiesPerWorld) - 1000);
-}
-
-TEST_CASE("shell: every shell body creates in a real World3D, then the player") {
-  // The acceptance half of the capacity regression: run the SAME shell
-  // the app builds against the REAL World3D (the same Desc the app
-  // spells, max_bodies = kMaxBodiesPerWorld), and confirm every cell
-  // creates - including the player's own body AFTER the whole shell,
-  // the exact call order the shipped bug broke.
-  const voxel::World world = make_world();
-  ws::physics3d::World3D::Desc desc{};
-  desc.gravity = ws::math::Vec3{0.0f, -32.0f, 0.0f};
-  desc.fixed_dt = 1.0f / 60.0f;
-  desc.thread_count = 0;
-  desc.max_bodies = ws::physics::kMaxBodiesPerWorld;
-  auto phys = ws::physics3d::World3D::create(desc);
-  REQUIRE(phys.has_value());
-
-  int created = 0;
-  for (int x = 0; x < voxel::kWorldSizeX; ++x) {
-    for (int z = 0; z < voxel::kWorldSizeZ; ++z) {
-      const int top = world.surface_height(x, z);
-      for (int y = top; y >= 0; --y) {
-        if (!world.is_exposed(x, y, z)) {
-          continue;
-        }
-        ws::physics3d::BodyDesc cell{};
-        cell.kind = ws::physics::BodyKind::static_;
-        cell.shape = ws::physics3d::Box{
-            ws::math::Vec3{0.5f, 0.5f, 0.5f}};
-        cell.transform = ws::physics3d::Transform{
-            ws::math::Vec3{static_cast<float>(x) + 0.5f,
-                           static_cast<float>(y) + 0.5f,
-                           static_cast<float>(z) + 0.5f},
-            {}};
-        const auto id = phys->create_body(cell);
-        REQUIRE(id.has_value());
-        ++created;
-      }
-    }
-  }
-  MESSAGE("bodies created: " << created);
-  CHECK(created > 10000);  // the shell, whole
-  CHECK(created < 20000);   // inside even the old buggy budget
-
-  // The player's body, after the entire shell - the order the bug broke.
-  ws::physics3d::BodyDesc player{};
-  player.kind = ws::physics::BodyKind::dynamic;
-  player.shape = ws::physics3d::Box{
-      ws::math::Vec3{0.3f, 0.9f, 0.3f}};
-  player.transform = ws::physics3d::Transform{
-      ws::math::Vec3{64.5f, 40.0f, 64.5f}, {}};
-  const auto player_id = phys->create_body(player);
-  REQUIRE(player_id.has_value());
-  // And it steps: one advance with the whole shell standing.
-  REQUIRE(phys->advance(1.0f / 60.0f).has_value());
-  const auto state = phys->body_state(*player_id);
-  REQUIRE(state.has_value());
-  CHECK(state->position.y < 40.0f);  // gravity is already pulling it
-}
-
 // --- the frame regression: the game->render map is a ROTATION ----------------------
 //
 // The field report "mouse x is inverted" was the first build's frame
@@ -506,92 +414,72 @@ TEST_CASE("frame: the camera reads the rotated world the right way round") {
   CHECK(ws::math::dot(w_s, fwd) < -9.0f);
 }
 
-TEST_CASE("collision: greedy chunk boxes exactly cover solid voxels") {
-  voxel::World world;
-  world.generate(0xC0FFEEu);
-
-  // Exercise a chunk with terrain and likely tree/overhang geometry.
-  constexpr int cx = 4;
-  constexpr int cz = 4;
-  const auto boxes = world.collision_boxes(cx, cz);
-  REQUIRE(!boxes.empty());
-
-  std::vector<std::uint8_t> covered(voxel::kBlocksPerChunk, 0);
-  for (const auto& box : boxes) {
-    const int min_x = static_cast<int>(std::lround(
-        box.center.x - box.half_extents.x)) - cx * voxel::kChunkSizeX;
-    const int min_y = static_cast<int>(std::lround(
-        box.center.y - box.half_extents.y));
-    const int min_z = static_cast<int>(std::lround(
-        box.center.z - box.half_extents.z)) - cz * voxel::kChunkSizeZ;
-    const int size_x = static_cast<int>(std::lround(
-        box.half_extents.x * 2.0f));
-    const int size_y = static_cast<int>(std::lround(
-        box.half_extents.y * 2.0f));
-    const int size_z = static_cast<int>(std::lround(
-        box.half_extents.z * 2.0f));
-    CHECK(size_x > 0);
-    CHECK(size_y > 0);
-    CHECK(size_z > 0);
-    for (int y = min_y; y < min_y + size_y; ++y) {
-      for (int z = min_z; z < min_z + size_z; ++z) {
-        for (int x = min_x; x < min_x + size_x; ++x) {
-          REQUIRE(x >= 0);
-          REQUIRE(x < voxel::kChunkSizeX);
-          REQUIRE(y >= 0);
-          REQUIRE(y < voxel::kChunkSizeY);
-          REQUIRE(z >= 0);
-          REQUIRE(z < voxel::kChunkSizeZ);
-          const auto i = static_cast<std::size_t>(
-              voxel::block_index(x, y, z));
-          CHECK(covered[i] == 0);  // no overlapping collision boxes
-          CHECK(voxel::is_solid(world.block_at(
-              cx * voxel::kChunkSizeX + x, y,
-              cz * voxel::kChunkSizeZ + z)));
-          covered[i] = 1;
-        }
-      }
-    }
-  }
-
-  std::size_t solid_count = 0;
-  for (int y = 0; y < voxel::kChunkSizeY; ++y) {
-    for (int z = 0; z < voxel::kChunkSizeZ; ++z) {
-      for (int x = 0; x < voxel::kChunkSizeX; ++x) {
-        const bool solid = voxel::is_solid(world.block_at(
-            cx * voxel::kChunkSizeX + x, y,
-            cz * voxel::kChunkSizeZ + z));
-        const auto i = static_cast<std::size_t>(
-            voxel::block_index(x, y, z));
-        CHECK((covered[i] != 0) == solid);
-        solid_count += solid ? 1u : 0u;
-      }
-    }
-  }
-  CHECK(solid_count > 0);
-  CHECK(boxes.size() < solid_count);
+TEST_CASE("voxel grid: raycast shares the DDA traversal used by interaction") {
+  voxel::World world = make_world();
+  const auto grid = world.collision_grid();
+  const int x = 64;
+  const int z = 64;
+  const int top = world.surface_height(x, z);
+  REQUIRE(top >= 0);
+  const auto hit = grid.raycast(
+      ws::math::Vec3{static_cast<float>(x) + 0.5f,
+                     static_cast<float>(top) + 5.0f,
+                     static_cast<float>(z) + 0.5f},
+      ws::math::Vec3{0.0f, -1.0f, 0.0f}, 10.0f);
+  CHECK(hit.hit);
+  CHECK(hit.cell.x == x);
+  CHECK(hit.cell.z == z);
+  CHECK(hit.normal.y == 1);
+  CHECK(hit.distance == doctest::Approx(5.0f));
 }
 
-TEST_CASE("collision: chunk boxes update after digging and placing") {
-  voxel::World world;
-  world.generate(0xC0FFEEu);
+TEST_CASE("voxel grid: swept AABB stops at walls and slides along them") {
+  // A one-cell-thick wall at x=3, extending over the player's z/y span.
+  struct Grid {
+    static bool solid(const void*, int x, int y, int z) noexcept {
+      return x == 3 && y >= 0 && y < 4 && z >= -2 && z < 3;
+    }
+  };
+  const ws::physics3d::VoxelGrid3D grid{
+      {{-8, -4, -8}, {16, 12, 16}, nullptr, &Grid::solid}};
+  const ws::physics3d::Aabb player{
+      ws::math::Vec3{1.0f, 1.0f, 0.0f},
+      ws::math::Vec3{1.6f, 2.8f, 0.6f}};
+  const auto moved = grid.sweep_aabb(player, ws::math::Vec3{4.0f, 0.0f, 2.0f});
+  CHECK(moved.hit_x);
+  CHECK(moved.bounds.max.x <= doctest::Approx(3.0f).epsilon(0.002));
+  CHECK(moved.bounds.min.z > player.min.z + 1.5f);
+}
+
+TEST_CASE("voxel grid: high-speed vertical sweep cannot tunnel through floor") {
+  struct Grid {
+    static bool solid(const void*, int x, int y, int z) noexcept {
+      return y == 0 && x >= -2 && x <= 2 && z >= -2 && z <= 2;
+    }
+  };
+  const ws::physics3d::VoxelGrid3D grid{
+      {{-4, -2, -4}, {8, 8, 8}, nullptr, &Grid::solid}};
+  const ws::physics3d::Aabb player{
+      ws::math::Vec3{-0.3f, 5.0f, -0.3f},
+      ws::math::Vec3{0.3f, 6.8f, 0.3f}};
+  const auto moved = grid.sweep_aabb(player, ws::math::Vec3{0.0f, -20.0f, 0.0f});
+  CHECK(moved.hit_y);
+  CHECK(moved.bounds.min.y >= doctest::Approx(1.0f).epsilon(0.002));
+  CHECK(grid.overlaps(moved.bounds) == false);
+}
+
+TEST_CASE("voxel grid: world edits are visible without rebuilding collision data") {
+  voxel::World world = make_world();
+  const auto grid = world.collision_grid();
   constexpr int x = 64;
   constexpr int z = 64;
   const int y = world.surface_height(x, z);
   REQUIRE(y >= 0);
-
-  const auto before = world.collision_boxes(x / voxel::kChunkSizeX,
-                                             z / voxel::kChunkSizeZ);
-  REQUIRE(!before.empty());
+  CHECK(grid.is_solid(x, y, z));
   REQUIRE(world.set_block(x, y, z, voxel::Block::air));
-  const auto dug = world.collision_boxes(x / voxel::kChunkSizeX,
-                                          z / voxel::kChunkSizeZ);
-  CHECK(dug.size() <= before.size() + 6);
-
+  CHECK_FALSE(grid.is_solid(x, y, z));
   REQUIRE(world.set_block(x, y, z, voxel::Block::stone));
-  const auto placed = world.collision_boxes(x / voxel::kChunkSizeX,
-                                             z / voxel::kChunkSizeZ);
-  CHECK(!placed.empty());
+  CHECK(grid.is_solid(x, y, z));
 }
 
 TEST_CASE("menu: the pause layout centers the pair on the frame") {
