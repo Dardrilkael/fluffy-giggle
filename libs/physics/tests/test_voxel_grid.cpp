@@ -36,8 +36,8 @@ TEST_CASE("voxel grid: DDA raycast returns the first occupied cell and face") {
   const auto hit = grid.raycast(Vec3{0.5f, 2.5f, 0.5f},
                                 Vec3{0.0f, -4.0f, 0.0f}, 8.0f);
   REQUIRE(hit.hit);
-  CHECK(hit.cell == ws::math::IVec3{0, 0, 0});
-  CHECK(hit.normal == ws::math::IVec3{0, 1, 0});
+  CHECK((hit.cell == ws::math::IVec3{0, 0, 0}));
+  CHECK((hit.normal == ws::math::IVec3{0, 1, 0}));
   CHECK(hit.distance == doctest::Approx(2.5f));
   CHECK_FALSE(grid.raycast(Vec3{2.5f, 2.5f, 2.5f},
                            Vec3{1.0f, 0.0f, 0.0f}, 8.0f).hit);
