@@ -81,8 +81,13 @@ float shadow_factor(vec3 world, vec3 n) {
     // surfaces that graze the light.
     const vec4 clip = scene.light_view_proj * vec4(world + n * scene.shadow_params.w, 1.0);
     const vec2 uv = clip.xy * 0.5 + 0.5;
-    const float depth = clip.z;
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || depth > 1.0) {
+    // A normal offset alone cannot remove depth-buffer acne on broad,
+    // nearly coplanar voxel faces. Bias the comparison reference toward
+    // the light as well; the slope term is largest at grazing angles.
+    const float ndl = max(dot(n, normalize(scene.light_dir.xyz)), 0.0);
+    const float depth = clip.z - (0.0012 + 0.0018 * (1.0 - ndl));
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 ||
+        depth < 0.0 || depth > 1.0) {
         return 1.0;
     }
     float lit = 0.0;
