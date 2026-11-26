@@ -1,6 +1,6 @@
-// apps/voxel_game - player.cpp: backend-independent FPS character movement.
+// apps/voxel_game - character_controller.cpp: backend-independent FPS character movement.
 
-#include "player.hpp"
+#include <ws/physics/3d/character_controller.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -54,7 +54,7 @@ ws::physics3d::Aabb CharacterController::bounds() const noexcept {
   return {position_ - half, position_ + half};
 }
 
-void Player::tick(const MoveInput& input, float dt,
+void CharacterController::tick(const MoveInput& input, float dt,
                   const ws::physics3d::VoxelGrid3D& grid) noexcept {
   if (!std::isfinite(dt) || dt <= 0.0f) return;
   dt = std::min(dt, 0.05f);
@@ -152,13 +152,13 @@ void Player::tick(const MoveInput& input, float dt,
   }
 }
 
-ws::math::Vec3 Player::eye_position() const noexcept {
+ws::math::Vec3 CharacterController::eye_position() const noexcept {
   return {position_.x,
           position_.y + (tuning_.eye_height - tuning_.half_height),
           position_.z};
 }
 
-ws::math::Vec3 Player::look_direction() const noexcept {
+ws::math::Vec3 CharacterController::look_direction() const noexcept {
   const float cp = std::cos(pitch_);
   return {std::sin(yaw_) * cp, std::sin(pitch_), -std::cos(yaw_) * cp};
 }
