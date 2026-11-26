@@ -31,22 +31,23 @@ script's contract). Output is deterministic - same pack, same bytes.
 Usage:
   python3 scripts/create_atlas.py            # regenerate in place
   python3 scripts/create_atlas.py --check    # staleness check only
-  python3 scripts/create_atlas.py --assets <dir>   # default:
-     /home/z/my-project/textures-extracted/textures/block
+  python3 scripts/create_atlas.py --assets <dir>   # extracted pack directory
+  python3 scripts/create_atlas.py --check            # verify generated header
 """
 import sys
 import os
 import io
 from PIL import Image
 
-REPO = "/home/z/fluffy-giggle"
-OUT_HPP = f"{REPO}/apps/voxel_game/src/texture_atlas.hpp"
-OUT_PNG = "/home/z/my-project/download/atlas_preview.png"
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT_HPP = os.path.join(REPO, "apps", "voxel_game", "src", "texture_atlas.hpp")
+OUT_PNG = os.path.join(REPO, "download", "atlas_preview.png")
 
 TILE_PX = 64          # the emitted tile size (kTilePixels)
 FACE_ORDER = ["top", "bottom", "east", "west", "south", "north"]
 
-# The game's Block vocabulary (world.hpp enum order, value = row index).\n# New block variants use ordered asset fallbacks so older packs remain valid.
+# The game's Block vocabulary (world.hpp enum order, value = row index).
+# New block variants use ordered asset fallbacks so older packs remain valid.
 # Per block: candidates for the TOP, BOTTOM, and SIDE face groups, in
 # fallback order - the first file that exists wins. None = never meshed
 # (air) or optional (water: absent art builds with a zero row).
@@ -258,7 +259,7 @@ inline constexpr const char* kTileNames[kTileCount] = {{
 def main():
     args = sys.argv[1:]
     check = "--check" in args
-    assets = "/home/z/my-project/textures-extracted/textures/block"
+    assets = os.path.join(REPO, "assets", "minecraft", "textures", "block")
     if "--assets" in args:
         assets = args[args.index("--assets") + 1]
 
@@ -275,7 +276,9 @@ def main():
               "scripts/create_atlas.py")
         return 1
 
-    with open(OUT_HPP, "w") as f:
+    os.makedirs(os.path.dirname(OUT_HPP), exist_ok=True)
+    os.makedirs(os.path.dirname(OUT_PNG), exist_ok=True)
+    with open(OUT_HPP, "w", encoding="utf-8", newline="\n") as f:
         f.write(hpp)
     preview.save(OUT_PNG)
     total = sum(len(open(os.devnull).read()) for _ in ())  # keep flake quiet
