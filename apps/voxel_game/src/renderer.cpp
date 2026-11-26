@@ -156,95 +156,15 @@ ws::ui::r2d::Camera3D begin_scene(const Player& player, float fov_degrees,
   return camera;
 }
 
-VoxelRenderer::VoxelRenderer()
-    : jobs_(std::make_unique<MeshJob[]>(kQueueCapacity)),
-      worker_(&VoxelRenderer::worker_loop, this) {}
-VoxelRenderer::~VoxelRenderer() {
-  { std::lock_guard<std::mutex> lock(queue_mutex_); stopping_=true; }
-  queue_cv_.notify_all(); if(worker_.joinable()) worker_.join();
-}
-void VoxelRenderer::worker_loop() {
-  for (;;) {
-    MeshJob job;
-    { std::unique_lock<std::mutex> lock(queue_mutex_);
-      queue_cv_.wait(lock,[this]{return stopping_ || queue_count_!=0;});
-      if(stopping_ && queue_count_==0) return;
-      // Select the closest queued chunk at dequeue time. This keeps the
-      // queue responsive to player movement without sorting or reallocating
-      // the fixed-capacity job storage every frame.
-      std::size_t best = 0;
-      float best_distance_sq = std::numeric_limits<float>::max();
-      for (std::size_t i = 0; i < queue_count_; ++i) {
-        const float dx = (static_cast<float>(jobs_[i].snapshot.cx) + 0.5f) *
-                             static_cast<float>(kChunkSizeX) -
-                         priority_origin_x_;
-        const float dz = (static_cast<float>(jobs_[i].snapshot.cz) + 0.5f) *
-                             static_cast<float>(kChunkSizeZ) -
-                         priority_origin_z_;
-        const float distance_sq = dx * dx + dz * dz;
-        if (distance_sq < best_distance_sq) {
-          best_distance_sq = distance_sq;
-          best = i;
-        }
-      }
-      job = std::move(jobs_[best]);
-      // Unordered removal: one move, no shifting the remaining snapshots.
-      --queue_count_;
-      if (best != queue_count_) jobs_[best] = std::move(jobs_[queue_count_]);
-    }
-    MeshResult result; result.revision=job.snapshot.revision;
-    mesh_chunk_snapshot(job.snapshot,result.tiles);
-    const auto slot=chunk_slot(job.snapshot.cx,job.snapshot.cz);
-    { std::lock_guard<std::mutex> lock(queue_mutex_);
-      if(result.revision==revisions_[slot]) { result.ready=true; completed_[slot]=std::move(result); }
-    }
-  }
-}
+VoxelRenderer::VoxelRenderer() = default;
+VoxelRenderer::~VoxelRenderer() = default;
+
 void VoxelRenderer::set_priority_origin(float x, float z) {
-  std::lock_guard<std::mutex> lock(queue_mutex_);
-  priority_origin_x_ = x;
-  priority_origin_z_ = z;
+  async_mesher_.set_priority_origin(x, z);
 }
-void VoxelRenderer::request_rebuild_chunk(const World& world,int cx,int cz) {
-  if(cx<0||cx>=kWorldChunksX||cz<0||cz>=kWorldChunksZ) return;
-  std::lock_guard<std::mutex> lock(queue_mutex_);
-  const auto slot=chunk_slot(cx,cz); const auto rev=++revisions_[slot]; completed_[slot].ready=false;
-  MeshJob job; job.snapshot=world.snapshot_chunk(cx,cz,rev);
-  for(std::size_t i=0;i<queue_count_;++i) {
-    if(jobs_[i].snapshot.cx==cx && jobs_[i].snapshot.cz==cz) { jobs_[i]=std::move(job); queue_cv_.notify_one(); return; }
-  }
-  // Capacity equals the total chunk count; after coalescing, a full queue
-  // already contains every chunk, so this is only a defensive fallback.
-  if (queue_count_ == kQueueCapacity) {
-    // Defensive overflow: retain the nearest jobs and discard the farthest.
-    std::size_t farthest = 0;
-    float farthest_distance_sq = -1.0f;
-    for (std::size_t i = 0; i < queue_count_; ++i) {
-      const float dx = (static_cast<float>(jobs_[i].snapshot.cx) + 0.5f) *
-                           static_cast<float>(kChunkSizeX) -
-                       priority_origin_x_;
-      const float dz = (static_cast<float>(jobs_[i].snapshot.cz) + 0.5f) *
-                           static_cast<float>(kChunkSizeZ) -
-                       priority_origin_z_;
-      const float distance_sq = dx * dx + dz * dz;
-      if (distance_sq > farthest_distance_sq) {
-        farthest_distance_sq = distance_sq;
-        farthest = i;
-      }
-    }
-    const float new_dx = (static_cast<float>(cx) + 0.5f) *
-                             static_cast<float>(kChunkSizeX) -
-                         priority_origin_x_;
-    const float new_dz = (static_cast<float>(cz) + 0.5f) *
-                             static_cast<float>(kChunkSizeZ) -
-                         priority_origin_z_;
-    if (new_dx * new_dx + new_dz * new_dz >= farthest_distance_sq) return;
-    jobs_[farthest] = std::move(job);
-    queue_cv_.notify_one();
-    return;
-  }
-  jobs_[queue_count_++] = std::move(job);
-  queue_cv_.notify_one();
+
+void VoxelRenderer::request_rebuild_chunk(const World& world, int cx, int cz) {
+  async_mesher_.request(world, cx, cz);
 }
 void VoxelRenderer::upload_result(int cx, int cz,
                                   const std::vector<CpuMeshData>& tiles) {
@@ -312,17 +232,17 @@ void VoxelRenderer::upload_result(int cx, int cz,
                        std::make_move_iterator(replacement.end()));
 }
 void VoxelRenderer::process_completed(std::size_t max_jobs) {
-  std::size_t count=0;
-  const std::size_t start=upload_cursor_;
-  for(std::size_t offset=0;offset<kChunkCount&&count<max_jobs;++offset) {
-    const std::size_t slot=(start+offset)%kChunkCount;
-    MeshResult result;
-    { std::lock_guard<std::mutex> lock(queue_mutex_); if(!completed_[slot].ready) continue;
-      if(completed_[slot].revision!=revisions_[slot]){completed_[slot].ready=false;continue;}
-      result=std::move(completed_[slot]);completed_[slot].ready=false;
-    }
-    upload_result(static_cast<int>(slot%kWorldChunksX),static_cast<int>(slot/kWorldChunksX),result.tiles);
-    ++count; upload_cursor_=(slot+1)%kChunkCount;
+  std::size_t count = 0;
+  const std::size_t start = upload_cursor_;
+  for (std::size_t offset = 0; offset < kChunkCount && count < max_jobs;
+       ++offset) {
+    const std::size_t slot = (start + offset) % kChunkCount;
+    const int cx = static_cast<int>(slot % kWorldChunksX);
+    const int cz = static_cast<int>(slot / kWorldChunksX);
+    if (!async_mesher_.take_completed(cx, cz, cpu_mesh_scratch_)) continue;
+    upload_result(cx, cz, cpu_mesh_scratch_);
+    ++count;
+    upload_cursor_ = (slot + 1) % kChunkCount;
   }
 }
 void VoxelRenderer::rebuild_chunk(const World& world, int cx, int cz) {
