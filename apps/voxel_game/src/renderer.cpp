@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <iterator>
+#include <limits>
 #include <utility>
 
 #include <ws/core/log.hpp>
@@ -168,7 +169,28 @@ void VoxelRenderer::worker_loop() {
     { std::unique_lock<std::mutex> lock(queue_mutex_);
       queue_cv_.wait(lock,[this]{return stopping_ || queue_count_!=0;});
       if(stopping_ && queue_count_==0) return;
-      job=std::move(jobs_[queue_head_]); queue_head_=(queue_head_+1)%kQueueCapacity; --queue_count_;
+      // Select the closest queued chunk at dequeue time. This keeps the
+      // queue responsive to player movement without sorting or reallocating
+      // the fixed-capacity job storage every frame.
+      std::size_t best = 0;
+      float best_distance_sq = std::numeric_limits<float>::max();
+      for (std::size_t i = 0; i < queue_count_; ++i) {
+        const float dx = (static_cast<float>(jobs_[i].snapshot.cx) + 0.5f) *
+                             static_cast<float>(kChunkSizeX) -
+                         priority_origin_x_;
+        const float dz = (static_cast<float>(jobs_[i].snapshot.cz) + 0.5f) *
+                             static_cast<float>(kChunkSizeZ) -
+                         priority_origin_z_;
+        const float distance_sq = dx * dx + dz * dz;
+        if (distance_sq < best_distance_sq) {
+          best_distance_sq = distance_sq;
+          best = i;
+        }
+      }
+      job = std::move(jobs_[best]);
+      // Unordered removal: one move, no shifting the remaining snapshots.
+      --queue_count_;
+      if (best != queue_count_) jobs_[best] = std::move(jobs_[queue_count_]);
     }
     MeshResult result; result.revision=job.snapshot.revision;
     mesh_chunk_snapshot(job.snapshot,result.tiles);
@@ -178,19 +200,51 @@ void VoxelRenderer::worker_loop() {
     }
   }
 }
+void VoxelRenderer::set_priority_origin(float x, float z) {
+  std::lock_guard<std::mutex> lock(queue_mutex_);
+  priority_origin_x_ = x;
+  priority_origin_z_ = z;
+}
 void VoxelRenderer::request_rebuild_chunk(const World& world,int cx,int cz) {
   if(cx<0||cx>=kWorldChunksX||cz<0||cz>=kWorldChunksZ) return;
   std::lock_guard<std::mutex> lock(queue_mutex_);
   const auto slot=chunk_slot(cx,cz); const auto rev=++revisions_[slot]; completed_[slot].ready=false;
   MeshJob job; job.snapshot=world.snapshot_chunk(cx,cz,rev);
   for(std::size_t i=0;i<queue_count_;++i) {
-    const auto q=(queue_head_+i)%kQueueCapacity;
-    if(jobs_[q].snapshot.cx==cx && jobs_[q].snapshot.cz==cz) { jobs_[q]=std::move(job); queue_cv_.notify_one(); return; }
+    if(jobs_[i].snapshot.cx==cx && jobs_[i].snapshot.cz==cz) { jobs_[i]=std::move(job); queue_cv_.notify_one(); return; }
   }
   // Capacity equals the total chunk count; after coalescing, a full queue
   // already contains every chunk, so this is only a defensive fallback.
-  if(queue_count_==kQueueCapacity) { queue_head_=(queue_head_+1)%kQueueCapacity; --queue_count_; }
-  const auto tail=(queue_head_+queue_count_)%kQueueCapacity; jobs_[tail]=std::move(job); ++queue_count_; queue_cv_.notify_one();
+  if (queue_count_ == kQueueCapacity) {
+    // Defensive overflow: retain the nearest jobs and discard the farthest.
+    std::size_t farthest = 0;
+    float farthest_distance_sq = -1.0f;
+    for (std::size_t i = 0; i < queue_count_; ++i) {
+      const float dx = (static_cast<float>(jobs_[i].snapshot.cx) + 0.5f) *
+                           static_cast<float>(kChunkSizeX) -
+                       priority_origin_x_;
+      const float dz = (static_cast<float>(jobs_[i].snapshot.cz) + 0.5f) *
+                           static_cast<float>(kChunkSizeZ) -
+                       priority_origin_z_;
+      const float distance_sq = dx * dx + dz * dz;
+      if (distance_sq > farthest_distance_sq) {
+        farthest_distance_sq = distance_sq;
+        farthest = i;
+      }
+    }
+    const float new_dx = (static_cast<float>(cx) + 0.5f) *
+                             static_cast<float>(kChunkSizeX) -
+                         priority_origin_x_;
+    const float new_dz = (static_cast<float>(cz) + 0.5f) *
+                             static_cast<float>(kChunkSizeZ) -
+                         priority_origin_z_;
+    if (new_dx * new_dx + new_dz * new_dz >= farthest_distance_sq) return;
+    jobs_[farthest] = std::move(job);
+    queue_cv_.notify_one();
+    return;
+  }
+  jobs_[queue_count_++] = std::move(job);
+  queue_cv_.notify_one();
 }
 void VoxelRenderer::upload_result(int cx, int cz,
                                   const std::vector<CpuMeshData>& tiles) {
