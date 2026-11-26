@@ -1345,7 +1345,7 @@ inline constexpr std::array<std::uint8_t, 1059> kTile7Png{
 //     0 top  1 bottom  2 east  3 west  4 south  5 north
 // Row index = Block's value (air..water). -1 = never read (air, and a
 // water row when the pack carries no water art - water never meshes).
-inline constexpr int kTileFor[7][6] = {
+inline constexpr int kTileFor[14][6] = {
     { -1, -1, -1, -1, -1, -1 },  // air
     {  0,  1,  2,  2,  2,  2 },  // grass
     {  1,  1,  1,  1,  1,  1 },  // dirt
@@ -1353,6 +1353,13 @@ inline constexpr int kTileFor[7][6] = {
     {  4,  4,  5,  5,  5,  5 },  // wood
     {  6,  6,  6,  6,  6,  6 },  // sand
     {  7, -1, -1, -1, -1, -1 },  // water
+    {  3,  3,  3,  3,  3,  3 },   // cobblestone
+    {  4,  4,  5,  5,  5,  5 },   // planks
+    {  3,  3,  3,  3,  3,  3 },   // bricks
+    {  6,  6,  6,  6,  6,  6 },   // glass
+    {  2,  2,  2,  2,  2,  2 },   // leaves
+    {  3,  3,  3,  3,  3,  3 },   // coal ore
+    {  3,  3,  3,  3,  3,  3 },   // iron ore
 };
 
 // The slot manifest, first-use order - the creator's own derivation
