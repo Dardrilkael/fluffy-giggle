@@ -16,17 +16,15 @@
 #pragma once
 
 #include <array>
-#include <condition_variable>
 #include <cstdint>
 #include <memory>
-#include <mutex>
-#include <thread>
 #include <vector>
 
 #include <ws/math/vecmath.hpp>
 #include <ws/ui/renderer2d.hpp>  // Camera3D
 #include <ws/ui/renderer3d.hpp>  // draw_mesh, set_light
 
+#include "async_mesher.hpp"
 #include "perf.hpp"
 #include "player.hpp"
 #include "texture_atlas.hpp"
@@ -92,27 +90,15 @@ class VoxelRenderer {
   }
 
  private:
-  struct MeshJob { ChunkMeshSnapshot snapshot{}; };
-  struct MeshResult { bool ready = false; std::uint64_t revision = 0; std::vector<CpuMeshData> tiles; };
   static constexpr std::size_t kChunkCount = static_cast<std::size_t>(kWorldChunksX*kWorldChunksZ);
-  static constexpr std::size_t kQueueCapacity = kChunkCount;
-  void worker_loop();
   void upload_result(int cx, int cz, const std::vector<CpuMeshData>& tiles);
   [[nodiscard]] static constexpr std::size_t chunk_slot(int cx,int cz) { return static_cast<std::size_t>(cz*kWorldChunksX+cx); }
   std::vector<ChunkMesh> chunk_meshes_;
   // Tile-indexed CPU geometry scratch. clear() preserves capacity, avoiding
   // repeated vertex/index allocations when the player edits the same chunks.
   std::vector<CpuMeshData> cpu_mesh_scratch_;
-  std::array<std::uint64_t,kChunkCount> revisions_{};
-  std::array<MeshResult,kChunkCount> completed_{};
-  std::unique_ptr<MeshJob[]> jobs_;
-  std::size_t queue_count_=0;
-  float priority_origin_x_=0.0f, priority_origin_z_=0.0f;
   std::size_t upload_cursor_=0;
-  std::mutex queue_mutex_;
-  std::condition_variable queue_cv_;
-  bool stopping_=false;
-  std::thread worker_;
+  AsyncChunkMesher async_mesher_;
 };
 
 void draw_world(const VoxelRenderer& renderer,
