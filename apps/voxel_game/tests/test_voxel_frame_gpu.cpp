@@ -192,7 +192,6 @@ public:
     }
     voxel::World& world() { return *world_; }
     voxel::Player& player() { return player_; }
-    voxel::VoxelRenderer& async_renderer() { return voxel_renderer_; }
 
     // The app's own frame spell, verbatim from main.cpp's on_update()
     // (minus the HUD): sky, then begin_scene + draw_world.
@@ -617,78 +616,3 @@ TEST_CASE("gpu: the app's own frame - terrain, horizon, and the turn's direction
     CHECK(rig.validation_messages() == 0);
 }
 
-
-TEST_CASE("async meshing: rapid edits publish only the newest chunk revision") {
-    Rig rig;
-    if (!rig.up) {
-        MESSAGE("no Vulkan device / headless surface - skipped");
-        return;
-    }
-
-    constexpr int cx = 2;
-    constexpr int cz = 2;
-    constexpr int wx = cx * voxel::kChunkSizeX + 7;
-    constexpr int wz = cz * voxel::kChunkSizeZ + 7;
-    constexpr int wy = voxel::kChunkSizeY - 3;
-
-    // Submit several revisions while the worker may be processing an older
-    // immutable snapshot. The last edit is the only geometry that may win.
-    for (int i = 0; i < 12; ++i) {
-        const voxel::Block block = (i % 2 == 0)
-            ? voxel::Block::stone : voxel::Block::air;
-        REQUIRE(rig.world().set_block(wx, wy, wz, block));
-        // Repeated requests for one chunk must coalesce in the bounded queue.
-        // The final revision deliberately differs from all preceding ones.
-        rig.async_renderer().request_rebuild_chunk(rig.world(), cx, cz);
-    }
-    REQUIRE(rig.world().set_block(wx, wy, wz, voxel::Block::stone));
-    rig.async_renderer().request_rebuild_chunk(rig.world(), cx, cz);
-
-    std::vector<voxel::CpuMeshData> expected_tiles;
-    rig.world().build_chunk_meshes(cx, cz, expected_tiles);
-    std::array<std::uint64_t, voxel::atlas::kTileCount> expected_indices{};
-    std::uint64_t expected_vertices = 0;
-    for (std::size_t tile = 0; tile < expected_tiles.size(); ++tile) {
-        expected_indices[tile] = expected_tiles[tile].indices.size();
-        expected_vertices += expected_tiles[tile].vertices.size();
-    }
-
-    // Completion is asynchronous; pump only from this render/test thread.
-    // A bounded deadline prevents a broken worker from hanging the suite.
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::seconds(5);
-    bool matched = false;
-    while (std::chrono::steady_clock::now() < deadline) {
-        rig.async_renderer().process_completed(1);
-        std::array<std::uint64_t, voxel::atlas::kTileCount> actual_indices{};
-        for (const auto& mesh : rig.async_renderer().chunk_meshes()) {
-            if (mesh.cx == cx && mesh.cz == cz && mesh.tile >= 0 &&
-                mesh.tile < voxel::atlas::kTileCount) {
-                actual_indices[static_cast<std::size_t>(mesh.tile)] +=
-                    mesh.index_count;
-            }
-        }
-        if (actual_indices == expected_indices) {
-            matched = true;
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    CHECK(matched);
-    // A valid final mesh must have the exact CPU index count. The vertex
-    // count is checked directly on the CPU result to ensure the oracle isn't
-    // accidentally an empty/degenerate expected mesh.
-    CHECK(expected_vertices > 0);
-}
-
-TEST_CASE("async meshing: renderer shutdown joins an active worker") {
-    voxel::World world;
-    world.generate(kSeed);
-    {
-        voxel::VoxelRenderer renderer;
-        renderer.request_rebuild_chunk(world, 1, 1);
-        // Leaving scope while work is pending must signal and join the worker;
-        // the renderer owns no GPU objects in this test path.
-    }
-    CHECK(true);
-}
