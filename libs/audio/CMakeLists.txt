@@ -10,3 +10,9 @@ target_link_libraries(ws_audio PRIVATE dr_wav)
 target_link_libraries(ws_audio PRIVATE OpenAL)
 
 ws_add_test(audio SOURCES tests/test_audio.cpp)
+
+# Pure DSP suite: no audio device, OpenAL or third-party backend required.
+ws_add_test(audio_reflections SOURCES tests/test_early_reflections.cpp LINK ws::core)
+if(TARGET test_audio_reflections)
+  target_include_directories(test_audio_reflections PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+endif()
