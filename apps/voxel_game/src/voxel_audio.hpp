@@ -22,6 +22,9 @@ inline constexpr float kProbeDistance = 18.0f;
     case Block::cobblestone: return 0.90f;
     case Block::bricks: return 0.86f;
     case Block::wood: return 0.72f;
+    case Block::planks: return 0.72f;
+    case Block::coal_ore: return 0.88f;
+    case Block::iron_ore: return 0.90f;
     case Block::dirt: return 0.58f;
     case Block::sand: return 0.43f;
     case Block::grass: return 0.48f;
@@ -76,6 +79,18 @@ inline constexpr float kProbeDistance = 18.0f;
       --j;
     }
     profile.taps[j] = value;
+  }
+
+  // Keep coincident reflections from a small room below a controlled
+  // combined amplitude. The processor remains a literal sum of taps.
+  float combined_gain = 0.0f;
+  for (std::size_t i = 0; i < profile.count; ++i) {
+    combined_gain += profile.taps[i].gain;
+  }
+  constexpr float kMaxCombinedReflectionGain = 0.75f;
+  if (combined_gain > 0.0f) {
+    profile.wet_gain = std::min(
+        profile.wet_gain, kMaxCombinedReflectionGain / combined_gain);
   }
   return profile;
 }
