@@ -357,7 +357,7 @@ class VoxelApp final : public ws::ui::App {
                      r2d::rgba(135, 196, 250));
       r2d::end();
 
-      const auto cam = voxel::begin_scene(player_, frame.width / frame.height);
+      const auto cam = voxel::begin_scene(player_);
       voxel::draw_world(world_, tile_textures_, cam,
                          frame.width / frame.height);
       r2d::end();
@@ -391,7 +391,7 @@ class VoxelApp final : public ws::ui::App {
       // The panels are modal: do not move or edit the world while open.
       r2d::begin(); r2d::set_layer(0);
       r2d::draw_quad(0, 0, frame.width, frame.height, r2d::rgba(135,196,250));
-      const auto cam = voxel::begin_scene(player_, frame.width / frame.height);
+      const auto cam = voxel::begin_scene(player_);
       voxel::draw_world(world_, tile_textures_, cam, frame.width / frame.height);
       r2d::end();
       r2d::begin(); r2d::set_layer(10); draw_hud(frame); draw_inventory_panels(frame); r2d::end();
@@ -486,12 +486,13 @@ class VoxelApp final : public ws::ui::App {
                    r2d::rgba(135, 196, 250));
     r2d::end();
 
+    const auto cam = voxel::begin_scene(player_);
     const auto draw_t0 = std::chrono::steady_clock::now();
-    const auto cam = voxel::begin_scene(player_, frame.width / frame.height);
     voxel::draw_world(world_, tile_textures_, cam,
                        frame.width / frame.height, &last_counters_);
+    const auto draw_t1 = std::chrono::steady_clock::now();
     r2d::end();
-    timings.draw_ms = voxel::perf::ms_since(draw_t0);
+    timings.draw_ms = voxel::perf::ms_since(draw_t0, draw_t1);
     // Voxel terrain and the character controller use direct grid queries;
     // neither allocates rigid bodies.
     last_counters_.bodies = 0;
@@ -813,17 +814,19 @@ class VoxelApp final : public ws::ui::App {
     r2d::draw_quad(0.0f, 0.0f, frame.width, frame.height,
                    r2d::rgba(10, 12, 16, 160));
 
-    // The title.
-    (void)r2d::draw_text(frame.width * 0.5f - 40.0f,
-                         frame.height * 0.5f - 96.0f, "paused", font_,
+    // Measure the actual font run, then center it with the pure menu layout.
+    const float title_width = r2d::draw_text(-1000.0f, -1000.0f, "paused", font_);
+    const auto title = voxel::menu::layout_title(
+        static_cast<float>(frame.width), static_cast<float>(frame.height),
+        title_width);
+    (void)r2d::draw_text(title.x, title.y, "paused", font_,
                          r2d::rgba(235, 235, 240));
 
     // The buttons: the hovered one brightens (the live mouse position
     // is the OS cursor's own - the pointer is free while the menu is
     // up), the rest sit at rest.
-    voxel::menu::Button buttons[voxel::menu::kButtonCount];
-    voxel::menu::layout(static_cast<float>(frame.width),
-                        static_cast<float>(frame.height), buttons);
+    const auto buttons = voxel::menu::layout(
+        static_cast<float>(frame.width), static_cast<float>(frame.height));
     static constexpr const char* kLabels[voxel::menu::kButtonCount] = {
         "resume (esc)", "quit game"};
     for (int i = 0; i < voxel::menu::kButtonCount; ++i) {
