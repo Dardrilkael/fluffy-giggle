@@ -27,6 +27,7 @@
 #include "player.hpp"
 #include "texture_atlas.hpp"
 #include "world.hpp"
+#include "inventory.hpp"
 
 namespace {
 
@@ -672,7 +673,7 @@ TEST_CASE("atlas: the automatic creator's derived contract is pinned") {
   CHECK(voxel::atlas::kTileFor[0][0] == -1);  // air
   // Every slot the table names exists (the PNG walk answers every
   // named slot and refuses the rest).
-  for (int b = 1; b < 7; ++b) {
+  for (int b = 1; b < static_cast<int>(voxel::Block::count_); ++b) {
     for (int f = 0; f < 6; ++f) {
       const int tile = voxel::atlas::kTileFor[b][f];
       if (tile < 0) {
@@ -686,4 +687,46 @@ TEST_CASE("atlas: the automatic creator's derived contract is pinned") {
   std::size_t dead = 0;
   CHECK(voxel::atlas::tile_png(voxel::atlas::kTileCount, dead) == nullptr);
   CHECK(dead == 0);
+}
+
+TEST_CASE("inventory: stack merging, overflow and removal") {
+  voxel::Inventory inventory;
+  CHECK(inventory.add(voxel::Item::stone, 60) == 60);
+  CHECK(inventory.add(voxel::Item::stone, 10) == 10);
+  CHECK(inventory.count(voxel::Item::stone) == 70);
+  CHECK(inventory.slot(0).count == 64);
+  CHECK(inventory.slot(1).count == 6);
+  CHECK_FALSE(inventory.remove(voxel::Item::stone, 71));
+  CHECK(inventory.remove(voxel::Item::stone, 65));
+  CHECK(inventory.count(voxel::Item::stone) == 5);
+}
+
+TEST_CASE("crafting: consumes ingredients and creates output atomically") {
+  voxel::Inventory inventory;
+  CHECK(inventory.add(voxel::Item::wood, 2) == 2);
+  const auto& planks = voxel::kRecipes[0];
+  REQUIRE(voxel::can_craft(inventory, planks));
+  CHECK(voxel::craft(inventory, planks));
+  CHECK(inventory.count(voxel::Item::wood) == 1);
+  CHECK(inventory.count(voxel::Item::planks) == 4);
+  CHECK(voxel::craft(inventory, planks));
+  CHECK(inventory.count(voxel::Item::wood) == 0);
+  CHECK(inventory.count(voxel::Item::planks) == 8);
+  CHECK_FALSE(voxel::craft(inventory, planks));
+}
+
+TEST_CASE("worldgen: ores and leaves use the expanded block palette") {
+  const voxel::World world = make_world();
+  int coal = 0, iron = 0, leaves = 0;
+  for (int x = 0; x < voxel::kWorldSizeX; ++x)
+    for (int z = 0; z < voxel::kWorldSizeZ; ++z)
+      for (int y = 0; y < voxel::kChunkSizeY; ++y) {
+        const auto b = world.block_at(x,y,z);
+        coal += b == voxel::Block::coal_ore;
+        iron += b == voxel::Block::iron_ore;
+        leaves += b == voxel::Block::leaves;
+      }
+  CHECK(coal > 0);
+  CHECK(iron > 0);
+  CHECK(leaves > 0);
 }
