@@ -434,9 +434,20 @@ TEST_CASE("player: swept grid controller lands, stays supported, and jumps") {
     player.tick(idle, 1.0f / 60.0f, grid);
   }
   CHECK(player.grounded());
+  CHECK(player.velocity().y == doctest::Approx(0.0f));
   CHECK(player.position().y >= static_cast<float>(top) + 1.0f +
                                   0.9f - 0.01f);
   CHECK_FALSE(grid.overlaps(player.bounds()));
+
+  // Standing still must remain stable without accumulating gravity or
+  // sinking incrementally into the supporting voxel.
+  const float supported_y = player.position().y;
+  for (int i = 0; i < 300; ++i) {
+    player.tick(idle, 1.0f / 60.0f, grid);
+  }
+  CHECK(player.grounded());
+  CHECK(player.velocity().y == doctest::Approx(0.0f));
+  CHECK(player.position().y == doctest::Approx(supported_y).epsilon(0.0001));
 
   const float rest_y = player.position().y;
   voxel::Player::MoveInput jump{};
