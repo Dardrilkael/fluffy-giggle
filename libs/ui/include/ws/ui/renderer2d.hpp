@@ -716,6 +716,10 @@ struct Stats {
     std::uint32_t textures = 0;        // live: registry minus freed slots
     bool bindless = false;             // the device probe's texture tier
     bool update_after_bind = false;    // ...and its update-after-bind feature
+    bool gpu_timing_supported = false; // graphics queue has timestamp queries
+    bool gpu_frame_valid = false;      // at least one completed GPU sample
+    float gpu_frame_ms = 0.0f;         // last completed command-buffer duration
+    std::uint64_t gpu_frame_serial = 0; // increments once per resolved sample
 };
 Stats stats();
 
