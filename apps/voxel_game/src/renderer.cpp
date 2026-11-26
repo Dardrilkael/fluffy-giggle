@@ -2,12 +2,11 @@
 
 #include "renderer.hpp"
 
-#include "texture_atlas.hpp"
 #include "frustum.hpp"
+#include "texture_atlas.hpp"
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstddef>
 
 namespace voxel {
@@ -27,7 +26,6 @@ load_tile_textures() {
   }
   return out;
 }
-
 
 
 ws::ui::r3d::Light3D scene_light() {
