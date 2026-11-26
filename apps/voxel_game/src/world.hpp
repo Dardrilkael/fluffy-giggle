@@ -9,7 +9,7 @@
 //     then y: x + z*16 + y*256. Chunk spans are direct contiguous views.
 //   - Meshing: per (chunk, block type) merged mesh with face culling -
 //     a face between two solid blocks never emits (the neighbor rule).
-//     Each mesh is one r3d::create_mesh upload; a rebuild is destroy +
+//     Each mesh is one VoxelRenderer upload upload; a rebuild is destroy +
 //     create (the registry's whole-draw model). At most 6 solid types
 //     per chunk -> 6 meshes per chunk, ~64 draws... per type-grouped
 //     chunk, ~300 total draws for the 8x8 world - the r3d ring's scale.
@@ -34,11 +34,13 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <vector>
+
+#include "voxel_mesh.hpp"
 
 #include <ws/gameplay/chunked_grid3d.hpp>
 #include <ws/physics/3d/voxel_grid.hpp>
-#include <ws/ui/renderer3d.hpp>  // MeshData, Mesh (the registry handle)
 
 namespace voxel {
 
@@ -122,32 +124,14 @@ class World {
   // a chunk-boundary block its neighbor's too).
   bool set_block(int x, int y, int z, Block block);
 
-  // Builds (or rebuilds) one chunk's whole mesh set: one mesh per solid
-  // block type present, each face-culled against the 6-neighbor rule
-  // and uploaded through r3d::create_mesh. A type with no visible faces
-  // has no mesh. Destroys the chunk's previous meshes first (an edit
-  // rebuilds the chunk this way). Needs the renderer alive (call from
-  // on_setup/on_update, not before run()).
-  void rebuild_chunk(int cx, int cz);
+  // Build a renderer-independent CPU mesh snapshot for one chunk.
+  [[nodiscard]] std::vector<ChunkMeshData> build_chunk_meshes(
+      int cx, int cz) const;
 
-  // Rebuilds every chunk's meshes (the startup build: 8x8 chunks).
-  void rebuild_all();
-
-  // Every chunk's meshes (the renderer walks this: one draw_mesh per
-  // non-empty entry, at the entry's tint). index_count carries the mesh's
-  // own triangle count snapshot (create_mesh rounds down to whole triangles).
-  // Entries need not be grouped by (cx, cz); consumers must not infer chunk
-  // boundaries from vector ordering.
-  struct ChunkMesh {
-    int cx = 0;
-    int cz = 0;
-    int tile = -1;  // the atlas tile slot this mesh's faces sample
-    ws::ui::r3d::Mesh mesh{};
-    std::uint32_t index_count = 0;
-  };
-  [[nodiscard]] const std::vector<ChunkMesh>& chunk_meshes() const {
-    return chunk_meshes_;
-  }
+  // Direct read-only access to contiguous chunk storage. Chunk-local
+  // algorithms use this for interior cells and block_at() only for the halo.
+  [[nodiscard]] std::span<const Block> chunk_data(
+      int cx, int cz) const noexcept { return blocks_.chunk(cx, cz); }
 
   // A zero-copy, read-only collision view over the world's chunk data.
   // The view is cheap to copy and remains valid while this World lives.
@@ -181,7 +165,6 @@ class World {
   // One contiguous chunk-major block volume; each chunk span contains
   // kBlocksPerChunk cells with x fastest and y slowest.
   BlockStorage blocks_;
-  std::vector<ChunkMesh> chunk_meshes_;
 };
 
 }  // namespace voxel
