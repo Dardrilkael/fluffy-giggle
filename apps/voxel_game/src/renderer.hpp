@@ -46,7 +46,8 @@ void draw_target_outline(ws::ui::r3d::Mesh mesh,
 // Builds the frame's scene (camera from the player's pose, the scene
 // light), begins the r3d block, and hands the camera back - the game
 // threads it into draw_world for the chunk culling.
-[[nodiscard]] ws::ui::r2d::Camera3D begin_scene(const Player& player);
+[[nodiscard]] ws::ui::r2d::Camera3D begin_scene(const Player& player, float fov_degrees = 70.0f,
+                                                   float render_distance = 260.0f);
 
 // The per-tile block textures (the generated texture_atlas.hpp's
 // atlas::kTileCount PNGs through the engine's memory decoder - one per tile:
