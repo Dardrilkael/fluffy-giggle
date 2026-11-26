@@ -41,8 +41,8 @@ namespace voxel {
 // threads it into draw_world for the chunk culling.
 [[nodiscard]] ws::ui::r2d::Camera3D begin_scene(const Player& player);
 
-// The per-tile block textures (the generated texture_atlas.hpp's atlas::kTileCount
-// tile PNGs through the engine's memory decoder - one texture per tile:
+// The per-tile block textures (the generated texture_atlas.hpp's
+// atlas::kTileCount PNGs through the engine's memory decoder - one per tile:
 // greedy-merged quads carry tile-unit UVs and the engine shader wraps
 // them, so each draw samples its own tile's full [0,1]). Call from
 // on_setup onward; a dead decode answers the white-fallback contract
