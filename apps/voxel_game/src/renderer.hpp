@@ -79,7 +79,7 @@ class VoxelRenderer {
   void rebuild_chunk(const World& world, int cx, int cz);
   void request_rebuild_chunk(const World& world, int cx, int cz);
   // Updates the world-space X/Z origin used to prioritize queued mesh jobs.
-  // The worker reads it under queue_mutex_; no jobs need to be re-enqueued.
+  // The CPU mesher reads it under its queue mutex; no jobs need re-enqueueing.
   void set_priority_origin(float x, float z);
   void process_completed(std::size_t max_jobs = 2);
   void rebuild_all(const World& world);
