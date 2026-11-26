@@ -50,7 +50,7 @@ All scene counters identical. GPU timestamp queries valid throughout.
 
 *Shadow-map cost = full GPU time − no-receive GPU time at same resolution.
 
-**PCF cost is ~0.75 ms across all resolutions** (as expected — PCF work is screen-space, not shadow-map resolution dependent).
+**Full-minus-no-receive GPU delta is ~0.75–0.79 ms** across these three resolutions. This is the incremental cost of the full receiving path in this scene; it is not necessarily pure shader ALU cost. The full-mode summary is recorded here, but separate raw full-mode CSVs and visual screenshots are not present in this experiment directory, so those observations are not independently auditable from the committed artifacts.
 
 ---
 
@@ -66,6 +66,10 @@ All scene counters identical. GPU timestamp queries valid throughout.
 | **Total** | **2048 → 256** | **0.755 ms**   | **100%**             |
 
 **Diminishing returns below 512.** The 2048→1024 step captures 63% of the total possible reduction. 1024→512 captures another 22%. 512→256 yields only 6% (0.05 ms), near the noise floor.
+
+### Visual quality considerations (not a captured visual validation)
+
+The report's texel-density estimates are projections, not measurements from screenshots. A visual review with saved screenshots is still required before treating 512×512 as a validated quality floor.
 
 ### Visual quality projection
 
@@ -84,7 +88,7 @@ At 256×256, shadow edges will show clear stair-stepping. 512×512 is the practi
 **Selected resolution: 512×512**
 
 **Rationale:**
-- Captures 86% of total possible GPU time reduction (0.71/0.83 ms from 2048 baseline)
+- Captures approximately **94%** of the measured 2048→256 GPU-time reduction: (1.642 − 0.935) / (1.642 − 0.887) = 0.707 / 0.755 ≈ 93.6%.
 - Maintains usable shadow quality (0.8 texels/unit at distance 40)
 - 256×256 gives only 0.05 ms additional gain with significant visual degradation
 - PCF cost (~0.75 ms) dominates at lower resolutions — further resolution reduction yields minimal returns
