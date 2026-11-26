@@ -289,6 +289,8 @@ void VoxelRenderer::process_completed(std::size_t max_jobs,
     }
     if (timings != nullptr) {
       timings->cpu_mesh_ms += mesh_ms;
+      timings->mesh_vertices += vertices;
+      timings->mesh_indices += indices;
       ++timings->mesh_jobs;
     }
     upload_result(cx, cz, cpu_mesh_scratch_, timings);
@@ -311,6 +313,10 @@ void VoxelRenderer::rebuild_all(const World& world,
       world.build_chunk_meshes(cx, cz, cpu_mesh_scratch_);
       if (timings != nullptr) {
         timings->cpu_mesh_ms += perf::ms_since(mesh_start);
+        for (const CpuMeshData& tile : cpu_mesh_scratch_) {
+          timings->mesh_vertices += tile.vertices.size();
+          timings->mesh_indices += tile.indices.size();
+        }
         ++timings->mesh_jobs;
       }
       upload_result(cx, cz, cpu_mesh_scratch_, timings);
