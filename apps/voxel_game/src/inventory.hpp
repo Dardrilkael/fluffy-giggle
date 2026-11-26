@@ -31,6 +31,15 @@ class Inventory {
   }
   [[nodiscard]] std::size_t size() const noexcept { return slots_.size(); }
 
+  // Swaps two slots without changing stack counts. Used by the inventory
+  // screen to move items into the selected hotbar position.
+  void swap_slots(std::size_t a, std::size_t b) noexcept {
+    if (a >= slots_.size() || b >= slots_.size() || a == b) return;
+    const ItemStack tmp = slots_[a];
+    slots_[a] = slots_[b];
+    slots_[b] = tmp;
+  }
+
   // Adds as much as possible, merging matching stacks before using empty slots.
   [[nodiscard]] std::uint16_t add(Item item, std::uint16_t amount) noexcept {
     const std::uint16_t requested = amount;
