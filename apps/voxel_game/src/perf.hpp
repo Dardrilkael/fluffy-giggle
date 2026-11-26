@@ -1,45 +1,99 @@
-// apps/voxel_game - perf.hpp: the performance instrumentation (the
-// optimization round's evidence). Pure CPU counters + timers the app's
-// frame loop feeds; draw_hud prints the last sample line.
-//
-// THE BENCHMARK MODE (WS_VOXEL_BENCH=<seconds>): the app runs its own
-// loop with scripted phases instead of waiting for a human:
-//   phase A  spin the camera slowly (a full 360 sweep),
-//   phase B  stand still, look level (the worst-case whole-world view),
-//   phase C  sprint-walk forward while turning,
-//   phase D  break/place bursts (mesh + shell churn).
-// Each phase prints one line per second: fps, phase ms means (cpu
-// total, physics, mesh-rebuild), draw calls, triangles, bodies; a
-// final summary line at the end. The same counters ALSO print in the
-// HUD when no benchmark is running (the user-facing stats line).
-//
-// Everything here is plain data + tiny inline helpers: no renderer
-// types, no physics types - the app tells the counters what happened.
+// Low-overhead voxel-game performance measurements.
+// CPU-side timings are deliberately named as such: draw_ms is command
+// submission time, and upload_ms is CPU staging/create_mesh time. Neither
+// is a measurement of work completed by the GPU.
 
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
 
 #include <ws/core/time.hpp>
-#include <cstdint>
 
 namespace voxel::perf {
 
-// One frame's phase timings (milliseconds, steady_clock).
+// One frame's timings. Worker meshing time is the time spent by the CPU
+// worker, not time charged to the main-thread frame. Upload time measures
+// CPU conversion/staging plus create_mesh submission, not GPU completion.
 struct FrameTimings {
-    float total_ms = 0.0f;      // the whole on_update body
-    float physics_ms = 0.0f;    // player tick + phys advance + contacts
-    float meshes_ms = 0.0f;     // rebuild_chunk calls this frame (edits)
-    float draw_ms = 0.0f;       // draw_world's record pass (draw_mesh calls)
+    float total_ms = 0.0f;
+    float physics_ms = 0.0f;
+    float cpu_mesh_ms = 0.0f;
+    float upload_ms = 0.0f;
+    float draw_ms = 0.0f;  // CPU draw-command recording/submission only
+    std::uint64_t upload_bytes = 0;
+    std::uint32_t mesh_jobs = 0;
+    std::uint32_t upload_capacity_growths = 0;
 };
 
-// The rolling counters the HUD and the benchmark print.
+// Rolling, fixed-storage frame-time sample window. It has no per-frame
+// allocation and computes nearest-rank p50/p95/p99 only when requested.
+class FrameTimeWindow {
+ public:
+    static constexpr std::size_t kCapacity = 8192;
+
+    struct Percentiles {
+        float p50_ms = 0.0f;
+        float p95_ms = 0.0f;
+        float p99_ms = 0.0f;
+    };
+
+    void add(float milliseconds) noexcept {
+        if (!std::isfinite(milliseconds) || milliseconds < 0.0f) return;
+        samples_[next_] = milliseconds;
+        next_ = (next_ + 1) % kCapacity;
+        if (count_ < kCapacity) ++count_;
+    }
+
+    void clear() noexcept {
+        count_ = 0;
+        next_ = 0;
+    }
+
+    [[nodiscard]] std::size_t sample_count() const noexcept {
+        return count_;
+    }
+
+    [[nodiscard]] Percentiles percentiles() const noexcept {
+        Percentiles out{};
+        if (count_ == 0) return out;
+
+        // Sorting a bounded stack copy avoids mutating the live rolling
+        // window and keeps sampling itself O(1).
+        std::array<float, kCapacity> ordered{};
+        for (std::size_t i = 0; i < count_; ++i) {
+            ordered[i] = samples_[i];
+        }
+        std::sort(ordered.begin(),
+                  ordered.begin() + static_cast<std::ptrdiff_t>(count_));
+
+        const auto nearest_rank = [this](double percentile) {
+            const double rank = std::ceil(percentile *
+                                          static_cast<double>(count_));
+            return static_cast<std::size_t>(rank > 0.0 ? rank - 1.0 : 0.0);
+        };
+        out.p50_ms = ordered[nearest_rank(0.50)];
+        out.p95_ms = ordered[nearest_rank(0.95)];
+        out.p99_ms = ordered[nearest_rank(0.99)];
+        return out;
+    }
+
+ private:
+    std::array<float, kCapacity> samples_{};
+    std::size_t count_ = 0;
+    std::size_t next_ = 0;
+};
+
 struct Counters {
-    std::uint32_t draw_calls = 0;      // draw_mesh calls this frame
-    std::uint32_t triangles = 0;       // indices/3 drawn this frame
-    std::uint32_t bodies = 0;          // live physics bodies
-    std::uint32_t meshes = 0;          // live chunk meshes
-    std::uint32_t chunk_vis = 0;       // distinct (cx, cz) with drawn meshes
+    std::uint32_t draw_calls = 0;
+    std::uint32_t triangles = 0;
+    std::uint32_t bodies = 0;
+    std::uint32_t meshes = 0;
+    std::uint32_t chunk_vis = 0;
 };
 
 inline float ms_since(std::chrono::steady_clock::time_point t0,
