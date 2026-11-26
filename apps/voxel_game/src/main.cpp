@@ -3,8 +3,9 @@
 // THE COMPOSITION (bounce's shape, four libs deep):
 //   ws::ui      - the App shell (window, Vulkan, r2d/r3d), the HUD's
 //                 text/line/quad draws, the input frame
-//   ws::physics - physics3d: the dynamic Box player against a sparse
-//                 static grid of the surface-band solid blocks
+//   ws::physics - backend-independent swept-AABB character collision
+//                 against the voxel occupancy grid; Jolt remains available
+//                 for ordinary dynamic rigid bodies
 //   ws::audio   - synthesized place/break one-shots (bounce's PCM
 //                 pattern through SoundDesc)
 //   ws::core    - Result/Status logging on every fallible call
@@ -67,7 +68,6 @@ namespace {
 
 namespace r2d = ws::ui::r2d;
 namespace r3d = ws::ui::r3d;
-namespace pd = ws::physics3d;
 using ws::math::Vec3;
 
 // GLFW key codes (input.hpp's contract: printables match ASCII).
