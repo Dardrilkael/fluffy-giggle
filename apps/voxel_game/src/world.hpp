@@ -4,9 +4,9 @@
 //   - Blocks: air, grass, dirt, stone, wood, sand, water, cobblestone,
 //     planks, bricks, glass, leaves, coal and iron ore. Per-face shading
 //     comes from the r3d pipeline's directional light.
-//   - Storage: 8x8 chunks of 16x64x16 blocks, one flat vector each,
-//     linear index x + z*16 + y*256 (y the slow axis: a column's stack
-//     is contiguous - the walk the mesher and the height probe make).
+//   - Storage: 8x8 chunks of 16x64x16 blocks in one contiguous,
+//     chunk-major allocation. Within each chunk x is fastest, then z,
+//     then y: x + z*16 + y*256. Chunk spans are direct contiguous views.
 //   - Meshing: per (chunk, block type) merged mesh with face culling -
 //     a face between two solid blocks never emits (the neighbor rule).
 //     Each mesh is one r3d::create_mesh upload; a rebuild is destroy +
@@ -94,9 +94,13 @@ inline constexpr int kWorldChunksZ = 8;
 inline constexpr int kWorldSizeX = kWorldChunksX * kChunkSizeX;
 inline constexpr int kWorldSizeZ = kWorldChunksZ * kChunkSizeZ;
 
-// In-chunk linear index (see the storage note above).
+using BlockStorage = ws::gameplay::ChunkedGrid3D<
+    Block, kWorldChunksX, kWorldChunksZ,
+    kChunkSizeX, kChunkSizeY, kChunkSizeZ>;
+
+// In-chunk linear index, forwarded to the shared storage contract.
 [[nodiscard]] inline constexpr int block_index(int x, int y, int z) {
-  return x + z * kChunkSizeX + y * kChunkSizeX * kChunkSizeZ;
+  return static_cast<int>(BlockStorage::cell_index(x, y, z));
 }
 
 // --- the world ---------------------------------------------------------------------
@@ -179,11 +183,9 @@ class World {
   static bool solid_query(const void* context, int x, int y,
                           int z) noexcept;
 
-    // One contiguous chunk-major block volume; each chunk span contains
+  // One contiguous chunk-major block volume; each chunk span contains
   // kBlocksPerChunk cells with x fastest and y slowest.
-  ws::gameplay::ChunkedGrid3D<
-      Block, kWorldChunksX, kWorldChunksZ,
-      kChunkSizeX, kChunkSizeY, kChunkSizeZ> blocks_;
+  BlockStorage blocks_;
   std::vector<ChunkMesh> chunk_meshes_;
 };
 
