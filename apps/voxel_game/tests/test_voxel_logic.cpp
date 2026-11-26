@@ -15,6 +15,7 @@
 
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cstdint>
 #include <string>
 
