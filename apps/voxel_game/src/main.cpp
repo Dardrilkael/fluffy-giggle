@@ -637,7 +637,7 @@ class VoxelApp final : public ws::ui::App {
     clicked_ = false;
     if (inventory_open_) {
       const float x = frame.width * 0.5f - 350.0f;
-      const float y = frame.height * 0.5f - 190.0f;
+      const float y = (frame.height - 370.0f) * 0.5f;
       const float gx = x + 28.0f, gy = y + 100.0f;
       for (int i = 0; i < static_cast<int>(voxel::kInventorySize); ++i) {
         const int col = i % 9, row = i / 9;
@@ -654,9 +654,9 @@ class VoxelApp final : public ws::ui::App {
       }
     } else if (crafting_open_) {
       const float x = frame.width * 0.5f - 270.0f;
-      const float y = frame.height * 0.5f - 205.0f;
+      const float y = (frame.height - 430.0f) * 0.5f;
       for (std::size_t i = 0; i < voxel::kRecipes.size(); ++i) {
-        const float sy = y + 104.0f + static_cast<float>(i) * 48.0f;
+        const float sy = y + 100.0f + static_cast<float>(i) * 48.0f;
         if (mouse_x_ >= x + 24.0f && mouse_x_ <= x + 516.0f &&
             mouse_y_ >= sy && mouse_y_ <= sy + 42.0f) {
           (void)voxel::craft(inventory_, voxel::kRecipes[i]);
