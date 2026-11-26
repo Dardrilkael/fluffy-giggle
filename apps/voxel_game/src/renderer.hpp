@@ -80,6 +80,9 @@ class VoxelRenderer {
   VoxelRenderer& operator=(const VoxelRenderer&) = delete;
   void rebuild_chunk(const World& world, int cx, int cz);
   void request_rebuild_chunk(const World& world, int cx, int cz);
+  // Updates the world-space X/Z origin used to prioritize queued mesh jobs.
+  // The worker reads it under queue_mutex_; no jobs need to be re-enqueued.
+  void set_priority_origin(float x, float z);
   void process_completed(std::size_t max_jobs = 2);
   void rebuild_all(const World& world);
   void destroy_all();
@@ -103,7 +106,8 @@ class VoxelRenderer {
   std::array<std::uint64_t,kChunkCount> revisions_{};
   std::array<MeshResult,kChunkCount> completed_{};
   std::unique_ptr<MeshJob[]> jobs_;
-  std::size_t queue_head_=0, queue_count_=0;
+  std::size_t queue_count_=0;
+  float priority_origin_x_=0.0f, priority_origin_z_=0.0f;
   std::size_t upload_cursor_=0;
   std::mutex queue_mutex_;
   std::condition_variable queue_cv_;
