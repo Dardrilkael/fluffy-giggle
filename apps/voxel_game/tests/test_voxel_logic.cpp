@@ -1317,8 +1317,14 @@ TEST_CASE("perf: frame evidence structs start clear and duration conversion is e
   const voxel::perf::FrameTimings timings{};
   CHECK(timings.total_ms == 0.0f);
   CHECK(timings.physics_ms == 0.0f);
-  CHECK(timings.meshes_ms == 0.0f);
+  CHECK(timings.cpu_mesh_ms == 0.0f);
+  CHECK(timings.upload_ms == 0.0f);
   CHECK(timings.draw_ms == 0.0f);
+  CHECK(timings.upload_bytes == 0);
+  CHECK(timings.mesh_vertices == 0);
+  CHECK(timings.mesh_indices == 0);
+  CHECK(timings.mesh_jobs == 0);
+  CHECK(timings.upload_capacity_growths == 0);
 
   const voxel::perf::Counters counters{};
   CHECK(counters.draw_calls == 0);
