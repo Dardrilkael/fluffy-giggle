@@ -42,12 +42,13 @@ class VoxelGrid3D {
     bool hit_x = false;
     bool hit_y = false;
     bool hit_z = false;
+    bool ground_contact = false;
 
     [[nodiscard]] bool hit() const noexcept {
       return hit_x || hit_y || hit_z;
     }
     [[nodiscard]] bool grounded() const noexcept {
-      return hit_y && applied.y <= 0.0f;
+      return ground_contact;
     }
   };
 
@@ -272,7 +273,10 @@ class VoxelGrid3D {
       result.bounds.max[static_cast<std::size_t>(best_axis)] += applied;
       result.applied[static_cast<std::size_t>(best_axis)] += applied;
       if (best_axis == 0) result.hit_x = true;
-      if (best_axis == 1) result.hit_y = true;
+      if (best_axis == 1) {
+        result.hit_y = true;
+        result.ground_contact = best_sign > 0.0f;
+      }
       if (best_axis == 2) result.hit_z = true;
     }
   }
@@ -340,7 +344,10 @@ class VoxelGrid3D {
       const float allowed = std::max(0.0f, std::abs(delta) * nearest - skin);
       applied = std::copysign(allowed, delta);
       if (axis == 0) result.hit_x = true;
-      if (axis == 1) result.hit_y = true;
+      if (axis == 1) {
+        result.hit_y = true;
+        result.ground_contact = delta < 0.0f;
+      }
       if (axis == 2) result.hit_z = true;
     }
     result.applied[static_cast<std::size_t>(axis)] += applied;
