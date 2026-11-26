@@ -598,20 +598,10 @@ ws::physics3d::VoxelGrid3D World::collision_grid() const noexcept {
 World::RayHit World::raycast(const float origin[3],
                              const float direction[3],
                              float max_distance) const {
-  const auto hit = collision_grid().raycast(
+  return collision_grid().raycast(
       ws::math::Vec3{origin[0], origin[1], origin[2]},
       ws::math::Vec3{direction[0], direction[1], direction[2]},
       max_distance);
-  RayHit out{};
-  out.hit = hit.hit;
-  out.cell[0] = hit.cell.x;
-  out.cell[1] = hit.cell.y;
-  out.cell[2] = hit.cell.z;
-  out.normal[0] = hit.normal.x;
-  out.normal[1] = hit.normal.y;
-  out.normal[2] = hit.normal.z;
-  out.distance = hit.distance;
-  return out;
 }
 
 }  // namespace voxel
