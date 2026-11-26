@@ -231,7 +231,9 @@ class VoxelApp final : public ws::ui::App {
 
   void on_setup() override {
     // --- the world --------------------------------------------------------
+    const auto generation_start = std::chrono::steady_clock::now();
     world_.generate(kSeed);
+    const float generation_ms = voxel::perf::ms_since(generation_start);
     const int sx = voxel::kWorldSizeX / 2;
     const int sz = voxel::kWorldSizeZ / 2;
     const int surface = world_.surface_height(sx, sz);
@@ -265,7 +267,17 @@ class VoxelApp final : public ws::ui::App {
     }
 
     // --- the chunk meshes (the renderer's one-time upload) -----------------
-    voxel_renderer_.rebuild_all(world_);
+    voxel::perf::FrameTimings startup_metrics{};
+    voxel_renderer_.rebuild_all(world_, &startup_metrics);
+    constexpr float kChunkCount = static_cast<float>(
+        voxel::kWorldChunksX * voxel::kWorldChunksZ);
+    ws::core::info(
+        "voxel: startup generation {:.2f} ms ({:.3f} ms/chunk); "
+        "CPU meshing {:.2f} ms ({:.3f} ms/chunk); "
+        "CPU upload {:.2f} ms, {} bytes",
+        generation_ms, generation_ms / kChunkCount,
+        startup_metrics.cpu_mesh_ms, startup_metrics.cpu_mesh_ms / kChunkCount,
+        startup_metrics.upload_ms, startup_metrics.upload_bytes);
 
     // --- the HUD font -------------------------------------------------------
     font_ = r2d::load_default_font(16.0f,
@@ -318,11 +330,10 @@ class VoxelApp final : public ws::ui::App {
     last_time_ = now;
     const float frame_dt = std::clamp(dt, 0.0f, 0.05f);
     const auto frame_t0 = std::chrono::steady_clock::now();
+    voxel::perf::FrameTimings timings{};
     const Vec3 mesh_priority_origin = player_.eye_position();
     voxel_renderer_.set_priority_origin(mesh_priority_origin.x, mesh_priority_origin.z);
-    voxel_renderer_.process_completed(2);
-    voxel::perf::FrameTimings timings{};
-    mesh_rebuild_ms_ = 0.0f;  // mesh and collision chunk rebuilds feed this
+    voxel_renderer_.process_completed(2, &timings);
 
     const ws::input::InputFrame& input = ws::input::frame_input();
     const r2d::FrameSize frame = r2d::frame_size();
@@ -536,15 +547,20 @@ class VoxelApp final : public ws::ui::App {
     r2d::end();
 
     // --- the instrumentation close -----------------------------------------
-    timings.meshes_ms = mesh_rebuild_ms_;
     timings.total_ms = voxel::perf::ms_since(frame_t0);
     last_timings_ = timings;
+    frame_times_.add(timings.total_ms);
+    const auto percentile_now = std::chrono::steady_clock::now();
+    if (percentile_clock_.time_since_epoch().count() == 0 ||
+        percentile_now - percentile_clock_ >= std::chrono::seconds(1)) {
+      frame_percentiles_ = frame_times_.percentiles();
+      percentile_clock_ = percentile_now;
+    }
     if (bench_.running()) {
       ++bench_frame_;
       bench_.frame(frame_dt, timings, last_counters_);
       if (bench_.advance_phase(frame_dt)) {
-        std::printf("bench: done (%.1f s)\n", bench_.seconds());
-        std::fflush(stdout);
+        bench_.finish();
         request_stop();
       }
     }
@@ -628,20 +644,25 @@ class VoxelApp final : public ws::ui::App {
     // instrumentation's last sample (frame phase means, the draw and
     // body counts) so the running game answers "where does the frame
     // go" without a debugger.
-    char stats[160];
+    char stats[320];
     const Vec3 p = player_.position();
     std::snprintf(stats, sizeof(stats),
                   "fps %u   pos %.1f %.1f %.1f   %s\n"
-                  "cpu %.2fms (phys %.2f mesh %.2f draw %.2f)   draws %u"
-                  " tris %u   bodies %u",
+                  "cpu %.2fms (phys %.2f mesh %.2f upload %.2f submit %.2f)\n"
+                  "p50/p95/p99 %.2f/%.2f/%.2f ms  upload %.1f KB  "
+                  "mesh jobs %u  draws %u tris %u",
                   fps_, p.x, p.y, p.z,
                   player_.grounded() ? "ground" : "air", last_timings_.total_ms,
-                  last_timings_.physics_ms, last_timings_.meshes_ms,
-                  last_timings_.draw_ms, last_counters_.draw_calls,
-                  last_counters_.triangles, last_counters_.bodies);
+                  last_timings_.physics_ms, last_timings_.cpu_mesh_ms,
+                  last_timings_.upload_ms, last_timings_.draw_ms,
+                  frame_percentiles_.p50_ms, frame_percentiles_.p95_ms,
+                  frame_percentiles_.p99_ms,
+                  static_cast<double>(last_timings_.upload_bytes) / 1024.0,
+                  last_timings_.mesh_jobs, last_counters_.draw_calls,
+                  last_counters_.triangles);
     (void)r2d::draw_text(12.0f, 12.0f, stats, font_, r2d::rgba(235, 235, 240));
     (void)r2d::draw_text(
-        12.0f, 32.0f,
+        12.0f, 64.0f,
         "LMB break - RMB place - 1-5 select - WASD move - space jump - "
         "shift sprint - E inventory - C crafting - P settings - F1-F6 craft - esc menu",
         font_, r2d::rgba(160, 164, 174));
@@ -1049,7 +1070,9 @@ class VoxelApp final : public ws::ui::App {
   // benchmark driver (bench.hpp; idle unless WS_VOXEL_BENCH is set).
   voxel::perf::FrameTimings last_timings_{};
   voxel::perf::Counters last_counters_{};
-  float mesh_rebuild_ms_ = 0.0f;
+  voxel::perf::FrameTimeWindow frame_times_{};
+  voxel::perf::FrameTimeWindow::Percentiles frame_percentiles_{};
+  std::chrono::steady_clock::time_point percentile_clock_{};
   voxel::bench::Driver bench_{};
   std::uint32_t bench_frame_ = 0;
 };
