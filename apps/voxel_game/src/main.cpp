@@ -423,7 +423,7 @@ class VoxelApp final : public ws::ui::App {
       // The panels are modal: do not move or edit the world while open.
       r2d::begin(); r2d::set_layer(0);
       r2d::draw_quad(0, 0, frame.width, frame.height, r2d::rgba(135,196,250));
-      const auto cam = voxel::begin_scene(player_);
+      const auto cam = voxel::begin_scene(player_, settings_.fov_degrees, settings_.render_distance);
       voxel::draw_world(world_, tile_textures_, cam, frame.width / frame.height);
       r2d::end();
       r2d::begin(); r2d::set_layer(10); draw_hud(frame); draw_inventory_panels(frame); r2d::end();
@@ -521,7 +521,7 @@ class VoxelApp final : public ws::ui::App {
                    r2d::rgba(135, 196, 250));
     r2d::end();
 
-    const auto cam = voxel::begin_scene(player_);
+    const auto cam = voxel::begin_scene(player_, settings_.fov_degrees, settings_.render_distance);
     const auto draw_t0 = std::chrono::steady_clock::now();
     voxel::draw_world(world_, tile_textures_, cam,
                        frame.width / frame.height, &last_counters_);
@@ -646,7 +646,7 @@ class VoxelApp final : public ws::ui::App {
     (void)r2d::draw_text(
         12.0f, 32.0f,
         "LMB break - RMB place - 1-5 select - WASD move - space jump - "
-        "shift sprint - E inventory - C crafting - F1-F6 craft - esc menu",
+        "shift sprint - E inventory - C crafting - P settings - F1-F6 craft - esc menu",
         font_, r2d::rgba(160, 164, 174));
   }
 
