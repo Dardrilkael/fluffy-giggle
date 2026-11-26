@@ -22,7 +22,7 @@ struct ShadowFlags {
 };
 
 // "full" renders the map and filters receivers; "no-receive" retains the
-// depth-only shadow pass but skips all fragment PCF lookups; "off" does both.
+// depth-only shadow pass but skips fragment PCF lookups; "off" disables both.
 [[nodiscard]] inline constexpr ShadowFlags shadow_flags_from_name(
     std::string_view name) noexcept {
     if (name == "full") return {true, true};
