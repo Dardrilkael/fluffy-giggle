@@ -105,7 +105,7 @@ class AsyncChunkMesher {
       ++stale_discarded_;
       return false;
     }
-    out = std::move(result.tiles);
+    out.swap(result.tiles);
     mesh_ms = result.mesh_ms;
     vertex_count = result.vertex_count;
     index_count = result.index_count;
@@ -164,6 +164,14 @@ class AsyncChunkMesher {
 
       Result result;
       result.revision = job.snapshot.revision;
+      const std::size_t slot = slot_of(job.snapshot.cx, job.snapshot.cz);
+      // The consumer swaps its previous scratch buffers back into this
+      // result slot. Reclaim them before meshing so each chunk reuses its
+      // own tile-vector capacities instead of allocating on every edit.
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        result.tiles.swap(completed_[slot].tiles);
+      }
       const auto mesh_start = std::chrono::steady_clock::now();
       mesh_chunk_snapshot(job.snapshot, result.tiles);
       result.mesh_ms = std::chrono::duration<float, std::milli>(
@@ -172,13 +180,21 @@ class AsyncChunkMesher {
         result.vertex_count += static_cast<std::uint32_t>(tile.vertices.size());
         result.index_count += static_cast<std::uint32_t>(tile.indices.size());
       }
-      const std::size_t slot = slot_of(job.snapshot.cx, job.snapshot.cz);
       {
         std::lock_guard<std::mutex> lock(mutex_);
+        Result& published = completed_[slot];
         if (result.revision == revisions_[slot]) {
-          result.ready = true;
-          completed_[slot] = std::move(result);
+          published.ready = true;
+          published.revision = result.revision;
+          published.mesh_ms = result.mesh_ms;
+          published.vertex_count = result.vertex_count;
+          published.index_count = result.index_count;
+          published.tiles.swap(result.tiles);
         } else {
+          // A newer request owns the next build for this slot. Return the
+          // completed stale buffers to the slot so that build can reuse them.
+          if (!published.ready && published.tiles.empty())
+            published.tiles.swap(result.tiles);
           ++stale_discarded_;
         }
       }
