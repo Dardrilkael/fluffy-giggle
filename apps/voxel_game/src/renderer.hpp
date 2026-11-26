@@ -16,7 +16,10 @@
 #pragma once
 
 #include <array>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include <ws/math/vecmath.hpp>
@@ -70,7 +73,13 @@ class VoxelRenderer {
     std::uint32_t index_count = 0;
   };
 
+  VoxelRenderer();
+  ~VoxelRenderer();
+  VoxelRenderer(const VoxelRenderer&) = delete;
+  VoxelRenderer& operator=(const VoxelRenderer&) = delete;
   void rebuild_chunk(const World& world, int cx, int cz);
+  void request_rebuild_chunk(const World& world, int cx, int cz);
+  void process_completed(std::size_t max_jobs = 2);
   void rebuild_all(const World& world);
   void destroy_all();
 
@@ -79,10 +88,25 @@ class VoxelRenderer {
   }
 
  private:
+  struct MeshJob { ChunkMeshSnapshot snapshot{}; };
+  struct MeshResult { bool ready = false; std::uint64_t revision = 0; std::vector<CpuMeshData> tiles; };
+  static constexpr std::size_t kChunkCount = static_cast<std::size_t>(kWorldChunksX*kWorldChunksZ);
+  static constexpr std::size_t kQueueCapacity = kChunkCount;
+  void worker_loop();
+  void upload_result(int cx, int cz, const std::vector<CpuMeshData>& tiles);
+  [[nodiscard]] static constexpr std::size_t chunk_slot(int cx,int cz) { return static_cast<std::size_t>(cz*kWorldChunksX+cx); }
   std::vector<ChunkMesh> chunk_meshes_;
   // Tile-indexed CPU geometry scratch. clear() preserves capacity, avoiding
   // repeated vertex/index allocations when the player edits the same chunks.
   std::vector<CpuMeshData> cpu_mesh_scratch_;
+  std::array<std::uint64_t,kChunkCount> revisions_{};
+  std::array<MeshResult,kChunkCount> completed_{};
+  std::array<MeshJob,kQueueCapacity> jobs_{};
+  std::size_t queue_head_=0, queue_count_=0;
+  std::mutex queue_mutex_;
+  std::condition_variable queue_cv_;
+  bool stopping_=false;
+  std::thread worker_;
 };
 
 void draw_world(const VoxelRenderer& renderer,
