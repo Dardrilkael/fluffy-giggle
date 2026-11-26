@@ -542,30 +542,36 @@ class VoxelApp final : public ws::ui::App {
     r2d::draw_line(cx, cy - 7.0f, cx, cy + 7.0f, 2.0f,
                    r2d::rgba(255, 255, 255, 220));
 
-    // Nine-slot hotbar, backed by the first nine inventory slots.
-    constexpr float slot_w = 72.0f;
-    constexpr float bar_w = slot_w * kHotbarSlots;
+    // Compact, texture-backed hotbar. Selection is a warm moss accent;
+    // each item icon samples the same PNG used by its world block.
+    constexpr float slot_step = 54.0f;
+    constexpr float slot_size = 50.0f;
+    constexpr float bar_w = slot_step * kHotbarSlots;
     const float bx = (frame.width - bar_w) * 0.5f;
-    const float by = frame.height - 48.0f;
+    const float by = frame.height - 66.0f;
+    r2d::draw_rounded_quad(bx - 8, by - 7, bar_w + 16, 64, 9,
+                           r2d::rgba(17,21,25,218));
     for (int i = 0; i < kHotbarSlots; ++i) {
-      const float sx = bx + static_cast<float>(i) * slot_w;
+      const float sx = bx + static_cast<float>(i) * slot_step;
       const bool selected = i == hotbar_;
-      r2d::draw_quad(sx, by, slot_w - 6.0f, 38.0f,
-                     r2d::rgba(28, 30, 36, 200));
       const auto& stack = inventory_.slot(static_cast<std::size_t>(i));
+      r2d::draw_rounded_quad(sx, by, slot_size, slot_size, 6,
+          selected ? r2d::rgba(139,177,91,255)
+                   : r2d::rgba(78,87,83,255));
+      r2d::draw_rounded_quad(sx + 2, by + 2, slot_size - 4, slot_size - 4, 5,
+          selected ? r2d::rgba(35,47,34,255)
+                   : r2d::rgba(31,36,40,245));
       if (!stack.empty()) {
-        r2d::draw_quad(sx + 5.0f, by + 6.0f, 22.0f, 22.0f, item_tint(stack.item));
-        char label[32]; std::snprintf(label, sizeof(label), "%d %s", i + 1, item_name(stack.item));
-        (void)r2d::draw_text(sx + 30.0f, by + 5.0f, label, font_, selected ? r2d::rgba(255,255,255) : r2d::rgba(168,172,182));
-        char amount[8]; std::snprintf(amount, sizeof(amount), "%u", stack.count);
-        (void)r2d::draw_text(sx + 50.0f, by + 23.0f, amount, font_, r2d::rgba(255,255,255));
+        draw_item_icon(stack.item, sx + 9, by + 8, 32);
+        char amount[8];
+        std::snprintf(amount, sizeof(amount), "%u", stack.count);
+        (void)r2d::draw_text(sx + 34, by + 34, amount, font_,
+                             r2d::rgba(255,255,255));
       }
-      if (selected) {
-        r2d::draw_line(sx - 1.0f, by - 1.0f, sx + slot_w - 7.0f, by - 1.0f,
-                       2.0f, r2d::rgba(255, 255, 255, 210));
-        r2d::draw_line(sx - 1.0f, by + 39.0f, sx + slot_w - 7.0f, by + 39.0f,
-                       2.0f, r2d::rgba(255, 255, 255, 210));
-      }
+      char key[2] = {static_cast<char>('1' + i), '\\0'};
+      (void)r2d::draw_text(sx + 5, by + 4, key, font_,
+                           selected ? r2d::rgba(236,246,217)
+                                    : r2d::rgba(170,180,174));
     }
 
     // The FPS window: one second, counted frames.
