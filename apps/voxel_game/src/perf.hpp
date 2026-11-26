@@ -24,6 +24,7 @@ struct FrameTimings {
     float total_ms = 0.0f;
     // Wall interval between consecutive on_update() starts; includes
     // platform/present pacing and is the closest app-level frame cadence.
+    float wall_frame_ms = 0.0f;
     float physics_ms = 0.0f;
     float cpu_mesh_ms = 0.0f;
     float upload_ms = 0.0f;
