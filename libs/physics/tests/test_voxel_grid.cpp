@@ -38,6 +38,17 @@ TEST_CASE("voxel grid: DDA raycast returns the first occupied cell and face") {
                            Vec3{1.0f, 0.0f, 0.0f}, 8.0f).hit);
 }
 
+TEST_CASE("voxel grid: DDA can enter the bounded grid from outside") {
+  const VoxelGrid3D grid{VoxelGrid3D::Desc{
+      {0, 0, 0}, {4, 4, 4}, nullptr, &TestGrid::one_block}};
+  const auto hit = grid.raycast(Vec3{-2.0f, 0.5f, 0.5f},
+                                Vec3{1.0f, 0.0f, 0.0f}, 8.0f);
+  REQUIRE(hit.hit);
+  CHECK((hit.cell == ws::math::IVec3{0, 0, 0}));
+  CHECK((hit.normal == ws::math::IVec3{-1, 0, 0}));
+  CHECK(hit.distance == doctest::Approx(2.0f));
+}
+
 TEST_CASE("voxel grid: swept AABB cannot tunnel through a floor") {
   const auto grid = make_grid();
   const Aabb player{Vec3{-0.3f, 5.0f, -0.3f},
