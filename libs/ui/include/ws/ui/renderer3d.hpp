@@ -26,11 +26,12 @@
 //     albedo in the light's own color.
 //   - the flush: mesh draws are WOVEN between the quad chunks in one
 //     stable (layer, camera-epoch) painter's order, so a billboard can
-//     sit in front of or behind a mesh. Depth-tested (LEQUAL, written),
-//     back-face culled, src-alpha blended - a translucent tint still
-//     writes depth (there is no order-independent transparency), so
-//     draw translucent meshes last (a higher layer) and expect
-//     painter's-order artifacts between them.
+//     sit in front of or behind a mesh. Depth-tested (LEQUAL), back-face
+//     culled and src-alpha blended. MeshMaterial::depth_write defaults
+//     true; alpha-textured surfaces may disable depth writes, but must
+//     be submitted after opaque geometry. This is sorted blending, not
+//     order-independent transparency, so overlapping translucent meshes
+//     can still show painter's-order artifacts.
 //   - on a tie (same layer AND same begin() block) meshes draw BEFORE
 //     the block's billboards, so blended quads composite over opaque
 //     geometry.
