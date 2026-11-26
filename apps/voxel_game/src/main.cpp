@@ -331,6 +331,19 @@ class VoxelApp final : public ws::ui::App {
     const float frame_dt = std::clamp(dt, 0.0f, 0.05f);
     const auto frame_t0 = std::chrono::steady_clock::now();
     voxel::perf::FrameTimings timings{};
+    // Renderer statistics expose only completed query results. The serial
+    // prevents repeatedly counting the same asynchronously resolved sample.
+    const auto renderer_stats = r2d::stats();
+    gpu_timing_supported_ = renderer_stats.gpu_timing_supported;
+    if (renderer_stats.gpu_frame_valid &&
+        renderer_stats.gpu_frame_serial != last_gpu_frame_serial_) {
+      last_gpu_frame_serial_ = renderer_stats.gpu_frame_serial;
+      last_gpu_frame_ms_ = renderer_stats.gpu_frame_ms;
+      gpu_frame_valid_ = true;
+      timings.gpu_frame_ms = renderer_stats.gpu_frame_ms;
+      timings.gpu_frame_valid = true;
+      gpu_frame_times_.add(renderer_stats.gpu_frame_ms);
+    }
     const Vec3 mesh_priority_origin = player_.eye_position();
     voxel_renderer_.set_priority_origin(mesh_priority_origin.x, mesh_priority_origin.z);
     voxel_renderer_.process_completed(2, &timings);
@@ -553,6 +566,7 @@ class VoxelApp final : public ws::ui::App {
     if (percentile_clock_.time_since_epoch().count() == 0 ||
         percentile_now - percentile_clock_ >= std::chrono::seconds(1)) {
       frame_percentiles_ = frame_times_.percentiles();
+      gpu_frame_percentiles_ = gpu_frame_times_.percentiles();
       percentile_clock_ = percentile_now;
     }
     timings.total_ms = voxel::perf::ms_since(frame_t0);
@@ -646,18 +660,28 @@ class VoxelApp final : public ws::ui::App {
     // instrumentation's last sample (frame phase means, the draw and
     // body counts) so the running game answers "where does the frame
     // go" without a debugger.
-    char stats[320];
+    char gpu_stats[64];
+    if (!gpu_timing_supported_) {
+      std::snprintf(gpu_stats, sizeof(gpu_stats), "gpu n/a");
+    } else if (!gpu_frame_valid_) {
+      std::snprintf(gpu_stats, sizeof(gpu_stats), "gpu pending");
+    } else {
+      std::snprintf(gpu_stats, sizeof(gpu_stats),
+                    "gpu %.2fms p95 %.2fms", last_gpu_frame_ms_,
+                    gpu_frame_percentiles_.p95_ms);
+    }
+    char stats[384];
     const Vec3 p = player_.position();
     std::snprintf(stats, sizeof(stats),
                   "fps %u   pos %.1f %.1f %.1f   %s\n"
                   "cpu %.2fms (phys %.2f mesh %.2f upload %.2f submit %.2f)\n"
-                  "p50/p95/p99 %.2f/%.2f/%.2f ms  upload %.1f KB  "
-                  "mesh jobs %u  draws %u tris %u",
+                  "%s   cpu p50/p95/p99 %.2f/%.2f/%.2fms  "
+                  "upload %.1f KB  mesh jobs %u  draws %u tris %u",
                   fps_, p.x, p.y, p.z,
                   player_.grounded() ? "ground" : "air", last_timings_.total_ms,
                   last_timings_.physics_ms, last_timings_.cpu_mesh_ms,
                   last_timings_.upload_ms, last_timings_.draw_ms,
-                  frame_percentiles_.p50_ms, frame_percentiles_.p95_ms,
+                  gpu_stats, frame_percentiles_.p50_ms, frame_percentiles_.p95_ms,
                   frame_percentiles_.p99_ms,
                   static_cast<double>(last_timings_.upload_bytes) / 1024.0,
                   last_timings_.mesh_jobs, last_counters_.draw_calls,
@@ -1074,6 +1098,12 @@ class VoxelApp final : public ws::ui::App {
   voxel::perf::Counters last_counters_{};
   voxel::perf::FrameTimeWindow frame_times_{};
   voxel::perf::FrameTimeWindow::Percentiles frame_percentiles_{};
+  voxel::perf::FrameTimeWindow gpu_frame_times_{};
+  voxel::perf::FrameTimeWindow::Percentiles gpu_frame_percentiles_{};
+  std::uint64_t last_gpu_frame_serial_ = 0;
+  float last_gpu_frame_ms_ = 0.0f;
+  bool gpu_timing_supported_ = false;
+  bool gpu_frame_valid_ = false;
   std::chrono::steady_clock::time_point percentile_clock_{};
   voxel::bench::Driver bench_{};
   std::uint32_t bench_frame_ = 0;
