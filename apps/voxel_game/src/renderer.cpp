@@ -213,8 +213,24 @@ void draw_world(const VoxelRenderer& renderer,
   const culling::Frustum fr = culling::extract_frustum(
       camera.eye, camera.target, camera.up, camera.fov_y, aspect,
       camera.near_z, camera.far_z);
-  // Coordinate-indexed deduplication: chunk_vis is independent of
-  // chunk_meshes() iteration order and counts each non-empty chunk once.
+  // Compute frustum visibility once per chunk, not once per material mesh.
+  // A chunk may own several tile meshes, all sharing the same AABB test.
+  std::array<bool, kWorldChunksX * kWorldChunksZ> chunk_in_frustum{};
+  for (int cz = 0; cz < kWorldChunksZ; ++cz) {
+    for (int cx = 0; cx < kWorldChunksX; ++cx) {
+      const float x0 = static_cast<float>(cx * kChunkSizeX);
+      const float z0 = static_cast<float>(cz * kChunkSizeZ);
+      const float rmin[3] = {x0, -static_cast<float>(kChunkSizeY),
+                             -(z0 + static_cast<float>(kChunkSizeZ))};
+      const float rmax[3] = {x0 + static_cast<float>(kChunkSizeX), 0.0f, -z0};
+      const std::size_t index =
+          static_cast<std::size_t>(cz * kWorldChunksX + cx);
+      chunk_in_frustum[index] = culling::aabb_visible(fr, rmin, rmax);
+    }
+  }
+
+  // Counts chunks that actually submit geometry, distinct from the cached
+  // visibility result (an entirely occluded/empty chunk submits no draw).
   std::array<bool, kWorldChunksX * kWorldChunksZ> visible_chunks{};
 
   if (counters != nullptr) {
@@ -226,12 +242,9 @@ void draw_world(const VoxelRenderer& renderer,
   }
 
   const auto chunk_visible = [&](const VoxelRenderer::ChunkMesh& chunk) {
-    const float x0 = static_cast<float>(chunk.cx * kChunkSizeX);
-    const float z0 = static_cast<float>(chunk.cz * kChunkSizeZ);
-    const float rmin[3] = {x0, -static_cast<float>(kChunkSizeY),
-                           -(z0 + static_cast<float>(kChunkSizeZ))};
-    const float rmax[3] = {x0 + static_cast<float>(kChunkSizeX), 0.0f, -z0};
-    return culling::aabb_visible(fr, rmin, rmax);
+    const std::size_t index =
+        static_cast<std::size_t>(chunk.cz * kWorldChunksX + chunk.cx);
+    return chunk_in_frustum[index];
   };
 
   const auto draw_chunk = [&](const VoxelRenderer::ChunkMesh& chunk, bool foliage) {
