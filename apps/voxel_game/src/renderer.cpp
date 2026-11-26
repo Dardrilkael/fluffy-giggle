@@ -126,7 +126,7 @@ ws::ui::r3d::Light3D scene_light() {
 }
 
 ws::ui::r2d::Camera3D begin_scene(const Player& player, float fov_degrees,
-                                          float render_distance) {
+                                          float render_distance, bool cast_shadows) {
   // The player's GAME-space eye and look, mapped to render space by
   // world.hpp's game_to_render - the SAME map the mesher baked the
   // geometry with, so the camera and the world can never disagree
@@ -153,7 +153,9 @@ ws::ui::r2d::Camera3D begin_scene(const Player& player, float fov_degrees,
   camera.near_z = 0.03f;
   camera.far_z = render_distance;
   ws::ui::r2d::begin(camera);
-  (void)ws::ui::r3d::set_light(scene_light());
+  ws::ui::r3d::Light3D light = scene_light();
+  light.cast_shadows = cast_shadows;
+  (void)ws::ui::r3d::set_light(light);
   return camera;
 }
 
