@@ -16,6 +16,8 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
+#include <vector>
 
 #include <ws/math/vecmath.hpp>
 #include <ws/ui/renderer2d.hpp>  // Camera3D
@@ -58,13 +60,29 @@ void draw_target_outline(ws::ui::r3d::Mesh mesh,
 [[nodiscard]] std::array<ws::ui::r2d::Texture, atlas::kTileCount>
 load_tile_textures();
 
-// Draws every chunk mesh textured with its tile's texture (WHITE tint
-// so the texels arrive as authored), inside the CURRENT
-// begin(Camera3D) block. Layer 0: the HUD rides higher. Fills
-// `counters` (may be null) with the frame's draw call / triangle /
-// visible-chunk counts - the perf instrumentation the HUD and the
-// benchmark print.
-void draw_world(const World& world,
+class VoxelRenderer {
+ public:
+  struct ChunkMesh {
+    int cx = 0;
+    int cz = 0;
+    int tile = -1;
+    ws::ui::r3d::Mesh mesh{};
+    std::uint32_t index_count = 0;
+  };
+
+  void rebuild_chunk(const World& world, int cx, int cz);
+  void rebuild_all(const World& world);
+  void destroy_all();
+
+  [[nodiscard]] const std::vector<ChunkMesh>& chunk_meshes() const noexcept {
+    return chunk_meshes_;
+  }
+
+ private:
+  std::vector<ChunkMesh> chunk_meshes_;
+};
+
+void draw_world(const VoxelRenderer& renderer,
                 const std::array<ws::ui::r2d::Texture, atlas::kTileCount>&
                     tile_textures,
                 const ws::ui::r2d::Camera3D& camera, float aspect,
