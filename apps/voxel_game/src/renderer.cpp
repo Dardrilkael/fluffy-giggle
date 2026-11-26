@@ -191,18 +191,70 @@ void VoxelRenderer::request_rebuild_chunk(const World& world,int cx,int cz) {
   if(queue_count_==kQueueCapacity) { queue_head_=(queue_head_+1)%kQueueCapacity; --queue_count_; }
   const auto tail=(queue_head_+queue_count_)%kQueueCapacity; jobs_[tail]=std::move(job); ++queue_count_; queue_cv_.notify_one();
 }
-void VoxelRenderer::upload_result(int cx,int cz,const std::vector<CpuMeshData>& tiles) {
-  for(auto it=chunk_meshes_.begin();it!=chunk_meshes_.end();) {
-    if(it->cx==cx&&it->cz==cz) { if(it->mesh.id) (void)ws::ui::r3d::destroy_mesh(it->mesh); it=chunk_meshes_.erase(it); } else ++it;
+void VoxelRenderer::upload_result(int cx, int cz,
+                                  const std::vector<CpuMeshData>& tiles) {
+  // Build the complete replacement off to the side. The currently visible
+  // chunk remains intact until every non-empty material mesh exists on the
+  // GPU; a partial upload must never leave a hole in the terrain.
+  std::vector<ChunkMesh> replacement;
+  replacement.reserve(tiles.size());
+
+  // Reserve the destination before creating GPU resources. Once creation
+  // succeeds, committing the staged meshes cannot reallocate the vector.
+  chunk_meshes_.reserve(chunk_meshes_.size() + tiles.size());
+
+  const auto discard_replacement = [&replacement]() {
+    for (const ChunkMesh& chunk : replacement) {
+      if (chunk.mesh.id != 0u)
+        (void)ws::ui::r3d::destroy_mesh(chunk.mesh);
+    }
+    replacement.clear();
+  };
+
+  for (std::size_t tile = 0; tile < tiles.size(); ++tile) {
+    const CpuMeshData& cpu = tiles[tile];
+    if (cpu.vertices.empty()) continue;
+
+    ws::ui::r3d::MeshData upload;
+    upload.vertices.reserve(cpu.vertices.size());
+    for (const CpuMeshVertex& source : cpu.vertices) {
+      ws::ui::r3d::Vertex3D vertex{};
+      for (int axis = 0; axis < 3; ++axis) {
+        vertex.pos[axis] = source.pos[axis];
+        vertex.normal[axis] = source.normal[axis];
+      }
+      vertex.uv[0] = source.uv[0];
+      vertex.uv[1] = source.uv[1];
+      upload.vertices.push_back(vertex);
+    }
+    upload.indices = cpu.indices;
+
+    const auto mesh = ws::ui::r3d::create_mesh(upload);
+    if (!mesh.has_value()) {
+      ws::core::log_error(mesh.error());
+      discard_replacement();
+      return;  // Keep the previous complete chunk visible.
+    }
+
+    replacement.push_back(ChunkMesh{
+        cx, cz, static_cast<int>(tile), *mesh,
+        static_cast<std::uint32_t>(upload.indices.size())});
   }
-  for(std::size_t tile=0;tile<tiles.size();++tile) {
-    const auto& cpu=tiles[tile]; if(cpu.vertices.empty()) continue;
-    ws::ui::r3d::MeshData upload; upload.vertices.reserve(cpu.vertices.size());
-    for(const auto& source:cpu.vertices) { ws::ui::r3d::Vertex3D v{}; for(int a=0;a<3;++a){v.pos[a]=source.pos[a];v.normal[a]=source.normal[a];} v.uv[0]=source.uv[0];v.uv[1]=source.uv[1];upload.vertices.push_back(v); }
-    upload.indices=cpu.indices; const auto mesh=ws::ui::r3d::create_mesh(upload);
-    if(!mesh.has_value()){ws::core::log_error(mesh.error());continue;}
-    chunk_meshes_.push_back(ChunkMesh{cx,cz,static_cast<int>(tile),*mesh,static_cast<std::uint32_t>(upload.indices.size())});
+
+  // Commit: all replacement GPU objects are ready. Only now retire the
+  // previous chunk meshes, then append the staged set without reallocating.
+  for (auto it = chunk_meshes_.begin(); it != chunk_meshes_.end();) {
+    if (it->cx == cx && it->cz == cz) {
+      if (it->mesh.id != 0u)
+        (void)ws::ui::r3d::destroy_mesh(it->mesh);
+      it = chunk_meshes_.erase(it);
+    } else {
+      ++it;
+    }
   }
+  chunk_meshes_.insert(chunk_meshes_.end(),
+                       std::make_move_iterator(replacement.begin()),
+                       std::make_move_iterator(replacement.end()));
 }
 void VoxelRenderer::process_completed(std::size_t max_jobs) {
   std::size_t count=0;
@@ -219,40 +271,8 @@ void VoxelRenderer::process_completed(std::size_t max_jobs) {
   }
 }
 void VoxelRenderer::rebuild_chunk(const World& world, int cx, int cz) {
-  for (auto it = chunk_meshes_.begin(); it != chunk_meshes_.end();) {
-    if (it->cx == cx && it->cz == cz) {
-      if (it->mesh.id != 0u) (void)ws::ui::r3d::destroy_mesh(it->mesh);
-      it = chunk_meshes_.erase(it);
-    } else {
-      ++it;
-    }
-  }
   world.build_chunk_meshes(cx, cz, cpu_mesh_scratch_);
-  for (std::size_t tile = 0; tile < cpu_mesh_scratch_.size(); ++tile) {
-    const CpuMeshData& cpu = cpu_mesh_scratch_[tile];
-    if (cpu.vertices.empty()) continue;
-    ws::ui::r3d::MeshData upload;
-    upload.vertices.reserve(cpu.vertices.size());
-    for (const CpuMeshVertex& source : cpu.vertices) {
-      ws::ui::r3d::Vertex3D vertex{};
-      for (int axis = 0; axis < 3; ++axis) {
-        vertex.pos[axis] = source.pos[axis];
-        vertex.normal[axis] = source.normal[axis];
-      }
-      vertex.uv[0] = source.uv[0];
-      vertex.uv[1] = source.uv[1];
-      upload.vertices.push_back(vertex);
-    }
-    upload.indices = cpu.indices;
-    const auto mesh = ws::ui::r3d::create_mesh(upload);
-    if (!mesh.has_value()) {
-      ws::core::log_error(mesh.error());
-      continue;
-    }
-    chunk_meshes_.push_back(ChunkMesh{
-        cx, cz, static_cast<int>(tile), *mesh,
-        static_cast<std::uint32_t>(upload.indices.size())});
-  }
+  upload_result(cx, cz, cpu_mesh_scratch_);
 }
 void VoxelRenderer::rebuild_all(const World& world) {
   destroy_all();
