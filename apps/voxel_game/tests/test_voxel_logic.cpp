@@ -1364,7 +1364,7 @@ TEST_CASE("meshing: immutable worker snapshots match live-world output") {
   // the copied halo; each chunk therefore emits five faces, not six.
   voxel::World seam;
   seam.generate(0x5EAu);
-  for (int cx : {3, 4}) {
+  for (int cx = 3; cx <= 4; ++cx) {
     for (int y = 0; y < voxel::kChunkSizeY; ++y)
       for (int z = 0; z < voxel::kChunkSizeZ; ++z)
         for (int x = 0; x < voxel::kChunkSizeX; ++x)
@@ -1373,7 +1373,7 @@ TEST_CASE("meshing: immutable worker snapshots match live-world output") {
   }
   CHECK(seam.set_block(63, 24, 56, voxel::Block::stone));
   CHECK(seam.set_block(64, 24, 56, voxel::Block::stone));
-  for (int cx : {3, 4}) {
+  for (int cx = 3; cx <= 4; ++cx) {
     std::vector<voxel::CpuMeshData> tiles;
     voxel::mesh_chunk_snapshot(seam.snapshot_chunk(cx, 3, 9), tiles);
     std::size_t index_count = 0;
