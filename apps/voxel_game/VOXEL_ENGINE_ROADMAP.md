@@ -40,10 +40,13 @@ only as a deliberate API migration, never by duplicating the implementation.
 - [x] Add per-frame-slot Vulkan timestamp queries around the submitted shadow + main render passes; collect only after the slot fence, without stalling or including presentation/vsync.
 - [x] Add a fixed-camera scalability benchmark with a warm-up interval, configurable render distance/window extent/VSync, per-second scene counters, and update-CPU, wall-frame and GPU p50/p95/p99.
 - [x] Keep benchmark update cost separate from the wall interval between update starts so presentation/pacing does not get mislabeled as game CPU work.
+- [x] Add benchmark-only shadow modes to distinguish the receiver's 3×3 PCF filtering cost from the depth-only shadow-map pass.
 
 **Scalability benchmark protocol**
 
-Set `WS_VOXEL_BENCH_MODE=scale`, `WS_VOXEL_BENCH=23` (3 seconds warm-up + 20 seconds measured), `WS_VOXEL_BENCH_DISTANCE`, `WS_VOXEL_BENCH_WIDTH`, `WS_VOXEL_BENCH_HEIGHT`, and `WS_VOXEL_BENCH_VSYNC=0`. The fixed mode does not move the player or edit blocks. Keep the seed and camera pose unchanged while sweeping one variable at a time. Capture the emitted `bench:config` line, one-second CSV rows and final percentiles for each run. Unsupported queues report GPU timing unavailable.
+Set `WS_VOXEL_BENCH_MODE=scale`, `WS_VOXEL_BENCH=23` (3 seconds warm-up + 20 seconds measured), `WS_VOXEL_BENCH_DISTANCE`, `WS_VOXEL_BENCH_WIDTH`, `WS_VOXEL_BENCH_HEIGHT`, and `WS_VOXEL_BENCH_VSYNC=0`. The fixed mode does not move the player or edit blocks. Keep the seed and camera pose unchanged while sweeping one variable at a time. Capture the emitted `bench:config` line, one-second CSV rows and final percentiles for each run.
+
+To isolate shadow cost, repeat one identical fixed-scene configuration with `WS_VOXEL_BENCH_SHADOW_MODE=full`, `no-receive`, and `off`. `no-receive` still renders the depth-only shadow map but disables receiver PCF lookups; `off` disables both. The full-to-no-receive GPU-time delta estimates PCF cost, while no-receive-to-off estimates shadow-map rendering cost. Unsupported queues report GPU timing unavailable.
 
 ### 1 — CPU meshing and renderer ownership
 
