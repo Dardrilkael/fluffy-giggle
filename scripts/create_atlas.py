@@ -46,8 +46,7 @@ OUT_PNG = "/home/z/my-project/download/atlas_preview.png"
 TILE_PX = 64          # the emitted tile size (kTilePixels)
 FACE_ORDER = ["top", "bottom", "east", "west", "south", "north"]
 
-# The game's Block vocabulary (world.hpp's enum order, value = row
-# index of kTileFor): air, grass, dirt, stone, wood, sand, water.
+# The game's Block vocabulary (world.hpp enum order, value = row index).\n# New block variants use ordered asset fallbacks so older packs remain valid.
 # Per block: candidates for the TOP, BOTTOM, and SIDE face groups, in
 # fallback order - the first file that exists wins. None = never meshed
 # (air) or optional (water: absent art builds with a zero row).
@@ -60,6 +59,13 @@ BLOCKS = [
     ("wood",   ["oak_log_top", "oak_planks"],      ["oak_log_top", "oak_planks"],  ["oak_log", "oak_planks"],        True),
     ("sand",   ["sand"],                           ["sand"],                       ["sand"],                          True),
     ("water",  ["water_still", "water"],           None,                           None,                             False),
+    ("cobblestone", ["cobblestone", "stone"],      ["cobblestone", "stone"],        ["cobblestone", "stone"],         True),
+    ("planks", ["oak_planks", "oak_log"],          ["oak_planks", "oak_log"],       ["oak_planks", "oak_log"],        True),
+    ("bricks", ["bricks", "stone"],                ["bricks", "stone"],             ["bricks", "stone"],              True),
+    ("glass", ["glass", "sand"],                   ["glass", "sand"],               ["glass", "sand"],                True),
+    ("leaves", ["oak_leaves", "leaves", "grass_block_side"], ["oak_leaves", "leaves", "grass_block_side"], ["oak_leaves", "leaves", "grass_block_side"], True),
+    ("coal_ore", ["coal_ore", "stone"],             ["coal_ore", "stone"],            ["coal_ore", "stone"],            True),
+    ("iron_ore", ["iron_ore", "stone"],             ["iron_ore", "stone"],            ["iron_ore", "stone"],            True),
 ]
 
 def resolve(assets, candidates):
@@ -217,7 +223,7 @@ inline constexpr int kTilePixels = {TILE_PX};
 //     0 top  1 bottom  2 east  3 west  4 south  5 north
 // Row index = Block's value (air..water). -1 = never read (air, and a
 // water row when the pack carries no water art - water never meshes).
-inline constexpr int kTileFor[7][6] = {{
+inline constexpr int kTileFor[{len(BLOCKS)}][6] = {{
 {chr(10).join(table)}
 }};
 
