@@ -897,10 +897,11 @@ TEST_CASE("bench: shadow modes isolate receiver filtering from the depth pass") 
   CHECK_FALSE(off.receive);
   CHECK(std::string_view(voxel::bench::shadow_mode_name(off)) == "off");
 
-  // Invalid input is deliberately safe: retain normal shadow behavior.
+  // Invalid input is deliberately safe: preserve the game's default,
+  // which has directional shadow mapping disabled.
   const auto invalid = voxel::bench::shadow_flags_from_name("invalid");
-  CHECK(invalid.cast);
-  CHECK(invalid.receive);
+  CHECK_FALSE(invalid.cast);
+  CHECK_FALSE(invalid.receive);
 }
 
 TEST_CASE("atlas: the face->tile map matches the block vocabulary") {
