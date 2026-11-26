@@ -15,9 +15,9 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <utility>
 
 #include <ws/math/noise.hpp>
-#include <utility>
 
 namespace voxel {
 
@@ -288,7 +288,8 @@ using FaceTileCache = std::vector<std::int8_t>;
             continue;
           }
 
-          face_tiles[static_cast<std::size_t>(fi) * kBlocksPerChunk + cell] =
+          face_tiles[static_cast<std::size_t>(fi) *
+                  static_cast<std::size_t>(kBlocksPerChunk) + cell] =
               static_cast<std::int8_t>(tile);
         }
       }
@@ -338,7 +339,8 @@ void greedy_faces(const FaceTileCache& face_tiles, int fi, int cx, int cz,
   std::array<std::array<std::uint8_t, kMaxPlaneArea>,
              atlas::kTileCount> masks{};
   const std::size_t face_offset =
-      static_cast<std::size_t>(fi) * kBlocksPerChunk;
+      static_cast<std::size_t>(fi) *
+          static_cast<std::size_t>(kBlocksPerChunk);
 
   for (int sa = 0; sa < a_len; ++sa) {
     std::array<bool, atlas::kTileCount> active_tiles{};
