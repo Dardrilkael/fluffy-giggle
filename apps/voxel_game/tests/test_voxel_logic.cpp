@@ -18,12 +18,14 @@
 #include <chrono>
 #include <cstdint>
 #include <string>
+#include <thread>
 
 #include <cmath>
 #include <numbers>
 
 #include <ws/math/vecmath.hpp>
 
+#include "async_mesher.hpp"
 #include "bench.hpp"
 #include "frustum.hpp"
 #include "perf.hpp"
@@ -1469,4 +1471,96 @@ TEST_CASE("voxel acoustics: six room boundaries become sorted early reflections"
             response.taps[i].delay_frames);
     }
   }
+}
+
+
+TEST_CASE("async mesher: rapid edits publish only the latest CPU revision") {
+  voxel::World world;
+  world.generate(0xA51C0u);
+  constexpr int cx = 2, cz = 2;
+  constexpr int x = cx * voxel::kChunkSizeX + 7;
+  constexpr int y = voxel::kChunkSizeY - 3;
+  constexpr int z = cz * voxel::kChunkSizeZ + 7;
+
+  voxel::AsyncChunkMesher mesher;
+  for (int i = 0; i < 24; ++i) {
+    CHECK(world.set_block(x, y, z,
+        (i & 1) ? voxel::Block::air : voxel::Block::stone));
+    mesher.request(world, cx, cz);
+  }
+  CHECK(world.set_block(x, y, z, voxel::Block::stone));
+  mesher.request(world, cx, cz);
+
+  std::vector<voxel::CpuMeshData> expected, actual;
+  world.build_chunk_meshes(cx, cz, expected);
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::seconds(5);
+  bool received = false;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (mesher.take_completed(cx, cz, actual)) {
+      received = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  REQUIRE(received);
+  REQUIRE(actual.size() == expected.size());
+  for (std::size_t tile = 0; tile < expected.size(); ++tile) {
+    CHECK(actual[tile].indices == expected[tile].indices);
+    CHECK(actual[tile].vertices.size() == expected[tile].vertices.size());
+  }
+  CHECK(mesher.stats().coalesced > 0);
+}
+
+TEST_CASE("async mesher: a newer request invalidates a published result") {
+  voxel::World world;
+  world.generate(0xA51C1u);
+  voxel::AsyncChunkMesher mesher;
+  constexpr int cx = 3, cz = 3;
+  mesher.request(world, cx, cz);
+
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::seconds(5);
+  bool completed = false;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (mesher.stats().completed != 0) {
+      completed = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  REQUIRE(completed);
+  CHECK(world.set_block(cx * voxel::kChunkSizeX + 4, 30,
+                        cz * voxel::kChunkSizeZ + 4, voxel::Block::stone));
+  mesher.request(world, cx, cz);
+
+  std::vector<voxel::CpuMeshData> result, expected;
+  bool received = false;
+  const auto latest_deadline = std::chrono::steady_clock::now() +
+                               std::chrono::seconds(5);
+  while (std::chrono::steady_clock::now() < latest_deadline) {
+    if (mesher.take_completed(cx, cz, result)) {
+      received = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  REQUIRE(received);
+  world.build_chunk_meshes(cx, cz, expected);
+  REQUIRE(result.size() == expected.size());
+  for (std::size_t tile = 0; tile < expected.size(); ++tile)
+    CHECK(result[tile].indices == expected[tile].indices);
+}
+
+TEST_CASE("async mesher: destruction safely joins pending workers") {
+  voxel::World world;
+  world.generate(0xA51C2u);
+  {
+    voxel::AsyncChunkMesher mesher;
+    for (int cz = 0; cz < voxel::kWorldChunksZ; ++cz)
+      for (int cx = 0; cx < voxel::kWorldChunksX; ++cx)
+        mesher.request(world, cx, cz);
+    CHECK(mesher.stats().queued <= voxel::AsyncChunkMesher::kQueueCapacity);
+  }
+  CHECK(true);
 }
