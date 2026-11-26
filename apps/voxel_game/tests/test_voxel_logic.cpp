@@ -26,6 +26,7 @@
 #include "frustum.hpp"
 #include "perf.hpp"
 #include "menu.hpp"
+#include "hotbar.hpp"
 #include "player.hpp"
 #include "texture_atlas.hpp"
 #include "world.hpp"
@@ -722,6 +723,32 @@ TEST_CASE("menu: the click hits the right button, edges exact") {
   const float between_y = b[0].y + b[0].h + voxel::menu::kButtonGap * 0.5f;
   CHECK(voxel::menu::click_action(fw, fh, between_x, between_y) == -1);
   CHECK(voxel::menu::click_action(fw, fh, 2.0f, 2.0f) == -1);
+}
+
+
+TEST_CASE("hotbar: nine slots are centered, ordered, and hit-tested") {
+  constexpr float fw = 1280.0f;
+  constexpr float fh = 720.0f;
+  const auto slots = voxel::hotbar::layout(fw, fh);
+  const float bar_width = voxel::hotbar::kSlotStep * voxel::hotbar::kSlots;
+  CHECK(slots.front().bounds.x ==
+        doctest::Approx((fw - bar_width) * 0.5f));
+  CHECK(slots.front().bounds.y ==
+        doctest::Approx(fh - voxel::hotbar::kBottomMargin -
+                        voxel::hotbar::kSlotSize));
+  for (int i = 0; i < voxel::hotbar::kSlots; ++i) {
+    const auto& slot = slots[static_cast<std::size_t>(i)];
+    CHECK(slot.index == i);
+    CHECK(slot.bounds.w == voxel::hotbar::kSlotSize);
+    CHECK(slot.bounds.h == voxel::hotbar::kSlotSize);
+    CHECK(voxel::hotbar::selected(
+              fw, fh, slot.bounds.x + slot.bounds.w * 0.5f,
+              slot.bounds.y + slot.bounds.h * 0.5f) == i);
+  }
+  CHECK(voxel::hotbar::selected(fw, fh, 0.0f, 0.0f) == -1);
+  CHECK(voxel::hotbar::selected(
+            fw, fh, slots[0].bounds.x + slots[0].bounds.w,
+            slots[0].bounds.y) == -1);
 }
 
 TEST_CASE("bench: a default-constructed driver is idle, not running") {
