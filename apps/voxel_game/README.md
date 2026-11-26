@@ -126,8 +126,9 @@ camera builder mirrors the player's pose).
   query. Edits become collision-visible immediately; there is no
   collision-mesh rebuild or per-voxel rigid-body lifecycle. Out-of-world
   cells are empty, matching the world's open-void boundary policy.
-- The water block type exists in the palette but is not meshed or
-  swimmable — it only shapes the terrain (sand shorelines).
+- Water renders exposed top surfaces for lakes and river channels, but
+  does not yet have side-wall rendering, animated flow, swimming or
+  buoyancy physics.
 - Mouse look is free-cursor (window-edge clamped): the shell has no
   pointer-lock seam yet; the deltas are the same, the pointer stays
   visible.
