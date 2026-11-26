@@ -741,6 +741,11 @@ TEST_CASE("hotbar: nine slots are centered, ordered, and hit-tested") {
     CHECK(slot.index == i);
     CHECK(slot.bounds.w == voxel::hotbar::kSlotSize);
     CHECK(slot.bounds.h == voxel::hotbar::kSlotSize);
+    CHECK(voxel::hotbar::hit(
+              slot.bounds, slot.bounds.x, slot.bounds.y));
+    CHECK_FALSE(voxel::hotbar::hit(
+              slot.bounds, slot.bounds.x + slot.bounds.w,
+              slot.bounds.y));
     CHECK(voxel::hotbar::selected(
               fw, fh, slot.bounds.x + slot.bounds.w * 0.5f,
               slot.bounds.y + slot.bounds.h * 0.5f) == i);
