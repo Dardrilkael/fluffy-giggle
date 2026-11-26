@@ -1330,7 +1330,10 @@ TEST_CASE("meshing: immutable worker snapshots match live-world output") {
   world.generate(0x51A9u);
   // Exercise both an interior chunk and a world-edge chunk so the halo
   // captures cross-chunk neighbors and out-of-world air correctly.
-  for (const auto [cx, cz] : {std::pair{0, 0}, std::pair{4, 4}, std::pair{7, 7}}) {
+  constexpr int chunks[][2] = {{0, 0}, {4, 4}, {7, 7}};
+  for (const auto& chunk_coord : chunks) {
+    const int cx = chunk_coord[0];
+    const int cz = chunk_coord[1];
     std::vector<voxel::CpuMeshData> snapshot_tiles;
     const auto snapshot = world.snapshot_chunk(cx, cz, 17);
     CHECK(snapshot.revision == 17);
