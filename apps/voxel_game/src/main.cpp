@@ -52,11 +52,6 @@
 #include <ws/input/event.hpp>
 #include <ws/input/input.hpp>
 #include <ws/math/vecmath.hpp>
-#include <ws/physics/3d/body.hpp>
-#include <ws/physics/3d/contact.hpp>
-#include <ws/physics/3d/shape.hpp>
-#include <ws/physics/3d/world.hpp>
-#include <ws/physics/common.hpp>  // kMaxBodiesPerWorld (the shell's budget)
 #include <ws/ui/app.hpp>
 #include <ws/ui/renderer2d.hpp>
 #include <ws/ui/renderer3d.hpp>
@@ -170,29 +165,10 @@ class VoxelApp final : public ws::ui::App {
                          player_.tuning_half_height(),
                      static_cast<float>(sz) + 0.5f};
 
-    // --- physics: the world's gravity + the player --------------------------
-    pd::World3D::Desc desc{};
-    desc.gravity = Vec3{0.0f, player_.tuning_gravity(), 0.0f};
-    desc.fixed_dt = 1.0f / 60.0f;
-    desc.thread_count = 0;  // single-threaded: deterministic, simple
-    // Chunk-level greedy collision boxes reduce the static body count
-    // from one body per exposed voxel to a few cuboids per chunk.
-    // Keep a generous cap for dynamic bodies and future gameplay objects.
-    desc.max_bodies = ws::physics::kMaxBodiesPerWorld;
-    auto world3d = pd::World3D::create(desc);
-    if (!world3d.has_value()) {
-      ws::core::log_error(world3d.error());
-      dead_ = true;
-      return;
-    }
-    phys_.emplace(std::move(*world3d));
-
-    // One merged static collision decomposition per chunk. Boxes tile
-    // the complete solid voxel volume, so caves, overhangs, trunks and
-    // edited structures retain exact collision while body count falls.
-    build_physics_grid();
-
-    if (!player_.spawn(*phys_, spawn)) {
+    // The player queries the world's chunk storage directly. Terrain is
+    // not represented by rigid bodies; the general physics world remains
+    // available to other gameplay entities when they are introduced.
+    if (!player_.spawn(spawn)) {
       dead_ = true;
       return;
     }
@@ -257,7 +233,7 @@ class VoxelApp final : public ws::ui::App {
   }
 
   void on_update() override {
-    if (dead_ || !phys_.has_value()) {
+    if (dead_) {
       return;
     }
     const auto now = std::chrono::steady_clock::now();
@@ -333,9 +309,7 @@ class VoxelApp final : public ws::ui::App {
     }
 
     const auto phys_t0 = std::chrono::steady_clock::now();
-    player_.tick(move, frame_dt, *phys_);
-    phys_->advance(frame_dt);
-    player_.on_contacts(phys_->contact_events());
+    player_.tick(move, frame_dt, world_.collision_grid());
     (void)audio_.update();
     timings.physics_ms = voxel::perf::ms_since(phys_t0);
 
@@ -371,7 +345,6 @@ class VoxelApp final : public ws::ui::App {
         if (world_.set_block(hit.cell[0], hit.cell[1], hit.cell[2],
                              voxel::Block::air)) {
           rebuild_around(hit.cell[0], hit.cell[2]);
-          rebuild_collision_around(hit.cell[0], hit.cell[2]);
           play_sound(kSoundBreak, 0.9f);
         }
       } else if (do_place && hit.hit) {  // place
@@ -385,7 +358,6 @@ class VoxelApp final : public ws::ui::App {
             !overlaps_player(px, py, pz)) {
           if (world_.set_block(px, py, pz, place)) {
             rebuild_around(px, pz);
-            rebuild_collision_around(px, pz);
             play_sound(kSoundPlace, 0.8f);
           }
         }
@@ -405,12 +377,9 @@ class VoxelApp final : public ws::ui::App {
                        frame.width / frame.height, &last_counters_);
     r2d::end();
     timings.draw_ms = voxel::perf::ms_since(draw_t0);
-    std::uint32_t collision_body_count = 0;
-    for (const auto& chunk_bodies : physics_chunks_) {
-      collision_body_count +=
-          static_cast<std::uint32_t>(chunk_bodies.size());
-    }
-    last_counters_.bodies = collision_body_count + 1u /* the player */;
+    // Voxel terrain and the character controller use direct grid queries;
+    // neither allocates rigid bodies.
+    last_counters_.bodies = 0;
 
     r2d::begin();
     r2d::set_layer(10);
@@ -433,110 +402,16 @@ class VoxelApp final : public ws::ui::App {
   }
 
  private:
-  // --- chunk-merged static collision -----------------------------------------
-  [[nodiscard]] static std::size_t chunk_index(int cx, int cz) {
-    return static_cast<std::size_t>(cz * voxel::kWorldChunksX + cx);
-  }
-
-  void destroy_collision_chunk(int cx, int cz) {
-    auto& bodies = physics_chunks_[chunk_index(cx, cz)];
-    for (const pd::BodyId id : bodies) {
-      (void)phys_->destroy_body(id);
-    }
-    bodies.clear();
-  }
-
-  void rebuild_collision_chunk(int cx, int cz) {
-    destroy_collision_chunk(cx, cz);
-    const auto boxes = world_.collision_boxes(cx, cz);
-    auto& bodies = physics_chunks_[chunk_index(cx, cz)];
-    bodies.reserve(boxes.size());
-    for (const auto& box : boxes) {
-      pd::BodyDesc desc{};
-      desc.kind = ws::physics::BodyKind::static_;
-      desc.shape = pd::Box{box.half_extents};
-      desc.transform = pd::Transform{box.center, {}};
-      const auto id = phys_->create_body(desc);
-      if (id.has_value()) {
-        bodies.push_back(*id);
-      } else {
-        ++collision_boxes_refused_;
-        if (collision_boxes_refused_ == 1) {
-          ws::core::log_error(id.error());
-        }
-      }
-    }
-  }
-
-  void build_physics_grid() {
-    for (int cz = 0; cz < voxel::kWorldChunksZ; ++cz) {
-      for (int cx = 0; cx < voxel::kWorldChunksX; ++cx) {
-        rebuild_collision_chunk(cx, cz);
-      }
-    }
-    if (collision_boxes_refused_ > 0) {
-      ws::core::warn("voxel: {} merged collision boxes could not be created",
-                     collision_boxes_refused_);
-    }
-  }
-
   [[nodiscard]] bool overlaps_player(int x, int y, int z) const {
-    // Conservative capsule-vs-voxel test: closest point on the block
-    // AABB to the capsule's vertical segment, expanded by its radius.
-    const Vec3 p = player_.position();
-    constexpr float radius = 0.3f;
-    constexpr float segment_half = 0.6f;  // 0.9 total half-height - radius
-    constexpr float skin = 0.015f;
-    const float cx = static_cast<float>(x) + 0.5f;
-    const float cy = static_cast<float>(y) + 0.5f;
-    const float cz = static_cast<float>(z) + 0.5f;
-    const float qx = std::max(std::abs(p.x - cx) - 0.5f, 0.0f);
-    const float qz = std::max(std::abs(p.z - cz) - 0.5f, 0.0f);
-    const float segment_y = std::clamp(cy, p.y - segment_half,
-                                      p.y + segment_half);
-    const float qy = std::max(std::abs(segment_y - cy) - 0.5f, 0.0f);
-    const float reach = radius + skin;
-    return qx * qx + qy * qy + qz * qz < reach * reach;
-  }
-
-  // Rebuilds the render chunk and collision chunk after an edit.
-  // Collision boxes are chunk-local, so adjacent chunks remain valid:
-  // unlike face-culling meshes, collision decomposition has no neighbor
-  // dependency. The measured cost includes both rebuild paths.
-  void rebuild_around(int x, int z) {
-    const auto t0 = std::chrono::steady_clock::now();
-    const int cx = x / voxel::kChunkSizeX;
-    const int cz = z / voxel::kChunkSizeZ;
-    world_.rebuild_chunk(cx, cz);
-    const int lx = x % voxel::kChunkSizeX;
-    const int lz = z % voxel::kChunkSizeZ;
-    if (lx == 0 && cx > 0) {
-      world_.rebuild_chunk(cx - 1, cz);
-    }
-    if (lx == voxel::kChunkSizeX - 1 && cx < voxel::kWorldChunksX - 1) {
-      world_.rebuild_chunk(cx + 1, cz);
-    }
-    if (lz == 0 && cz > 0) {
-      world_.rebuild_chunk(cx, cz - 1);
-    }
-    if (lz == voxel::kChunkSizeZ - 1 && cz < voxel::kWorldChunksZ - 1) {
-      world_.rebuild_chunk(cx, cz + 1);
-    }
-    mesh_rebuild_ms_ += voxel::perf::ms_since(t0);
-  }
-
-  void rebuild_collision_around(int x, int z) {
-    const auto t0 = std::chrono::steady_clock::now();
-    rebuild_collision_chunk(x / voxel::kChunkSizeX,
-                            z / voxel::kChunkSizeZ);
-    mesh_rebuild_ms_ += voxel::perf::ms_since(t0);
-  }
-
-  void play_sound(int which, float gain) {
-    if (!audio_ok_ || which < 0 || which >= sounds_loaded_) {
-      return;
-    }
-    (void)audio_.play(sounds_[which], gain);
+    const auto box = player_.bounds();
+    const ws::physics3d::Aabb block{
+        Vec3{static_cast<float>(x), static_cast<float>(y),
+             static_cast<float>(z)},
+        Vec3{static_cast<float>(x + 1), static_cast<float>(y + 1),
+             static_cast<float>(z + 1)}};
+    return box.max.x > block.min.x && box.min.x < block.max.x &&
+           box.max.y > block.min.y && box.min.y < block.max.y &&
+           box.max.z > block.min.z && box.min.z < block.max.z;
   }
 
   // --- the HUD --------------------------------------------------------------------
@@ -683,10 +558,6 @@ class VoxelApp final : public ws::ui::App {
   static constexpr int kSoundPlace = 1;
 
   voxel::World world_;
-  std::optional<pd::World3D> phys_;
-  std::array<std::vector<pd::BodyId>,
-             voxel::kWorldChunksX * voxel::kWorldChunksZ> physics_chunks_{};
-  std::uint32_t collision_boxes_refused_ = 0;
   voxel::Player player_;
   int hotbar_ = 0;
   // The pause menu's state: paused_ gates the whole simulation (the
