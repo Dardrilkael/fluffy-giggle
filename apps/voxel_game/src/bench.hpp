@@ -8,11 +8,33 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <string_view>
 
 #include "perf.hpp"
 #include "player.hpp"
 
 namespace voxel::bench {
+
+struct ShadowFlags {
+    bool cast = true;
+    bool receive = true;
+};
+
+// "full" renders the map and filters receivers; "no-receive" retains the
+// depth-only shadow pass but skips all fragment PCF lookups; "off" does both.
+[[nodiscard]] inline constexpr ShadowFlags shadow_flags_from_name(
+    std::string_view name) noexcept {
+    if (name == "off") return {false, false};
+    if (name == "no-receive") return {true, false};
+    return {true, true};
+}
+
+[[nodiscard]] inline constexpr const char* shadow_mode_name(
+    ShadowFlags flags) noexcept {
+    if (!flags.cast && !flags.receive) return "off";
+    if (flags.cast && !flags.receive) return "no-receive";
+    return "full";
+}
 
 struct Config {
     float seconds = 12.0f;
@@ -273,6 +295,11 @@ inline int bench_dimension_from_env(const char* name, int fallback,
     if (raw == nullptr) return fallback;
     const int value = std::atoi(raw);
     return value >= minimum && value <= maximum ? value : fallback;
+}
+
+inline ShadowFlags bench_shadow_flags_from_env() {
+    const char* raw = env_value("WS_VOXEL_BENCH_SHADOW_MODE");
+    return raw == nullptr ? ShadowFlags{} : shadow_flags_from_name(raw);
 }
 
 inline bool bench_vsync_from_env(bool fallback) {
