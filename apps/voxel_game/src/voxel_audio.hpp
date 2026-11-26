@@ -4,6 +4,7 @@
 // This is the only layer that knows about blocks, materials and voxel rays.
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 
 #include <ws/audio/early_reflections.hpp>
