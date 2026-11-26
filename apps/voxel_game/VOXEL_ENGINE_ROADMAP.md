@@ -46,6 +46,8 @@ only as a deliberate API migration, never by duplicating the implementation.
 
 Set `WS_VOXEL_BENCH_MODE=scale`, `WS_VOXEL_BENCH=23` (3 seconds warm-up + 20 seconds measured), `WS_VOXEL_BENCH_DISTANCE`, `WS_VOXEL_BENCH_WIDTH`, `WS_VOXEL_BENCH_HEIGHT`, and `WS_VOXEL_BENCH_VSYNC=0`. The fixed mode does not move the player or edit blocks. Keep the seed and camera pose unchanged while sweeping one variable at a time. Capture the emitted `bench:config` line, one-second CSV rows and final percentiles for each run.
 
+Directional shadows are opt-in in `Light3D` and remain disabled for the normal voxel-game scene. The benchmark explicitly opts in only when a shadow mode is requested, so `off` reproduces the pre-experiment baseline.
+
 To isolate shadow cost, repeat one identical fixed-scene configuration with `WS_VOXEL_BENCH_SHADOW_MODE=full`, `no-receive`, and `off`. `no-receive` still renders the depth-only shadow map but disables receiver PCF lookups; `off` disables both. The full-to-no-receive GPU-time delta estimates PCF cost, while no-receive-to-off estimates shadow-map rendering cost. Unsupported queues report GPU timing unavailable.
 
 ### 1 — CPU meshing and renderer ownership
