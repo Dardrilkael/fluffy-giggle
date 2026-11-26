@@ -9,7 +9,7 @@ Jolt behind `ws::physics3d`, OpenAL Soft behind `ws::audio`.
 
 - **A procedurally generated 128 × 64 × 128 voxel world** (8×8 chunks of
   16×64×16): multi-field FBM height and climate maps create plains,
-  forests, deserts and rocky mountain regions. A warped low-frequency
+  forests, deserts and rocky mountain regions. A low-frequency
   field carves winding river channels and sandy banks; water fills low
   ground to the water plane. 3D coherent density carves underground caves,
   clustered 3D noise creates coal/iron ore veins, and tree density varies
