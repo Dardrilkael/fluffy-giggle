@@ -98,6 +98,9 @@ if(ws_want_net)
   # pattern, unconditional).
   add_subdirectory(net)
 endif()
+if(ws_want_gameplay)
+  add_subdirectory(gameplay)
+endif()
 if(ws_want_physics)
   # ws::physics is cross-platform on the same two backends everywhere:
   # Box2D (2D) + Jolt (3D), both private to src/backend and both fetched
