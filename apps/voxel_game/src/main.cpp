@@ -58,6 +58,7 @@
 #include <ws/ui/renderer3d.hpp>
 
 #include "menu.hpp"
+#include "hotbar.hpp"
 #include "inventory.hpp"
 #include "bench.hpp"
 #include "perf.hpp"
@@ -80,7 +81,7 @@ constexpr int kKeySpace = 32;
 constexpr int kKeyShiftL = 340;  // GLFW_KEY_LEFT_SHIFT
 constexpr int kKey1 = 49;
 
-constexpr int kHotbarSlots = static_cast<int>(voxel::kHotbarSize);
+constexpr int kHotbarSlots = voxel::hotbar::kSlots;
 constexpr int kKeyE = 69;
 constexpr int kKeyC = 67;
 constexpr int kKeyF1 = 290;
@@ -543,34 +544,38 @@ class VoxelApp final : public ws::ui::App {
     r2d::draw_line(cx, cy - 7.0f, cx, cy + 7.0f, 2.0f,
                    r2d::rgba(255, 255, 255, 220));
 
-    // Compact, texture-backed hotbar. Selection is a warm moss accent;
-    // each item icon samples the same PNG used by its world block.
-    constexpr float slot_step = 54.0f;
-    constexpr float slot_size = 50.0f;
-    constexpr float bar_w = slot_step * kHotbarSlots;
-    const float bx = (frame.width - bar_w) * 0.5f;
-    const float by = frame.height - 66.0f;
-    r2d::draw_rounded_quad(bx - 8, by - 7, bar_w + 16, 64, 9,
-                           r2d::rgba(17,21,25,218));
+    // Compact, texture-backed hotbar. Geometry and pointer hit testing
+    // share hotbar.hpp, so the HUD and input cannot drift apart.
+    const auto slots = voxel::hotbar::layout(frame.width, frame.height);
+    const float bx = slots.front().bounds.x;
+    const float by = slots.front().bounds.y;
+    const float bar_w = voxel::hotbar::kSlotStep * kHotbarSlots;
+    r2d::draw_rounded_quad(
+        bx - voxel::hotbar::kPanelPadding, by - 7.0f,
+        bar_w + 2.0f * voxel::hotbar::kPanelPadding,
+        voxel::hotbar::kPanelHeight, 9, r2d::rgba(17,21,25,218));
     for (int i = 0; i < kHotbarSlots; ++i) {
-      const float sx = bx + static_cast<float>(i) * slot_step;
-      const bool selected = i == hotbar_;
+      const auto& slot = slots[static_cast<std::size_t>(i)];
+      const float sx = slot.bounds.x;
+      const float sy = slot.bounds.y;
+      const float slot_size = slot.bounds.w;
+      const bool selected = slot.index == hotbar_;
       const auto& stack = inventory_.slot(static_cast<std::size_t>(i));
-      r2d::draw_rounded_quad(sx, by, slot_size, slot_size, 6,
+      r2d::draw_rounded_quad(sx, sy, slot_size, slot_size, 6,
           selected ? r2d::rgba(139,177,91,255)
                    : r2d::rgba(78,87,83,255));
-      r2d::draw_rounded_quad(sx + 2, by + 2, slot_size - 4, slot_size - 4, 5,
+      r2d::draw_rounded_quad(sx + 2, sy + 2, slot_size - 4, slot_size - 4, 5,
           selected ? r2d::rgba(35,47,34,255)
                    : r2d::rgba(31,36,40,245));
       if (!stack.empty()) {
-        draw_item_icon(stack.item, sx + 9, by + 8, 32);
+        draw_item_icon(stack.item, sx + 9, sy + 8, 32);
         char amount[8];
         std::snprintf(amount, sizeof(amount), "%u", stack.count);
-        (void)r2d::draw_text(sx + 34, by + 34, amount, font_,
+        (void)r2d::draw_text(sx + 34, sy + 34, amount, font_,
                              r2d::rgba(255,255,255));
       }
       char key[2] = {static_cast<char>('1' + i), '\0'};
-      (void)r2d::draw_text(sx + 5, by + 4, key, font_,
+      (void)r2d::draw_text(sx + 5, sy + 4, key, font_,
                            selected ? r2d::rgba(236,246,217)
                                     : r2d::rgba(170,180,174));
     }
