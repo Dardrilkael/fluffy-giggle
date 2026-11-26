@@ -9,6 +9,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <ws/audio/wav.hpp>
 
@@ -39,6 +40,9 @@ struct AudioEngine::Impl {
     ALuint transient_buffer;   // owned by this source when non-zero
   };
   std::unordered_map<std::uint32_t, SourceEntry> sources;  // handle -> entry
+  // Reusable transient PCM buffers. Capacity is reserved at init so the
+  // play/stop/update path never grows this vector after warm-up.
+  std::vector<ALuint> free_transient_buffers;
 
   std::uint32_t next_sound = 1;   // 0 is never issued
   std::uint32_t next_source = 1;
@@ -58,6 +62,7 @@ ws::core::Status AudioEngine::init() {
     return fail(AudioError::already_initialized, "engine is already initialized");
 
   auto fresh = std::make_unique<Impl>();
+  fresh->free_transient_buffers.reserve(kMaxSources);
   fresh->device = alcOpenDevice(nullptr);
   if (!fresh->device)
     return fail(AudioError::device_open_failed,
@@ -90,6 +95,8 @@ ws::core::Status AudioEngine::shutdown() {
       alDeleteBuffers(1, &entry.transient_buffer);
     }
   }
+  for (ALuint& buffer : impl_->free_transient_buffers)
+    alDeleteBuffers(1, &buffer);
   for (auto& [handle, buffer] : impl_->sounds)
     alDeleteBuffers(1, &buffer);
   alcMakeContextCurrent(nullptr);
@@ -224,16 +231,21 @@ ws::core::Result<SourceHandle> AudioEngine::play(
   const ALenum format =
       desc.channels == 1 ? AL_FORMAT_MONO16 : AL_FORMAT_STEREO16;
   ALuint buffer = 0;
-  alGenBuffers(1, &buffer);
-  if (const ALenum err = alGetError(); err != AL_NO_ERROR) {
-    return fail(AudioError::backend_error,
-                al_describe("play PCM: alGenBuffers", err));
+  if (!impl_->free_transient_buffers.empty()) {
+    buffer = impl_->free_transient_buffers.back();
+    impl_->free_transient_buffers.pop_back();
+  } else {
+    alGenBuffers(1, &buffer);
+    if (const ALenum err = alGetError(); err != AL_NO_ERROR) {
+      return fail(AudioError::backend_error,
+                  al_describe("play PCM: alGenBuffers", err));
+    }
   }
   alBufferData(buffer, format, desc.samples,
                static_cast<ALsizei>(total_samples * 2),
                static_cast<ALsizei>(desc.sample_rate));
   if (const ALenum err = alGetError(); err != AL_NO_ERROR) {
-    alDeleteBuffers(1, &buffer);
+    impl_->free_transient_buffers.push_back(buffer);
     return fail(AudioError::backend_error,
                 al_describe("play PCM: alBufferData", err));
   }
@@ -241,7 +253,7 @@ ws::core::Result<SourceHandle> AudioEngine::play(
   ALuint source = 0;
   alGenSources(1, &source);
   if (const ALenum err = alGetError(); err != AL_NO_ERROR) {
-    alDeleteBuffers(1, &buffer);
+    impl_->free_transient_buffers.push_back(buffer);
     return fail(AudioError::backend_error,
                 al_describe("play PCM: alGenSources", err));
   }
@@ -249,14 +261,14 @@ ws::core::Result<SourceHandle> AudioEngine::play(
   alSourcef(source, AL_GAIN, gain);
   if (const ALenum err = alGetError(); err != AL_NO_ERROR) {
     alDeleteSources(1, &source);
-    alDeleteBuffers(1, &buffer);
+    impl_->free_transient_buffers.push_back(buffer);
     return fail(AudioError::backend_error,
                 al_describe("play PCM: source setup", err));
   }
   alSourcePlay(source);
   if (const ALenum err = alGetError(); err != AL_NO_ERROR) {
     alDeleteSources(1, &source);
-    alDeleteBuffers(1, &buffer);
+    impl_->free_transient_buffers.push_back(buffer);
     return fail(AudioError::backend_error,
                 al_describe("play PCM: alSourcePlay", err));
   }
@@ -275,10 +287,15 @@ ws::core::Status AudioEngine::stop(SourceHandle source) {
     return fail(AudioError::invalid_handle, "no such source handle");
   alSourceStop(it->second.source);
   alDeleteSources(1, &it->second.source);
-  if (it->second.transient_buffer != 0) {
-    alDeleteBuffers(1, &it->second.transient_buffer);
-  }
   const ALenum err = alGetError();
+  if (it->second.transient_buffer != 0) {
+    if (err == AL_NO_ERROR) {
+      impl_->free_transient_buffers.push_back(it->second.transient_buffer);
+    } else {
+      alDeleteBuffers(1, &it->second.transient_buffer);
+      (void)alGetError();
+    }
+  }
   impl_->sources.erase(it);
   if (err != AL_NO_ERROR)
     return fail(AudioError::backend_error, al_describe("stop", err));
@@ -334,12 +351,13 @@ ws::core::Status AudioEngine::update() {
                   al_describe("update: state query", err));
     if (state != AL_PLAYING) {  // finished one-shot: free the slot
       alDeleteSources(1, &it->second.source);
-      if (it->second.transient_buffer != 0) {
-        alDeleteBuffers(1, &it->second.transient_buffer);
-      }
-      if (const ALenum err = alGetError(); err != AL_NO_ERROR)
+      if (const ALenum err = alGetError(); err != AL_NO_ERROR) {
         return fail(AudioError::backend_error,
-                    al_describe("update: source/buffer cleanup", err));
+                    al_describe("update: alDeleteSources", err));
+      }
+      if (it->second.transient_buffer != 0) {
+        impl_->free_transient_buffers.push_back(it->second.transient_buffer);
+      }
       it = impl_->sources.erase(it);
     } else {
       ++it;
