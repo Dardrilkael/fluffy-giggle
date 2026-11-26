@@ -95,9 +95,9 @@ void draw_target_outline(ws::ui::r3d::Mesh mesh,
                          const World::RayHit& target) {
   if (!target.hit || mesh.id == 0) return;
   ws::ui::r3d::Transform3D transform{};
-  transform.translation[0] = static_cast<float>(target.cell[0]) + 0.5f;
-  transform.translation[1] = -static_cast<float>(target.cell[1]) - 0.5f;
-  transform.translation[2] = -static_cast<float>(target.cell[2]) - 0.5f;
+  transform.translation[0] = static_cast<float>(target.cell.x) + 0.5f;
+  transform.translation[1] = -static_cast<float>(target.cell.y) - 0.5f;
+  transform.translation[2] = -static_cast<float>(target.cell.z) - 0.5f;
   ws::ui::r3d::MeshMaterial material;
   material.tint = ws::ui::r2d::rgba(255, 222, 118, 255);
   material.casts_shadow = false;
