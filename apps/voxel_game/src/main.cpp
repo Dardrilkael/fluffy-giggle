@@ -347,15 +347,37 @@ class VoxelApp final : public ws::ui::App {
     // look-delta accumulator is gated in on_event, and the click flag
     // is consumed here, so no paused-frame input leaks into the game.)
     if (input.key_pressed[256]) {  // GLFW_KEY_ESCAPE
-      paused_ = !paused_;
-      set_cursor_mode(paused_ ? ws::ui::CursorMode::normal
-                              : ws::ui::CursorMode::hidden);
+      if (settings_open_) settings_open_ = false;
+      else paused_ = !paused_;
+      set_cursor_mode((paused_ || settings_open_)
+                          ? ws::ui::CursorMode::normal
+                          : ws::ui::CursorMode::hidden);
       clicked_ = false;
       // Re-anchor the look accumulator: while paused, deltas were not
       // accumulated, but events kept arriving - drop any motion the
       // resume could otherwise read as one giant turn.
       look_dx_ = 0.0f;
       look_dy_ = 0.0f;
+    }
+
+    if (!paused_ && input.key_pressed[80]) {  // P opens settings
+      settings_open_ = !settings_open_;
+      set_cursor_mode(settings_open_ ? ws::ui::CursorMode::normal
+                                     : ws::ui::CursorMode::hidden);
+      clicked_ = false;
+    }
+    if (settings_open_) {
+      settings_action(frame);
+      r2d::begin(); r2d::set_layer(0);
+      r2d::draw_quad(0, 0, frame.width, frame.height, r2d::rgba(135,196,250));
+      const auto cam = voxel::begin_scene(player_, settings_.fov_degrees, settings_.render_distance);
+      voxel::draw_world(world_, tile_textures_, cam, frame.width / frame.height);
+      r2d::end();
+      r2d::begin(); r2d::set_layer(10);
+      draw_hud(frame);
+      draw_settings_panel(frame);
+      r2d::end();
+      return;
     }
 
     if (paused_) {
