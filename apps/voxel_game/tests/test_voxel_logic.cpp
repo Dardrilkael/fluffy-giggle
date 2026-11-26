@@ -1323,6 +1323,12 @@ TEST_CASE("voxel acoustics: six room boundaries become sorted early reflections"
   CHECK(response.dry_gain == doctest::Approx(0.92f));
   CHECK(response.wet_gain > 0.0f);
   CHECK(response.wet_gain < 0.36f);
+  float combined_gain = 0.0f;
+  for (std::size_t i = 0; i < response.count; ++i) {
+    combined_gain += response.taps[i].gain;
+  }
+  CHECK(combined_gain * response.wet_gain <=
+        doctest::Approx(0.75f).epsilon(0.001));
   for (std::size_t i = 0; i < response.count; ++i) {
     CHECK(response.taps[i].delay_frames == 900);
     CHECK(response.taps[i].gain > 0.0f);
