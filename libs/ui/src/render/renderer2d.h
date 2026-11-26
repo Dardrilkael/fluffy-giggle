@@ -244,6 +244,14 @@ public:
     void flush(VkCommandBuffer cmd, uint32_t frame_slot, float fb_width,
                float fb_height);
 
+    // Timestamp the complete graphics command buffer (shadow + main pass).
+    // begin_gpu_timing is called only after acquire() has waited this slot's
+    // fence; it collects the previous use of the slot before resetting its
+    // query pair. end_gpu_timing is called after the final render pass and
+    // before submit(). Unsupported queues degrade to no samples.
+    void begin_gpu_timing(VkCommandBuffer cmd, uint32_t frame_slot);
+    void end_gpu_timing(VkCommandBuffer cmd, uint32_t frame_slot);
+
     // The shadow-map pass: renders the frame's shadow casters from the
     // directional light into THIS frame slot's depth map. It is a render
     // pass of its own, so it must be recorded OUTSIDE the main pass - after
@@ -657,6 +665,17 @@ private:
     const gfx::Gpu* gpu_ = nullptr;
     VkQueue queue_ = VK_NULL_HANDLE;
     uint32_t queue_family_ = 0;
+
+    // Two timestamp queries per frame slot. Results are read only after
+    // Swapchain::acquire has waited the fence for that slot, so collection
+    // never stalls the GPU or races a query reset against an in-flight use.
+    VkQueryPool gpu_timestamp_pool_ = VK_NULL_HANDLE;
+    std::array<bool, kMaxFramesInFlight> gpu_timestamp_pending_{};
+    std::array<bool, kMaxFramesInFlight> gpu_timestamp_recording_{};
+    uint32_t timestamp_valid_bits_ = 0;
+    double timestamp_period_ns_ = 0.0;
+    float gpu_frame_ms_ = 0.0f;
+    std::uint64_t gpu_frame_serial_ = 0;
 
     VkRenderPass render_pass_ = VK_NULL_HANDLE;  // last seen (rebuild input)
     VkFormat format_ = VK_FORMAT_UNDEFINED;     // drift sentinel
