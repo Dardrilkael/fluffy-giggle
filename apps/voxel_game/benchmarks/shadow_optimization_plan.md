@@ -1,6 +1,6 @@
 # Shadow Optimization Plan — fluffy-giggle voxel renderer
 
-**Status:** Planned  
+**Status:** Experiment A complete; Experiment B pending  
 **Created:** 2026-11-26  
 **Repository:** [Dardrilkael/fluffy-giggle](https://github.com/Dardrilkael/fluffy-giggle)  
 **Branch:** `feature/voxel-inventory-crafting`
@@ -112,8 +112,9 @@ A faster filter is not acceptable if it introduces severe visual artifacts.
 - [x] Add runtime-configurable shadow-map resolution (default unchanged): `WS_SHADOW_MAP_RESOLUTION` accepts 2048, 1024, 512 or 256; invalid values use the default. The renderer clamps to the device's `maxImageDimension2D`.
 - [x] Log the actual selected shadow-map dimensions during renderer initialization (verify this in each benchmark log).
 - [ ] Build Release and run the existing voxel logic tests.
-- [ ] Execute Experiment A and save all raw CSV/log files.
-- [ ] Analyze resolution scaling and choose a quality/performance point.
+- [x] Execute Experiment A and save all four raw no-receive CSV files.
+- [x] Analyze resolution scaling; provisional performance choice is 512×512 (visual quality still needs documented screenshot review).
+- [ ] Archive raw full-mode CSVs and screenshots for the 2048/1024/512 visual-quality comparison.
 - [ ] Execute Experiment B and save all raw CSV/log files.
 - [ ] Implement only the measured winning optimizations.
 - [ ] Rerun regression tests and all three shadow modes.
