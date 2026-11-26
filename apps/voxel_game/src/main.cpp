@@ -552,6 +552,33 @@ class VoxelApp final : public ws::ui::App {
   }
 
  private:
+  // --- helpers -----------------------------------------------------------------------
+  void rebuild_around(int x, int z) {
+    const int cx = x / voxel::kChunkSizeX;
+    const int cz = z / voxel::kChunkSizeZ;
+    world_.rebuild_chunk(cx, cz);
+    // If the block sits on a chunk boundary, rebuild the neighbor too.
+    if (x % voxel::kChunkSizeX == 0 && cx > 0) {
+      world_.rebuild_chunk(cx - 1, cz);
+    }
+    if (x % voxel::kChunkSizeX == voxel::kChunkSizeX - 1 && cx < voxel::kWorldChunksX - 1) {
+      world_.rebuild_chunk(cx + 1, cz);
+    }
+    if (z % voxel::kChunkSizeZ == 0 && cz > 0) {
+      world_.rebuild_chunk(cx, cz - 1);
+    }
+    if (z % voxel::kChunkSizeZ == voxel::kChunkSizeZ - 1 && cz < voxel::kWorldChunksZ - 1) {
+      world_.rebuild_chunk(cx, cz + 1);
+    }
+  }
+
+  void play_sound(int id, float gain) {
+    if (!audio_ok_ || id < 0 || id >= 2 || !sounds_[id].valid()) {
+      return;
+    }
+    (void)audio_.play(sounds_[id], gain);
+  }
+
   // --- the state -------------------------------------------------------------------
   static constexpr std::uint32_t kSeed = 0xC0FFEEu;
   static constexpr int kSoundBreak = 0;
