@@ -505,93 +505,6 @@ void World::rebuild_all() {
   }
 }
 
-std::vector<World::CollisionBox> World::collision_boxes(int cx,
-                                                                  int cz) const {
-  std::vector<CollisionBox> boxes;
-  if (cx < 0 || cx >= kWorldChunksX || cz < 0 || cz >= kWorldChunksZ) {
-    return boxes;
-  }
-
-  // Chunk-local occupancy and visitation. Merge X first, then Z rows,
-  // then Y layers. Every extension is accepted only when the complete
-  // rectangle is solid and unused, so the resulting boxes are disjoint
-  // and their union is exactly the original solid voxel set.
-  std::vector<std::uint8_t> used(kBlocksPerChunk, 0);
-  const int ox = cx * kChunkSizeX;
-  const int oz = cz * kChunkSizeZ;
-  const auto solid_unused = [&](int x, int y, int z) {
-    const auto i = static_cast<std::size_t>(block_index(x, y, z));
-    return used[i] == 0 && is_solid(block_at(ox + x, y, oz + z));
-  };
-
-  for (int y = 0; y < kChunkSizeY; ++y) {
-    for (int z = 0; z < kChunkSizeZ; ++z) {
-      for (int x = 0; x < kChunkSizeX; ++x) {
-        if (!solid_unused(x, y, z)) {
-          continue;
-        }
-
-        int sx = 1;
-        while (x + sx < kChunkSizeX &&
-               solid_unused(x + sx, y, z)) {
-          ++sx;
-        }
-
-        int sz = 1;
-        bool grow_z = true;
-        while (z + sz < kChunkSizeZ && grow_z) {
-          for (int dx = 0; dx < sx; ++dx) {
-            if (!solid_unused(x + dx, y, z + sz)) {
-              grow_z = false;
-              break;
-            }
-          }
-          if (grow_z) {
-            ++sz;
-          }
-        }
-
-        int sy = 1;
-        bool grow_y = true;
-        while (y + sy < kChunkSizeY && grow_y) {
-          for (int dz = 0; dz < sz && grow_y; ++dz) {
-            for (int dx = 0; dx < sx; ++dx) {
-              if (!solid_unused(x + dx, y + sy, z + dz)) {
-                grow_y = false;
-                break;
-              }
-            }
-          }
-          if (grow_y) {
-            ++sy;
-          }
-        }
-
-        for (int dy = 0; dy < sy; ++dy) {
-          for (int dz = 0; dz < sz; ++dz) {
-            for (int dx = 0; dx < sx; ++dx) {
-              used[static_cast<std::size_t>(
-                  block_index(x + dx, y + dy, z + dz))] = 1;
-            }
-          }
-        }
-
-        boxes.push_back(CollisionBox{
-            ws::math::Vec3{static_cast<float>(ox + x) +
-                               static_cast<float>(sx) * 0.5f,
-                           static_cast<float>(y) +
-                               static_cast<float>(sy) * 0.5f,
-                           static_cast<float>(oz + z) +
-                               static_cast<float>(sz) * 0.5f},
-            ws::math::Vec3{static_cast<float>(sx) * 0.5f,
-                           static_cast<float>(sy) * 0.5f,
-                           static_cast<float>(sz) * 0.5f}});
-      }
-    }
-  }
-  return boxes;
-}
-
 int World::surface_height(int x, int z) const {
   for (int y = kChunkSizeY - 1; y >= 0; --y) {
     if (is_solid(block_at(x, y, z))) {
@@ -630,87 +543,36 @@ bool World::is_exposed(int x, int y, int z) const {
 
 // --- the DDA raycast --------------------------------------------------------------
 
+bool World::solid_query(const void* context, int x, int y,
+                         int z) noexcept {
+  const auto* world = static_cast<const World*>(context);
+  return world != nullptr && is_solid(world->block_at(x, y, z));
+}
+
+ws::physics3d::VoxelGrid3D World::collision_grid() const noexcept {
+  return ws::physics3d::VoxelGrid3D{
+      ws::physics3d::VoxelGrid3D::Desc{
+          ws::math::IVec3{0, 0, 0},
+          ws::math::IVec3{kWorldSizeX, kChunkSizeY, kWorldSizeZ},
+          this, &World::solid_query}};
+}
+
 World::RayHit World::raycast(const float origin[3],
                              const float direction[3],
                              float max_distance) const {
-  RayHit out;
-  float len = std::sqrt(direction[0] * direction[0] +
-                        direction[1] * direction[1] +
-                        direction[2] * direction[2]);
-  if (len < 1e-8f) {
-    return out;
-  }
-  const float inv = 1.0f / len;
-  const float dx = direction[0] * inv;
-  const float dy = direction[1] * inv;
-  const float dz = direction[2] * inv;
-
-  int ix = static_cast<int>(std::floor(origin[0]));
-  int iy = static_cast<int>(std::floor(origin[1]));
-  int iz = static_cast<int>(std::floor(origin[2]));
-
-  const float stepx = dx > 0.0f ? 1.0f : (dx < 0.0f ? -1.0f : 0.0f);
-  const float stepy = dy > 0.0f ? 1.0f : (dy < 0.0f ? -1.0f : 0.0f);
-  const float stepz = dz > 0.0f ? 1.0f : (dz < 0.0f ? -1.0f : 0.0f);
-  const float boundx = static_cast<float>(dx > 0.0f ? ix + 1 : ix);
-  const float boundy = static_cast<float>(dy > 0.0f ? iy + 1 : iy);
-  const float boundz = static_cast<float>(dz > 0.0f ? iz + 1 : iz);
-  // t at which each boundary is reached; +inf-equivalent (1e30) when the
-  // axis never crosses (a 0 component). Mutable: the walk advances them.
-  float tx = dx != 0.0f ? (boundx - origin[0]) / dx : 1e30f;
-  float ty = dy != 0.0f ? (boundy - origin[1]) / dy : 1e30f;
-  float tz = dz != 0.0f ? (boundz - origin[2]) / dz : 1e30f;
-  const float dtx = dx != 0.0f ? std::abs(1.0f / dx) : 1e30f;
-  const float dty = dy != 0.0f ? std::abs(1.0f / dy) : 1e30f;
-  const float dtz = dz != 0.0f ? std::abs(1.0f / dz) : 1e30f;
-
-  int last_axis = -1;
-  int last_step = 0;
-  float t = 0.0f;
-  for (int guard = 0; guard < 1024; ++guard) {
-    if (is_solid(block_at(ix, iy, iz))) {
-      out.hit = true;
-      out.cell[0] = ix;
-      out.cell[1] = iy;
-      out.cell[2] = iz;
-      out.normal[0] = last_axis == 0 ? -last_step : 0;
-      out.normal[1] = last_axis == 1 ? -last_step : 0;
-      out.normal[2] = last_axis == 2 ? -last_step : 0;
-      out.distance = t;
-      return out;
-    }
-    if (tx <= ty && tx <= tz) {
-      if (tx > max_distance) {
-        break;
-      }
-      t = tx;
-      tx += dtx;
-      ix += static_cast<int>(stepx);
-      last_axis = 0;
-      last_step = static_cast<int>(stepx);
-    } else if (ty <= tz) {
-      if (ty > max_distance) {
-        break;
-      }
-      t = ty;
-      ty += dty;
-      iy += static_cast<int>(stepy);
-      last_axis = 1;
-      last_step = static_cast<int>(stepy);
-    } else {
-      if (tz > max_distance) {
-        break;
-      }
-      t = tz;
-      tz += dtz;
-      iz += static_cast<int>(stepz);
-      last_axis = 2;
-      last_step = static_cast<int>(stepz);
-    }
-    if (iy < 0 || iy >= kChunkSizeY) {
-      break;
-    }
-  }
+  const auto hit = collision_grid().raycast(
+      ws::math::Vec3{origin[0], origin[1], origin[2]},
+      ws::math::Vec3{direction[0], direction[1], direction[2]},
+      max_distance);
+  RayHit out{};
+  out.hit = hit.hit;
+  out.cell[0] = hit.cell.x;
+  out.cell[1] = hit.cell.y;
+  out.cell[2] = hit.cell.z;
+  out.normal[0] = hit.normal.x;
+  out.normal[1] = hit.normal.y;
+  out.normal[2] = hit.normal.z;
+  out.distance = hit.distance;
   return out;
 }
 
