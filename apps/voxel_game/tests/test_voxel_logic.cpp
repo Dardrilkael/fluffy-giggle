@@ -851,6 +851,35 @@ TEST_CASE("bench: a default-constructed driver is idle, not running") {
   CHECK(!driver.running());
 }
 
+TEST_CASE("bench: scale mode holds input and measures only after warmup") {
+  voxel::bench::Driver driver{};
+  voxel::bench::Config cfg{};
+  cfg.seconds = 5.0f;
+  cfg.warmup_seconds = 2.0f;
+  cfg.fixed_scene = true;
+  cfg.print_header = false;
+  driver.start(cfg);
+
+  const auto input = driver.input(1.0f / 60.0f);
+  CHECK(input.look_dx == 0.0f);
+  CHECK(input.look_dy == 0.0f);
+  CHECK_FALSE(input.forward);
+  CHECK_FALSE(input.sprint);
+  CHECK_FALSE(driver.wants_edit());
+
+  voxel::perf::FrameTimings timings{};
+  timings.total_ms = 0.2f;
+  timings.wall_frame_ms = 1.25f;
+  const voxel::perf::Counters counters{};
+  driver.frame(1.0f, timings, counters);  // warm-up
+  CHECK_FALSE(driver.advance_phase(0.0f));
+  driver.frame(1.0f, timings, counters);  // measurement starts
+  driver.frame(1.0f, timings, counters);
+  CHECK_FALSE(driver.advance_phase(0.0f));
+  driver.frame(2.0f, timings, counters);
+  CHECK(driver.advance_phase(0.0f));
+}
+
 TEST_CASE("atlas: the face->tile map matches the block vocabulary") {
   // The generated header's map, pinned: grass wears the grass TOP on
   // top, DIRT on bottom, the grass SIDE everywhere else; the log wears
@@ -1316,6 +1345,7 @@ TEST_CASE("perf: frame evidence structs start clear and duration conversion is e
 
   const voxel::perf::FrameTimings timings{};
   CHECK(timings.total_ms == 0.0f);
+  CHECK(timings.wall_frame_ms == 0.0f);
   CHECK(timings.physics_ms == 0.0f);
   CHECK(timings.cpu_mesh_ms == 0.0f);
   CHECK(timings.upload_ms == 0.0f);
