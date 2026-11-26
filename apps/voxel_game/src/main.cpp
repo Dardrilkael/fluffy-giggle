@@ -976,7 +976,7 @@ class VoxelApp final : public ws::ui::App {
     // a break/place event. The transient AudioEngine overload copies PCM
     // into an owned OpenAL buffer before this array leaves scope.
     constexpr std::uint32_t kMaxProcessedFrames = 16384;
-    std::array<std::int16_t, kMaxProcessedFrames> processed{};
+    std::array<std::int16_t, kMaxProcessedFrames> processed;
     const auto response = voxel::acoustics::room_response(
         world_, player_.eye_position(), kRate);
     const auto output_frames = ws::audio::process_early_reflections(
