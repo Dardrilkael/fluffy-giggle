@@ -151,7 +151,9 @@ ws::ui::r2d::Camera3D begin_scene(const Player& player, float aspect) {
   camera.up[1] = -1.0f;
   camera.up[2] = 0.0f;
   camera.fov_y = 1.2217f;  // 70 degrees, the FPS default
-  camera.near_z = 0.1f;
+  // A tighter near plane reduces visible clipping when the FPS camera
+  // approaches voxel faces; keep the far plane unchanged for world visibility.
+  camera.near_z = 0.03f;
   camera.far_z = 260.0f;   // the whole 128-block world is in view
   (void)aspect;
 
