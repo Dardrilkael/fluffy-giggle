@@ -1325,6 +1325,52 @@ TEST_CASE("meshing: CPU chunk geometry has valid indices and finite attributes")
   CHECK(world.build_chunk_meshes(4, voxel::kWorldChunksZ).empty());
 }
 
+TEST_CASE("meshing: exposed faces are classified once and greedily grouped by texture") {
+  voxel::World world;
+  world.generate(0xFACE71LEu);
+
+  constexpr int cx = 4;
+  constexpr int cz = 4;
+  constexpr int ox = cx * voxel::kChunkSizeX;
+  constexpr int oz = cz * voxel::kChunkSizeZ;
+  const auto clear_chunk = [&] {
+    for (int y = 0; y < voxel::kChunkSizeY; ++y) {
+      for (int z = 0; z < voxel::kChunkSizeZ; ++z) {
+        for (int x = 0; x < voxel::kChunkSizeX; ++x) {
+          (void)world.set_block(ox + x, y, oz + z, voxel::Block::air);
+        }
+      }
+    }
+  };
+
+  // Grass's bottom and dirt's bottom both use tile 1. The blocks touch
+  // horizontally, so their coplanar faces should become one greedy quad.
+  clear_chunk();
+  constexpr int x = ox + 7;
+  constexpr int y = 24;
+  constexpr int z = oz + 7;
+  CHECK(world.set_block(x, y, z, voxel::Block::grass));
+  CHECK(world.set_block(x + 1, y, z, voxel::Block::dirt));
+  const auto mixed = world.build_chunk_meshes(cx, cz);
+
+  const voxel::ChunkMeshData* tile1 = nullptr;
+  for (const auto& mesh : mixed) {
+    if (mesh.tile == 1) tile1 = &mesh;
+  }
+  REQUIRE(tile1 != nullptr);
+  CHECK(tile1->geometry.vertices.size() == 5u * 4u);
+  CHECK(tile1->geometry.indices.size() == 5u * 6u);
+
+  // Water still emits only its top tile, never side or bottom faces.
+  clear_chunk();
+  CHECK(world.set_block(x, y, z, voxel::Block::water));
+  const auto water = world.build_chunk_meshes(cx, cz);
+  REQUIRE(water.size() == 1);
+  CHECK(water[0].tile == 7);
+  CHECK(water[0].geometry.vertices.size() == 4);
+  CHECK(water[0].geometry.indices.size() == 6);
+}
+
 TEST_CASE("voxel acoustics: six room boundaries become sorted early reflections") {
   voxel::World world;
   world.generate(0xAC0571C5u);
