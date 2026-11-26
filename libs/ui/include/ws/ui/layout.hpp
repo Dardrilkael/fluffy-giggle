@@ -50,7 +50,7 @@ inline constexpr float kButtonGap = 14.0f;
 
 [[nodiscard]] constexpr bool hit(
     const Button& button, float x, float y) noexcept {
-  return layout::hit(button, x, y);
+  return ::ws::ui::layout::hit(button, x, y);
 }
 
 // 0 = primary action, 1 = secondary action, -1 = no action.
@@ -156,7 +156,7 @@ struct Slider {
   for (const Slider& slider : sliders) {
     const Rect expanded{slider.bounds.x, slider.bounds.y - 12.0f,
                         slider.bounds.w, slider.bounds.h + 24.0f};
-    if (layout::hit(expanded, x, y)) return slider.index;
+    if (::ws::ui::layout::hit(expanded, x, y)) return slider.index;
   }
   return -1;
 }
