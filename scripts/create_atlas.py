@@ -20,6 +20,11 @@ texture_atlas.hpp from WHAT IS THERE - no hand-maintained tile list:
                                                face) -> tile + kTileNames
       download/atlas_preview.png              the eyeball grid
 
+For the supplied full resource pack, the expected manifest is 15 unique
+textures: grass top, dirt, grass side, stone, oak log top/side, sand,
+water, cobblestone, oak planks, bricks, glass, oak leaves, coal ore,
+and iron ore.
+
 A missing REQUIRED asset is a hard error naming every candidate tried
 (water is OPTIONAL - the game never meshes water, and a pack without
 water art must still build; its row reads zero slots).
@@ -307,6 +312,9 @@ def main():
           f"({' -> '.join(order)})")
     print(f"wrote {OUT_HPP} ({os.path.getsize(OUT_HPP)} bytes)")
     print(f"wrote {OUT_PNG} ({os.path.getsize(OUT_PNG)} bytes)")
+    print("resolved tile slots:")
+    for slot, stem in enumerate(order):
+        print(f"  [{slot:02d}] {stem}.png")
     return 0
 
 if __name__ == "__main__":
