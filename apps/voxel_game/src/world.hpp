@@ -52,6 +52,13 @@ enum class Block : std::uint8_t {
   wood,
   sand,
   water,
+  cobblestone,
+  planks,
+  bricks,
+  glass,
+  leaves,
+  coal_ore,
+  iron_ore,
   count_,
 };
 
