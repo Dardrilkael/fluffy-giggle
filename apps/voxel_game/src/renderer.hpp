@@ -111,6 +111,7 @@ void draw_world(const VoxelRenderer& renderer,
                 const std::array<ws::ui::r2d::Texture, atlas::kTileCount>&
                     tile_textures,
                 const ws::ui::r2d::Camera3D& camera, float aspect,
-                perf::Counters* counters = nullptr);
+                perf::Counters* counters = nullptr,
+                bool cast_shadows = true, bool receive_shadows = true);
 
 }  // namespace voxel
