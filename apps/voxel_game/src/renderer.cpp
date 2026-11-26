@@ -225,7 +225,7 @@ void draw_world(const VoxelRenderer& renderer,
         renderer.chunk_meshes().size());
   }
 
-  const auto chunk_visible = [&](const World::ChunkMesh& chunk) {
+  const auto chunk_visible = [&](const VoxelRenderer::ChunkMesh& chunk) {
     const float x0 = static_cast<float>(chunk.cx * kChunkSizeX);
     const float z0 = static_cast<float>(chunk.cz * kChunkSizeZ);
     const float rmin[3] = {x0, -static_cast<float>(kChunkSizeY),
@@ -234,7 +234,7 @@ void draw_world(const VoxelRenderer& renderer,
     return culling::aabb_visible(fr, rmin, rmax);
   };
 
-  const auto draw_chunk = [&](const World::ChunkMesh& chunk, bool foliage) {
+  const auto draw_chunk = [&](const VoxelRenderer::ChunkMesh& chunk, bool foliage) {
     if (chunk.index_count == 0) {
       return;
     }
@@ -266,7 +266,7 @@ void draw_world(const VoxelRenderer& renderer,
   };
 
   // Pass 1: all opaque terrain, in its normal chunk order.
-  for (const World::ChunkMesh& chunk : renderer.chunk_meshes()) {
+  for (const VoxelRenderer::ChunkMesh& chunk : renderer.chunk_meshes()) {
     if (chunk.index_count != 0 && chunk.tile != leaves_tile &&
         chunk_visible(chunk)) {
       draw_chunk(chunk, false);
@@ -276,16 +276,16 @@ void draw_world(const VoxelRenderer& renderer,
   // Pass 2: foliage, far-to-near by chunk center. Back-to-front order
   // reduces overlap artifacts between transparent leaf meshes while
   // the opaque depth buffer still prevents foliage showing through walls.
-  std::array<const World::ChunkMesh*, kWorldChunksX * kWorldChunksZ>
+  std::array<const VoxelRenderer::ChunkMesh*, kWorldChunksX * kWorldChunksZ>
       foliage_meshes{};
   std::size_t foliage_count = 0;
-  for (const World::ChunkMesh& chunk : renderer.chunk_meshes()) {
+  for (const VoxelRenderer::ChunkMesh& chunk : renderer.chunk_meshes()) {
     if (chunk.index_count != 0 && chunk.tile == leaves_tile &&
         chunk_visible(chunk) && foliage_count < foliage_meshes.size()) {
       foliage_meshes[foliage_count++] = &chunk;
     }
   }
-  const auto distance_sq = [&](const World::ChunkMesh* chunk) {
+  const auto distance_sq = [&](const VoxelRenderer::ChunkMesh* chunk) {
     const float dx = static_cast<float>(chunk->cx * kChunkSizeX) +
                      0.5f * static_cast<float>(kChunkSizeX) - camera.eye[0];
     const float dy = -0.5f * static_cast<float>(kChunkSizeY) - camera.eye[1];
@@ -295,7 +295,7 @@ void draw_world(const VoxelRenderer& renderer,
   };
   std::sort(foliage_meshes.begin(),
             foliage_meshes.begin() + static_cast<std::ptrdiff_t>(foliage_count),
-            [&](const World::ChunkMesh* a, const World::ChunkMesh* b) {
+            [&](const VoxelRenderer::ChunkMesh* a, const VoxelRenderer::ChunkMesh* b) {
               return distance_sq(a) > distance_sq(b);
             });
   for (std::size_t i = 0; i < foliage_count; ++i) {
