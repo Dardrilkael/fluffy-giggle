@@ -23,6 +23,7 @@ if(TARGET test_voxel_logic)
   target_include_directories(test_voxel_logic PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_SOURCE_DIR}/libs/physics/include")
+  target_link_libraries(test_voxel_logic PRIVATE Threads::Threads)
 endif()
 
 # The frame harness: the app's own frame rendered headless on a real
