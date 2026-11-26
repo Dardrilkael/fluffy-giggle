@@ -1091,13 +1091,16 @@ TEST_CASE("culling: independent frustum oracle covers multiple camera poses") {
                       std::numbers::pi_v<float> / 180.0f;
     const float tan_vertical = std::tan(fov * 0.5f);
     const float tan_horizontal = tan_vertical * camera.aspect;
+    const float target[3] = {
+        camera.eye[0] + forward[0],
+        camera.eye[1] + forward[1],
+        camera.eye[2] + forward[2]};
     const auto fr = voxel::culling::extract_frustum(
-        camera.eye.data(),
-        std::array<float, 3>{
-            camera.eye[0] + forward[0],
-            camera.eye[1] + forward[1],
-            camera.eye[2] + forward[2]}.data(),
-        up_hint, fov, camera.aspect, kNear, kFar);
+        camera.eye.data(), target, up_hint, fov, camera.aspect,
+        kNear, kFar);
+    const auto dot3 = [](const float a[3], const float b[3]) {
+      return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    };
 
     int inside_points = 0;
     int outside_points = 0;
@@ -1127,9 +1130,6 @@ TEST_CASE("culling: independent frustum oracle covers multiple camera poses") {
                   point[0] - camera.eye[0],
                   point[1] - camera.eye[1],
                   point[2] - camera.eye[2]};
-              const auto dot3 = [](const float a[3], const float b[3]) {
-                return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-              };
               const float depth = dot3(delta, forward);
               const float horizontal = dot3(delta, right);
               const float vertical = dot3(delta, up);
