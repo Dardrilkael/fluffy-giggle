@@ -59,6 +59,12 @@ class Player {
   [[nodiscard]] float tuning_half_height() const noexcept {
     return tuning_.half_height;
   }
+  void set_mouse_sensitivity(float value) noexcept {
+    tuning_.mouse_sensitivity = value;
+  }
+  [[nodiscard]] float mouse_sensitivity() const noexcept {
+    return tuning_.mouse_sensitivity;
+  }
   [[nodiscard]] ws::math::Vec3 position() const noexcept { return position_; }
   [[nodiscard]] ws::math::Vec3 velocity() const noexcept { return velocity_; }
   [[nodiscard]] bool grounded() const noexcept { return grounded_; }
