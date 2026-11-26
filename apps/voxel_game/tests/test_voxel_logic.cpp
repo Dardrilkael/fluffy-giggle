@@ -1325,6 +1325,39 @@ TEST_CASE("meshing: CPU chunk geometry has valid indices and finite attributes")
   CHECK(world.build_chunk_meshes(4, voxel::kWorldChunksZ).empty());
 }
 
+TEST_CASE("meshing: immutable worker snapshots match live-world output") {
+  voxel::World world;
+  world.generate(0x51A9u);
+  // Exercise both an interior chunk and a world-edge chunk so the halo
+  // captures cross-chunk neighbors and out-of-world air correctly.
+  for (const auto [cx, cz] : {std::pair{0, 0}, std::pair{4, 4}, std::pair{7, 7}}) {
+    std::vector<voxel::CpuMeshData> snapshot_tiles;
+    const auto snapshot = world.snapshot_chunk(cx, cz, 17);
+    CHECK(snapshot.revision == 17);
+    voxel::mesh_chunk_snapshot(snapshot, snapshot_tiles);
+    std::vector<voxel::CpuMeshData> direct_tiles;
+    world.build_chunk_meshes(cx, cz, direct_tiles);
+    REQUIRE(snapshot_tiles.size() == direct_tiles.size());
+    for (std::size_t tile = 0; tile < direct_tiles.size(); ++tile) {
+      CHECK(snapshot_tiles[tile].vertices.size() == direct_tiles[tile].vertices.size());
+      CHECK(snapshot_tiles[tile].indices == direct_tiles[tile].indices);
+      REQUIRE(snapshot_tiles[tile].vertices.size() == direct_tiles[tile].vertices.size());
+      for (std::size_t v = 0; v < direct_tiles[tile].vertices.size(); ++v) {
+        for (int axis = 0; axis < 3; ++axis) {
+          CHECK(snapshot_tiles[tile].vertices[v].pos[axis] ==
+                doctest::Approx(direct_tiles[tile].vertices[v].pos[axis]));
+          CHECK(snapshot_tiles[tile].vertices[v].normal[axis] ==
+                doctest::Approx(direct_tiles[tile].vertices[v].normal[axis]));
+        }
+        CHECK(snapshot_tiles[tile].vertices[v].uv[0] ==
+              doctest::Approx(direct_tiles[tile].vertices[v].uv[0]));
+        CHECK(snapshot_tiles[tile].vertices[v].uv[1] ==
+              doctest::Approx(direct_tiles[tile].vertices[v].uv[1]));
+      }
+    }
+  }
+}
+
 TEST_CASE("meshing: exposed faces are classified once and greedily grouped by texture") {
   voxel::World uninitialized;
   CHECK(uninitialized.build_chunk_meshes(0, 0).empty());
