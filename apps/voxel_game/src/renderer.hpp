@@ -103,6 +103,7 @@ class VoxelRenderer {
   std::array<MeshResult,kChunkCount> completed_{};
   std::array<MeshJob,kQueueCapacity> jobs_{};
   std::size_t queue_head_=0, queue_count_=0;
+  std::size_t upload_cursor_=0;
   std::mutex queue_mutex_;
   std::condition_variable queue_cv_;
   bool stopping_=false;
