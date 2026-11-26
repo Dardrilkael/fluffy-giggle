@@ -69,8 +69,13 @@ struct EarlyReflectionProfile {
                    std::numeric_limits<std::uint32_t>::max())) {
     return {};
   }
+  const double rounded_frames = std::floor(frames + 0.5);
+  if (rounded_frames >
+      static_cast<double>(std::numeric_limits<std::uint32_t>::max())) {
+    return {};
+  }
   return ReflectionTap{
-      static_cast<std::uint32_t>(std::lround(frames)),
+      static_cast<std::uint32_t>(rounded_frames),
       std::clamp(reflectivity, 0.0f, 1.0f)};
 }
 
@@ -90,29 +95,39 @@ struct EarlyReflectionProfile {
   }
   const std::uint32_t frames = profile.output_frames(input_frames);
   if (frames == 0 || frames > output_capacity_frames) return 0;
+  const std::size_t max_samples =
+      std::numeric_limits<std::size_t>::max();
+  if (static_cast<std::size_t>(input_frames) > max_samples / channels ||
+      static_cast<std::size_t>(frames) > max_samples / channels) {
+    return 0;
+  }
 
   const float dry = std::clamp(profile.dry_gain, 0.0f, 1.0f);
   const float wet = std::clamp(profile.wet_gain, 0.0f, 1.0f);
   for (std::uint32_t frame = 0; frame < frames; ++frame) {
     for (std::uint32_t channel = 0; channel < channels; ++channel) {
+      const std::size_t output_index =
+          static_cast<std::size_t>(frame) * channels + channel;
       float mixed = 0.0f;
       if (frame < input_frames) {
-        mixed = static_cast<float>(input[frame * channels + channel]) * dry;
+        const std::size_t input_index =
+            static_cast<std::size_t>(frame) * channels + channel;
+        mixed = static_cast<float>(input[input_index]) * dry;
       }
       for (std::size_t tap_index = 0; tap_index < profile.count; ++tap_index) {
         const ReflectionTap tap = profile.taps[tap_index];
         if (frame >= tap.delay_frames) {
           const std::uint32_t source_frame = frame - tap.delay_frames;
           if (source_frame < input_frames) {
-            mixed += static_cast<float>(
-                         input[source_frame * channels + channel]) *
+            const std::size_t input_index =
+                static_cast<std::size_t>(source_frame) * channels + channel;
+            mixed += static_cast<float>(input[input_index]) *
                      (wet * std::clamp(tap.gain, 0.0f, 1.0f));
           }
         }
       }
       mixed = std::clamp(mixed, -32768.0f, 32767.0f);
-      output[frame * channels + channel] =
-          static_cast<std::int16_t>(mixed);
+      output[output_index] = static_cast<std::int16_t>(mixed);
     }
   }
   return frames;
