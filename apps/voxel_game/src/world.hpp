@@ -36,8 +36,8 @@
 #include <cstdint>
 #include <vector>
 
-#include <ws/physics/3d/voxel_grid.hpp>
 #include <ws/gameplay/chunked_grid3d.hpp>
+#include <ws/physics/3d/voxel_grid.hpp>
 #include <ws/ui/renderer3d.hpp>  // MeshData, Mesh (the registry handle)
 
 namespace voxel {
