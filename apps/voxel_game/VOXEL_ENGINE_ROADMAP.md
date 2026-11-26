@@ -73,7 +73,7 @@ regression in edit-time p95 frame time.
 - [x] Worker thread meshes snapshots only; no renderer/GPU access.
 - [x] Discard results whose source revision is stale.
 - [x] Render-thread upload with a two-chunk-per-frame job budget.
-- [ ] Prioritize camera-near chunks without starving initial generation.
+- [x] Prioritize queued chunks by current player X/Z distance at worker dequeue time; initial generation remains synchronous.
 - [x] Join worker before releasing snapshots during shutdown.
 
 **Exit:** gameplay edits never synchronously mesh/upload; stale jobs cannot
