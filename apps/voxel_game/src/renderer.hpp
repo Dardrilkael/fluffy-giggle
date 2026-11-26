@@ -80,6 +80,9 @@ class VoxelRenderer {
 
  private:
   std::vector<ChunkMesh> chunk_meshes_;
+  // Tile-indexed CPU geometry scratch. clear() preserves capacity, avoiding
+  // repeated vertex/index allocations when the player edits the same chunks.
+  std::vector<CpuMeshData> cpu_mesh_scratch_;
 };
 
 void draw_world(const VoxelRenderer& renderer,
