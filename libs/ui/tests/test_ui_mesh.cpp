@@ -336,6 +336,7 @@ TEST_CASE("draw_mesh: layer, clip and material ride; multi-block epochs") {
     transform.yaw = 0.5f;
     MeshMaterial material;
     material.tint = ws::ui::r2d::rgba(200, 100, 50, 255);
+    material.depth_write = false;  // alpha-blended foliage path
 
     r.frame_begin(100.0f, 100.0f);
     r.begin(ws::ui::r2d::Camera3D{});  // epoch 1
@@ -360,6 +361,8 @@ TEST_CASE("draw_mesh: layer, clip and material ride; multi-block epochs") {
     CHECK(cmd.clip[0] == 10.0f);
     CHECK(cmd.clip[2] == 30.0f);
     CHECK(cmd.tint == material.tint);
+    CHECK_FALSE(cmd.depth_write);
+    CHECK(r.mesh_commands()[0].depth_write);  // default remains opaque-safe
     CHECK(cmd.transform.translation[0] == 5.0f);
     CHECK(cmd.transform.scale == 2.0f);
     CHECK(cmd.transform.yaw == 0.5f);
