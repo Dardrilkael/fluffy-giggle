@@ -1300,6 +1300,31 @@ TEST_CASE("perf: frame evidence structs start clear and duration conversion is e
 }
 
 
+TEST_CASE("meshing: CPU chunk geometry has valid indices and finite attributes") {
+  voxel::World world;
+  world.generate(0x4D455348u);
+  const auto meshes = world.build_chunk_meshes(4, 4);
+  REQUIRE_FALSE(meshes.empty());
+  for (const auto& chunk : meshes) {
+    CHECK(chunk.tile >= 0);
+    CHECK(chunk.geometry.vertices.size() % 4 == 0);
+    CHECK(chunk.geometry.indices.size() % 6 == 0);
+    CHECK_FALSE(chunk.geometry.indices.empty());
+    for (const std::uint32_t index : chunk.geometry.indices)
+      CHECK(index < chunk.geometry.vertices.size());
+    for (const auto& vertex : chunk.geometry.vertices) {
+      for (int axis = 0; axis < 3; ++axis) {
+        CHECK(std::isfinite(vertex.pos[axis]));
+        CHECK(std::isfinite(vertex.normal[axis]));
+      }
+      CHECK(std::isfinite(vertex.uv[0]));
+      CHECK(std::isfinite(vertex.uv[1]));
+    }
+  }
+  CHECK(world.build_chunk_meshes(-1, 4).empty());
+  CHECK(world.build_chunk_meshes(4, voxel::kWorldChunksZ).empty());
+}
+
 TEST_CASE("voxel acoustics: six room boundaries become sorted early reflections") {
   voxel::World world;
   world.generate(0xAC0571C5u);
