@@ -81,6 +81,12 @@ def resolve(assets, candidates):
 def load_tile(path):
     """One TILE_PX square RGBA tile from any source image.
 
+    Minecraft stores grass_block_top and foliage as grayscale masks;
+    the client normally multiplies them by the biome foliage color.
+    This game has no biome shader yet, so bake the default temperate
+    biome colors into those two standalone textures here. Alpha is
+    preserved, which is important for the cutout pixels in leaves.
+
     Animation strips (height != width) crop to frame 0 (the top square);
     everything resamples to TILE_PX with NEAREST (the pack's own
     64px art passes through 1:1 - never resmoothed).
@@ -90,6 +96,21 @@ def load_tile(path):
         src = src.crop((0, 0, src.width, src.width))  # frame 0
     if (src.width, src.height) != (TILE_PX, TILE_PX):
         src = src.resize((TILE_PX, TILE_PX), Image.NEAREST)
+
+    # Vanilla-style temperate biome tints. These are multiplicative
+    # colors, not flat overlays, so the texture's own light/dark detail
+    # and transparency remain intact.
+    stem = os.path.splitext(os.path.basename(path))[0].lower()
+    tint = {
+        "grass_block_top": (127, 178, 56),
+        "oak_leaves": (89, 174, 48),
+    }.get(stem)
+    if tint is not None:
+        red, green, blue, alpha = src.split()
+        red = red.point(lambda value: value * tint[0] // 255)
+        green = green.point(lambda value: value * tint[1] // 255)
+        blue = blue.point(lambda value: value * tint[2] // 255)
+        src = Image.merge("RGBA", (red, green, blue, alpha))
     return src
 
 def emit_array(byte_data):
