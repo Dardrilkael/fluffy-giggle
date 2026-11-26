@@ -13,6 +13,7 @@
 #include "text/atlas_packer.h"
 #include "text/font.h"  // font::BakedFont (publish_baked_font's parameter)
 #include "render/batch_core.h"
+#include "render/renderer3d_math.h"
 
 #include <ws/ui/renderer3d.hpp>  // r3d: Mesh/Transform3D/MeshMaterial (the
                                   // mesh registry + commands below carry
@@ -98,6 +99,9 @@ struct CameraSnapshot {
 // descriptor storage are all keyed by it; 2 buys one frame of CPU/GPU
 // overlap under vsync without doubling per-frame memory. Both sides must
 // agree, so the constant lives here rather than in two files.
+// The shadow map's side, in texels (square). 2048 is crisp for a UI-scale
+// scene and costs 16 MB per frame slot at 32-bit depth.
+inline constexpr std::uint32_t kShadowMapSize = 2048;
 inline constexpr std::uint32_t kMaxFramesInFlight = 2;
 
 // Texture id packing: id = (generation << kGenShift) | slot. The slot is
@@ -134,6 +138,14 @@ struct MeshCommand {
     std::uint32_t camera_epoch = 0;  // the recording begin(Camera3D) block
     float clip[4] = {0.0f, 0.0f, FLT_MAX, FLT_MAX};
     std::uint32_t tint = 0xFFFFFFFFu;  // 0xRRGGBBAA
+    float specular = 0.0f;    // r3d::MeshMaterial's highlight, as recorded
+    float shininess = 32.0f;  // (packed to 8 bits each at the flush)
+    bool casts_shadow = true;     // r3d::MeshMaterial's shadow flags
+    bool receives_shadow = true;
+    // The mesh's LOCAL bounding sphere, snapshotted from its registry entry
+    // (the shadow fit places it with the draw's transform).
+    float bound_center[3] = {0.0f, 0.0f, 0.0f};
+    float bound_radius = 0.0f;
     Texture texture{};                // {} = untextured (white)
     r3d::Transform3D transform{};
     std::uint32_t vertex_count = 0;  // the registry entry's, snapshotted
@@ -230,6 +242,17 @@ public:
     // outgrew them (the one point the slot is idle; see the grow helpers).
     void flush(VkCommandBuffer cmd, uint32_t frame_slot, float fb_width,
                float fb_height);
+
+    // The shadow-map pass: renders the frame's shadow casters from the
+    // directional light into THIS frame slot's depth map. It is a render
+    // pass of its own, so it must be recorded OUTSIDE the main pass - after
+    // the slot's fence was waited and the frame ended, before the main
+    // render pass begins (the app calls it between acquire and
+    // begin_render_pass). Cheap when idle: a frame whose light does not cast
+    // shadows, or that has no casters, records nothing and the mesh shader
+    // sees "no map this frame". A host that never calls it simply gets no
+    // shadows.
+    void record_shadow_pass(VkCommandBuffer cmd, uint32_t frame_slot);
 
     // --- app-facing entry points (forwarded from the free functions) ---
     void begin_screen();
@@ -362,6 +385,11 @@ public:
                    const r3d::MeshMaterial& material);
     [[nodiscard]] ws::core::Status set_light(const r3d::Light3D& light);
     [[nodiscard]] const r3d::Light3D& light() const { return light_; }
+    // r3d::add_point_light: frame-scoped (cleared by frame_begin / frame_drop).
+    [[nodiscard]] ws::core::Status add_point_light(const r3d::PointLight3D& light);
+    const std::vector<r3d::PointLight3D>& point_lights() const {
+        return point_lights_;
+    }
 
     // Test/observability seam (internal header only): the built batch as
     // frame_end() left it.
@@ -448,6 +476,13 @@ private:
     // after the tier's set layout exists) and their teardown.
     bool create_mesh_resources();
     void destroy_mesh_resources();
+    // The shadow map's objects (comparison sampler, depth-only render pass,
+    // one depth image + framebuffer per frame slot, the caster pipeline) and
+    // the one-time layout transition that makes every slot's map samplable.
+    // Part of create_mesh_resources: any failure disables the whole mesh
+    // path, and destroy_shadow_resources tolerates a partial build.
+    bool create_shadow_resources();
+    void destroy_shadow_resources();
     // The mesh retire queue's drain at flush entry (free_retired_textures'
     // sibling).
     void free_retired_meshes();
@@ -526,6 +561,9 @@ private:
         std::vector<r3d::Vertex3D> vertices;
         std::vector<std::uint32_t> indices;  // whole triangles only
         std::uint32_t generation = 0;  // 0 = never used (the sentinel's)
+        // The local bounding sphere, computed once at create_mesh.
+        float bound_center[3] = {0.0f, 0.0f, 0.0f};
+        float bound_radius = 0.0f;
         // The GPU copy (Phase 2): one host-visible buffer holding the
         // vertices, then the indices at gpu_index_offset. 0 = none (the
         // headless renderer, or an empty index list). Raw 64-bit handles,
@@ -566,6 +604,9 @@ private:
     // The default matches r3d::Light3D's own - a top-down key plus an
     // ambient floor, so a frame that never sets one still shades sanely.
     r3d::Light3D light_{};
+    // This frame's point lights (r3d::add_point_light): cleared with the
+    // frame, capacity kept, at most r3d::kMaxPointLights.
+    std::vector<r3d::PointLight3D> point_lights_;
     // draw_mesh's reject warns (stale mesh, wrong block, no transform
     // validity) - the once-per-frame mask's r3d bits.
     static constexpr std::uint32_t kWarnMeshUnknown = 1u << 5;  // stale handle
@@ -665,6 +706,25 @@ private:
     // frame_end's weave result, parallel to mesh_commands_ (see
     // mesh_chunk_marks()).
     std::vector<std::uint32_t> mesh_chunk_marks_;
+    // --- directional shadows (r3d) ---
+    // One depth map per frame slot (a slot's map is written by that slot's
+    // command buffer and read by its main pass, so overlapping frames never
+    // race), all kept in DEPTH_STENCIL_READ_ONLY layout between uses.
+    VkSampler shadow_sampler_ = VK_NULL_HANDLE;  // comparison, linear, white border
+    VkRenderPass shadow_pass_ = VK_NULL_HANDLE;
+    VkPipelineLayout shadow_pipeline_layout_ = VK_NULL_HANDLE;
+    VkPipeline pipeline_shadow_ = VK_NULL_HANDLE;
+    VkFormat shadow_format_ = VK_FORMAT_UNDEFINED;
+    struct ShadowSlot {
+        VkImage image = VK_NULL_HANDLE;
+        std::uint64_t allocation = 0;
+        VkImageView view = VK_NULL_HANDLE;
+        VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    };
+    std::vector<ShadowSlot> shadow_slots_;  // [frame slot]
+    // The fit record_shadow_pass chose for each slot's frame (valid = a map
+    // was rendered and the scene block should say so).
+    std::array<r3d::detail::ShadowFit, kMaxFramesInFlight> shadow_fits_{};
     // Dev-reload-free by design: the mesh stages always come from the
     // committed mesh_spirv.h words (the hot-reload provider covers the
     // batch stages only).

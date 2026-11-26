@@ -19,8 +19,8 @@
 //
 // COORDINATE FRAMES (the one real subtlety):
 //   - GAME space: right-handed, +Y UP, +X east, +Z south, one block =
-//     one meter. The physics world, the player, the raycast, the
-//     terrain and the block table all live here.
+//     one meter. The voxel-grid collision queries, player, raycast,
+//     terrain and block table all live here.
 //   - RENDER space: r3d's world has +Y DOWN (the 2D convention the
 //     mesh path inherited). The mesher itself emits render-space
 //     geometry directly: game (gx, gy, gz) -> render (gx+0.5,
@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <vector>
 
+#include <ws/physics/3d/voxel_grid.hpp>
 #include <ws/ui/renderer3d.hpp>  // MeshData, Mesh (the registry handle)
 
 namespace voxel {
@@ -51,6 +52,13 @@ enum class Block : std::uint8_t {
   wood,
   sand,
   water,
+  cobblestone,
+  planks,
+  bricks,
+  glass,
+  leaves,
+  coal_ore,
+  iron_ore,
   count_,
 };
 
@@ -135,20 +143,17 @@ class World {
     return chunk_meshes_;
   }
 
+  // A zero-copy, read-only collision view over the world's chunk data.
+  // The view is cheap to copy and remains valid while this World lives.
+  [[nodiscard]] ws::physics3d::VoxelGrid3D collision_grid() const noexcept;
+
   // The highest solid block's y at a column, -1 when none (the spawn
   // probe).
   [[nodiscard]] int surface_height(int x, int z) const;
 
-  // The COLLISION SHELL: true when the cell is solid and has at least
-  // one non-solid 6-neighbor - the skin of the terrain, the trunks,
-  // every placed block's face. Buried cells (solid on all six sides)
-  // read false: nothing can ever touch them, so the physics grid keeps
-  // exactly the exposed cells and re-derives membership around every
-  // edit (a dig exposes the wall behind it, a place buries what it
-  // covers). The void outside the world reads SOLID for this test -
-  // the border columns' outboard faces are not "exposed" (nothing can
-  // reach them without leaving the world, and there is no floor out
-  // there anyway).
+  // Surface-membership helper: true when a solid cell has at least one
+  // non-solid 6-neighbor. Kept for terrain diagnostics/tests; runtime
+  // collision queries use collision_grid() and the full solid occupancy.
   [[nodiscard]] bool is_exposed(int x, int y, int z) const;
 
   // --- the DDA raycast ----------------------------------------------------------
@@ -169,6 +174,9 @@ class World {
                                float max_distance) const;
 
  private:
+  static bool solid_query(const void* context, int x, int y,
+                          int z) noexcept;
+
   // Chunk-major: chunks_[cz * kWorldChunksX + cx], each kBlocksPerChunk.
   std::vector<std::vector<Block>> chunks_;
   std::vector<ChunkMesh> chunk_meshes_;

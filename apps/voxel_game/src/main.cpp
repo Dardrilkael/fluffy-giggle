@@ -3,8 +3,9 @@
 // THE COMPOSITION (bounce's shape, four libs deep):
 //   ws::ui      - the App shell (window, Vulkan, r2d/r3d), the HUD's
 //                 text/line/quad draws, the input frame
-//   ws::physics - physics3d: the dynamic Box player against a sparse
-//                 static grid of the surface-band solid blocks
+//   ws::physics - backend-independent swept-AABB character collision
+//                 against the voxel occupancy grid; Jolt remains available
+//                 for ordinary dynamic rigid bodies
 //   ws::audio   - synthesized place/break one-shots (bounce's PCM
 //                 pattern through SoundDesc)
 //   ws::core    - Result/Status logging on every fallible call
@@ -25,6 +26,7 @@
 // simply never contests them.
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -32,7 +34,6 @@
 #include <cstdlib>
 #include <numbers>
 #include <optional>
-#include <unordered_map>
 #include <vector>
 
 #ifdef __ANDROID__
@@ -52,16 +53,12 @@
 #include <ws/input/event.hpp>
 #include <ws/input/input.hpp>
 #include <ws/math/vecmath.hpp>
-#include <ws/physics/3d/body.hpp>
-#include <ws/physics/3d/contact.hpp>
-#include <ws/physics/3d/shape.hpp>
-#include <ws/physics/3d/world.hpp>
-#include <ws/physics/common.hpp>  // kMaxBodiesPerWorld (the shell's budget)
 #include <ws/ui/app.hpp>
 #include <ws/ui/renderer2d.hpp>
 #include <ws/ui/renderer3d.hpp>
 
 #include "menu.hpp"
+#include "inventory.hpp"
 #include "bench.hpp"
 #include "perf.hpp"
 #include "player.hpp"
@@ -72,7 +69,6 @@ namespace {
 
 namespace r2d = ws::ui::r2d;
 namespace r3d = ws::ui::r3d;
-namespace pd = ws::physics3d;
 using ws::math::Vec3;
 
 // GLFW key codes (input.hpp's contract: printables match ASCII).
@@ -84,14 +80,67 @@ constexpr int kKeySpace = 32;
 constexpr int kKeyShiftL = 340;  // GLFW_KEY_LEFT_SHIFT
 constexpr int kKey1 = 49;
 
-// The hotbar's place-able types, slot order (keys 1-5).
-constexpr voxel::Block kHotbar[5] = {
-    voxel::Block::grass, voxel::Block::dirt, voxel::Block::stone,
-    voxel::Block::wood, voxel::Block::sand,
-};
-constexpr int kHotbarSlots = 5;
-constexpr const char* kHotbarNames[kHotbarSlots] = {"grass", "dirt",
-                                                    "stone", "wood", "sand"};
+constexpr int kHotbarSlots = static_cast<int>(voxel::kHotbarSize);
+constexpr int kKeyE = 69;
+constexpr int kKeyC = 67;
+constexpr int kKeyF1 = 290;
+
+[[nodiscard]] const char* item_name(voxel::Item item) {
+  constexpr const char* names[] = {"grass","dirt","stone","wood","sand",
+    "cobble","planks","sticks","bricks","glass","leaves","coal","iron ore","iron"};
+  return names[static_cast<std::size_t>(item)];
+}
+[[nodiscard]] std::uint32_t item_tint(voxel::Item item) {
+  switch (item) {
+    case voxel::Item::grass: return voxel::tint_of(voxel::Block::grass);
+    case voxel::Item::dirt: return voxel::tint_of(voxel::Block::dirt);
+    case voxel::Item::stone: return voxel::tint_of(voxel::Block::stone);
+    case voxel::Item::wood: return voxel::tint_of(voxel::Block::wood);
+    case voxel::Item::sand: return voxel::tint_of(voxel::Block::sand);
+    case voxel::Item::cobblestone: return voxel::tint_of(voxel::Block::cobblestone);
+    case voxel::Item::planks: return voxel::tint_of(voxel::Block::planks);
+    case voxel::Item::bricks: return voxel::tint_of(voxel::Block::bricks);
+    case voxel::Item::glass: return voxel::tint_of(voxel::Block::glass);
+    case voxel::Item::leaves: return voxel::tint_of(voxel::Block::leaves);
+    case voxel::Item::coal: return voxel::tint_of(voxel::Block::coal_ore);
+    case voxel::Item::iron_ore: return voxel::tint_of(voxel::Block::iron_ore);
+    case voxel::Item::sticks: return r2d::rgba(180,140,90);
+    case voxel::Item::iron_ingot: return r2d::rgba(205,210,220);
+    default: return r2d::rgba(255,255,255);
+  }
+}
+[[nodiscard]] bool item_to_block(voxel::Item item, voxel::Block& block) {
+  switch (item) {
+    case voxel::Item::grass: block=voxel::Block::grass; return true;
+    case voxel::Item::dirt: block=voxel::Block::dirt; return true;
+    case voxel::Item::stone: block=voxel::Block::stone; return true;
+    case voxel::Item::wood: block=voxel::Block::wood; return true;
+    case voxel::Item::sand: block=voxel::Block::sand; return true;
+    case voxel::Item::cobblestone: block=voxel::Block::cobblestone; return true;
+    case voxel::Item::planks: block=voxel::Block::planks; return true;
+    case voxel::Item::bricks: block=voxel::Block::bricks; return true;
+    case voxel::Item::glass: block=voxel::Block::glass; return true;
+    case voxel::Item::leaves: block=voxel::Block::leaves; return true;
+    default: return false;
+  }
+}
+[[nodiscard]] voxel::Item block_drop(voxel::Block block) {
+  switch (block) {
+    case voxel::Block::grass: return voxel::Item::grass;
+    case voxel::Block::dirt: return voxel::Item::dirt;
+    case voxel::Block::stone: return voxel::Item::cobblestone;
+    case voxel::Block::wood: return voxel::Item::wood;
+    case voxel::Block::sand: return voxel::Item::sand;
+    case voxel::Block::cobblestone: return voxel::Item::cobblestone;
+    case voxel::Block::planks: return voxel::Item::planks;
+    case voxel::Block::bricks: return voxel::Item::bricks;
+    case voxel::Block::glass: return voxel::Item::glass;
+    case voxel::Block::leaves: return voxel::Item::leaves;
+    case voxel::Block::coal_ore: return voxel::Item::coal;
+    case voxel::Block::iron_ore: return voxel::Item::iron_ore;
+    default: return voxel::Item::dirt;
+  }
+}
 
 // --- sound: the break/place one-shots (bounce's synth pattern) -------------------
 constexpr std::uint32_t kRate = 44'100;
@@ -170,39 +219,21 @@ class VoxelApp final : public ws::ui::App {
                          player_.tuning_half_height(),
                      static_cast<float>(sz) + 0.5f};
 
-    // --- physics: the world's gravity + the player --------------------------
-    pd::World3D::Desc desc{};
-    desc.gravity = Vec3{0.0f, player_.tuning_gravity(), 0.0f};
-    desc.fixed_dt = 1.0f / 60.0f;
-    desc.thread_count = 0;  // single-threaded: deterministic, simple
-    // The collision shell of a 128x128x64 world: ~17k exposed cells for
-    // the shipped seed (the first build's 20000 answer was the shipped
-    // bug - the old surface-BAND grid needed ~50k and the world died
-    // at capacity, taking the player's body with it). The cap is the
-    // lib's own published maximum; the shell is measured well under it
-    // (the regression test pins the margin), the player's own body sits
-    // in the same budget.
-    desc.max_bodies = ws::physics::kMaxBodiesPerWorld;
-    auto world3d = pd::World3D::create(desc);
-    if (!world3d.has_value()) {
-      ws::core::log_error(world3d.error());
+    // The player queries the world's chunk storage directly. Terrain is
+    // not represented by rigid bodies; the general physics world remains
+    // available to other gameplay entities when they are introduced.
+    if (!player_.spawn(spawn)) {
       dead_ = true;
       return;
     }
-    phys_.emplace(std::move(*world3d));
 
-    // The collision shell: one static Box per EXPOSED solid cell (see
-    // World::is_exposed) - the terrain's skin, the trunks, every
-    // reachable face. Buried cells never collide (nothing can touch
-    // them), and every edit re-derives membership around the changed
-    // cell (a dig exposes the wall behind it, a place buries what it
-    // covers), so digging deep and tunneling mid-hill just work.
-    build_physics_grid();
-
-    if (!player_.spawn(*phys_, spawn)) {
-      dead_ = true;
-      return;
-    }
+    // Starter supplies make the sandbox immediately playable; all later
+    // blocks must be gathered or crafted.
+    (void)inventory_.add(voxel::Item::grass, 32);
+    (void)inventory_.add(voxel::Item::dirt, 32);
+    (void)inventory_.add(voxel::Item::stone, 32);
+    (void)inventory_.add(voxel::Item::wood, 16);
+    (void)inventory_.add(voxel::Item::sand, 16);
 
     // --- the chunk meshes (the renderer's one-time upload) -----------------
     world_.rebuild_all();
@@ -264,7 +295,7 @@ class VoxelApp final : public ws::ui::App {
   }
 
   void on_update() override {
-    if (dead_ || !phys_.has_value()) {
+    if (dead_) {
       return;
     }
     const auto now = std::chrono::steady_clock::now();
@@ -276,7 +307,7 @@ class VoxelApp final : public ws::ui::App {
     const float frame_dt = std::clamp(dt, 0.0f, 0.05f);
     const auto frame_t0 = std::chrono::steady_clock::now();
     voxel::perf::FrameTimings timings{};
-    mesh_rebuild_ms_ = 0.0f;  // rebuild_around feeds this across the frame
+    mesh_rebuild_ms_ = 0.0f;  // mesh and collision chunk rebuilds feed this
 
     const ws::input::InputFrame& input = ws::input::frame_input();
     const r2d::FrameSize frame = r2d::frame_size();
@@ -321,6 +352,19 @@ class VoxelApp final : public ws::ui::App {
       return;
     }
 
+    if (input.key_pressed[kKeyE]) inventory_open_ = !inventory_open_;
+    if (input.key_pressed[kKeyC]) crafting_open_ = !crafting_open_;
+    if (inventory_open_ || crafting_open_) {
+      // The panels are modal: do not move or edit the world while open.
+      r2d::begin(); r2d::set_layer(0);
+      r2d::draw_quad(0, 0, frame.width, frame.height, r2d::rgba(135,196,250));
+      const auto cam = voxel::begin_scene(player_, frame.width / frame.height);
+      voxel::draw_world(world_, tile_textures_, cam, frame.width / frame.height);
+      r2d::end();
+      r2d::begin(); r2d::set_layer(10); draw_hud(frame); draw_inventory_panels(frame); r2d::end();
+      return;
+    }
+
     // --- the controller tick -------------------------------------------------
     voxel::Player::MoveInput move{};
     if (bench_.running()) {
@@ -331,7 +375,7 @@ class VoxelApp final : public ws::ui::App {
       move.back = input.key_down[kKeyS];
       move.left = input.key_down[kKeyA];
       move.right = input.key_down[kKeyD];
-      move.jump = input.key_down[kKeySpace];
+      move.jump = input.key_pressed[kKeySpace];
       move.sprint = input.key_down[kKeyShiftL];
       move.look_dx = look_dx_;
       move.look_dy = look_dy_;
@@ -340,17 +384,17 @@ class VoxelApp final : public ws::ui::App {
     }
 
     const auto phys_t0 = std::chrono::steady_clock::now();
-    player_.tick(move, frame_dt, *phys_);
-    phys_->advance(frame_dt);
-    player_.on_contacts(phys_->contact_events());
+    player_.tick(move, frame_dt, world_.collision_grid());
     (void)audio_.update();
     timings.physics_ms = voxel::perf::ms_since(phys_t0);
 
     // --- hotbar + break/place ------------------------------------------------
-    for (int i = 0; i < kHotbarSlots; ++i) {
-      if (input.key_pressed[kKey1 + i]) {
-        hotbar_ = i;
-      }
+    for (int i = 0; i < kHotbarSlots; ++i)
+      if (input.key_pressed[kKey1 + i]) hotbar_ = i;
+    if (crafting_open_) {
+      for (int i = 0; i < static_cast<int>(voxel::kRecipes.size()); ++i)
+        if (input.key_pressed[kKeyF1 + i])
+          (void)voxel::craft(inventory_, voxel::kRecipes[static_cast<std::size_t>(i)]);
     }
     const bool wants_break =
         (input.mouse_pressed[0] && !bench_.running()) ||
@@ -375,24 +419,27 @@ class VoxelApp final : public ws::ui::App {
       const float dir[3] = {look.x, look.y, look.z};
       const voxel::World::RayHit hit = world_.raycast(origin, dir, 7.0f);
       if (do_break && hit.hit) {  // break
+        const voxel::Block broken = world_.block_at(hit.cell[0], hit.cell[1], hit.cell[2]);
         if (world_.set_block(hit.cell[0], hit.cell[1], hit.cell[2],
                              voxel::Block::air)) {
+          (void)inventory_.add(block_drop(broken), 1);
           rebuild_around(hit.cell[0], hit.cell[2]);
-          update_shell(hit.cell[0], hit.cell[1], hit.cell[2]);
           play_sound(kSoundBreak, 0.9f);
         }
       } else if (do_place && hit.hit) {  // place
         const int px = hit.cell[0] + hit.normal[0];
         const int py = hit.cell[1] + hit.normal[1];
         const int pz = hit.cell[2] + hit.normal[2];
-        const voxel::Block place = kHotbar[hotbar_];
+        const auto& selected = inventory_.slot(static_cast<std::size_t>(hotbar_));
+        voxel::Block place{};
+        const bool placeable = !selected.empty() && item_to_block(selected.item, place);
         // Place only into air, and never entomb the player (the AABB
         // overlap rule - the classic voxel place guard).
-        if (world_.block_at(px, py, pz) == voxel::Block::air &&
+        if (placeable && world_.block_at(px, py, pz) == voxel::Block::air &&
             !overlaps_player(px, py, pz)) {
           if (world_.set_block(px, py, pz, place)) {
+            (void)inventory_.remove(selected.item, 1);
             rebuild_around(px, pz);
-            update_shell(px, py, pz);
             play_sound(kSoundPlace, 0.8f);
           }
         }
@@ -412,8 +459,9 @@ class VoxelApp final : public ws::ui::App {
                        frame.width / frame.height, &last_counters_);
     r2d::end();
     timings.draw_ms = voxel::perf::ms_since(draw_t0);
-    last_counters_.bodies = static_cast<std::uint32_t>(physics_cells_.size()) +
-                            1u /* the player */;
+    // Voxel terrain and the character controller use direct grid queries;
+    // neither allocates rigid bodies.
+    last_counters_.bodies = 0;
 
     r2d::begin();
     r2d::set_layer(10);
@@ -436,148 +484,16 @@ class VoxelApp final : public ws::ui::App {
   }
 
  private:
-  // --- the collision shell -------------------------------------------------------
-  void build_physics_grid() {
-    // The shell walk: a column's stack up to its highest solid block
-    // (surface_height - a trunk top counts; the trunk's cells and the
-    // ground under it are all shell candidates, the first build's
-    // band missed the ground under trees). Buried cells read false and
-    // are skipped; the walk is y-major per column so the early exit
-    // from the top bounds the cost.
-    for (int z = 0; z < voxel::kWorldSizeZ; ++z) {
-      for (int x = 0; x < voxel::kWorldSizeX; ++x) {
-        const int top = world_.surface_height(x, z);
-        for (int y = top; y >= 0; --y) {
-          if (world_.is_exposed(x, y, z)) {
-            add_physics_at(x, y, z);
-          }
-        }
-      }
-    }
-    if (cells_refused_ > 0) {
-      ws::core::warn("voxel: collision shell clipped by the body cap - "
-                     "the far corners may be soft");
-    }
-  }
-
-  void add_physics_at(int x, int y, int z) {
-    const std::uint64_t key = cell_key(x, y, z);
-    if (physics_cells_.find(key) != physics_cells_.end()) {
-      return;  // already standing
-    }
-    pd::BodyDesc desc{};
-    desc.kind = ws::physics::BodyKind::static_;
-    desc.shape = pd::Box{Vec3{0.5f, 0.5f, 0.5f}};
-    desc.transform = pd::Transform{
-        Vec3{static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f,
-             static_cast<float>(z) + 0.5f},
-        {}};
-    const auto id = phys_->create_body(desc);
-    if (id.has_value()) {
-      physics_cells_[key] = *id;
-    } else if (!cells_refused_) {
-      // Once, not per cell: a capacity refusal would otherwise flood
-      // the log with one error per remaining cell (the user's #3
-      // report was exactly this symptom).
-      ++cells_refused_;
-      ws::core::log_error(id.error());
-    } else {
-      ++cells_refused_;
-    }
-  }
-
-  void remove_physics_at(int x, int y, int z) {
-    const auto it = physics_cells_.find(cell_key(x, y, z));
-    if (it == physics_cells_.end()) {
-      return;
-    }
-    (void)phys_->destroy_body(it->second);
-    physics_cells_.erase(it);
-  }
-
-  // Re-derives shell membership for one cell and its 6 neighbors: the
-  // edit's whole blast radius. A break exposes the wall behind it (the
-  // formerly-buried neighbor now has a face); a place buries the cells
-  // it covers (their faces against it are gone) while itself standing
-  // if it has any open face. Membership is is_exposed - the same
-  // authority the build walk used - so the shell never drifts from
-  // the table it mirrors.
-  void update_shell(int x, int y, int z) {
-    static constexpr int kDirs[6][3] = {{0, 1, 0},  {0, -1, 0}, {1, 0, 0},
-                                         {-1, 0, 0}, {0, 0, 1},  {0, 0, -1}};
-    if (world_.is_exposed(x, y, z)) {
-      add_physics_at(x, y, z);
-    } else {
-      remove_physics_at(x, y, z);
-    }
-    for (const auto& d : kDirs) {
-      const int nx = x + d[0];
-      const int ny = y + d[1];
-      const int nz = z + d[2];
-      if (nx < 0 || nx >= voxel::kWorldSizeX || nz < 0 ||
-          nz >= voxel::kWorldSizeZ || ny < 0 || ny >= voxel::kChunkSizeY) {
-        continue;
-      }
-      if (world_.is_exposed(nx, ny, nz)) {
-        add_physics_at(nx, ny, nz);
-      } else {
-        remove_physics_at(nx, ny, nz);
-      }
-    }
-  }
-
-  [[nodiscard]] static std::uint64_t cell_key(int x, int y, int z) {
-    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 40) |
-           (static_cast<std::uint64_t>(static_cast<std::uint32_t>(y)) << 20) |
-           static_cast<std::uint64_t>(static_cast<std::uint32_t>(z));
-  }
-
-  // Would a block at (x, y, z) overlap the player's AABB? (The
-  // player's box: 0.6 wide, 1.8 tall, centered at position_.)
   [[nodiscard]] bool overlaps_player(int x, int y, int z) const {
-    const Vec3 p = player_.position();
-    const float half_w = 0.3f + 0.01f;  // the block's half extent + skin
-    const float half_h = 0.9f + 0.01f;
-    const float bx = static_cast<float>(x) + 0.5f;
-    const float by = static_cast<float>(y) + 0.5f;
-    const float bz = static_cast<float>(z) + 0.5f;
-    return std::abs(p.x - bx) < half_w + 0.5f &&
-           std::abs(p.y - by) < half_h + 0.5f &&
-           std::abs(p.z - bz) < half_w + 0.5f;
-  }
-
-  // Rebuilds the chunk containing the cell (x, z), and the neighbor
-  // chunk too when the cell rides a chunk boundary (the neighbor's
-  // culled face against this cell may need its own face now). The
-  // rebuild's CPU cost lands in mesh_rebuild_ms_ - the perf
-  // instrumentation's mesh phase.
-  void rebuild_around(int x, int z) {
-    const auto t0 = std::chrono::steady_clock::now();
-    const int cx = x / voxel::kChunkSizeX;
-    const int cz = z / voxel::kChunkSizeZ;
-    world_.rebuild_chunk(cx, cz);
-    const int lx = x % voxel::kChunkSizeX;
-    const int lz = z % voxel::kChunkSizeZ;
-    if (lx == 0 && cx > 0) {
-      world_.rebuild_chunk(cx - 1, cz);
-    }
-    if (lx == voxel::kChunkSizeX - 1 && cx < voxel::kWorldChunksX - 1) {
-      world_.rebuild_chunk(cx + 1, cz);
-    }
-    if (lz == 0 && cz > 0) {
-      world_.rebuild_chunk(cx, cz - 1);
-    }
-    if (lz == voxel::kChunkSizeZ - 1 && cz < voxel::kWorldChunksZ - 1) {
-      world_.rebuild_chunk(cx, cz + 1);
-    }
-    mesh_rebuild_ms_ += voxel::perf::ms_since(t0);
-  }
-
-  void play_sound(int which, float gain) {
-    if (!audio_ok_ || which < 0 || which >= sounds_loaded_) {
-      return;
-    }
-    (void)audio_.play(sounds_[which], gain);
+    const auto box = player_.bounds();
+    const ws::physics3d::Aabb block{
+        Vec3{static_cast<float>(x), static_cast<float>(y),
+             static_cast<float>(z)},
+        Vec3{static_cast<float>(x + 1), static_cast<float>(y + 1),
+             static_cast<float>(z + 1)}};
+    return box.max.x > block.min.x && box.min.x < block.max.x &&
+           box.max.y > block.min.y && box.min.y < block.max.y &&
+           box.max.z > block.min.z && box.min.z < block.max.z;
   }
 
   // --- the HUD --------------------------------------------------------------------
@@ -593,8 +509,8 @@ class VoxelApp final : public ws::ui::App {
     r2d::draw_line(cx, cy - 7.0f, cx, cy + 7.0f, 2.0f,
                    r2d::rgba(255, 255, 255, 220));
 
-    // The hotbar: 5 slots along the bottom, the selected one framed.
-    constexpr float slot_w = 96.0f;
+    // Nine-slot hotbar, backed by the first nine inventory slots.
+    constexpr float slot_w = 72.0f;
     constexpr float bar_w = slot_w * kHotbarSlots;
     const float bx = (frame.width - bar_w) * 0.5f;
     const float by = frame.height - 48.0f;
@@ -603,13 +519,14 @@ class VoxelApp final : public ws::ui::App {
       const bool selected = i == hotbar_;
       r2d::draw_quad(sx, by, slot_w - 6.0f, 38.0f,
                      r2d::rgba(28, 30, 36, 200));
-      r2d::draw_quad(sx + 6.0f, by + 7.0f, 24.0f, 24.0f,
-                     voxel::tint_of(kHotbar[i]));
-      char label[24];
-      std::snprintf(label, sizeof(label), "%d %s", i + 1, kHotbarNames[i]);
-      (void)r2d::draw_text(sx + 36.0f, by + 10.0f, label, font_,
-                           selected ? r2d::rgba(255, 255, 255)
-                                    : r2d::rgba(168, 172, 182));
+      const auto& stack = inventory_.slot(static_cast<std::size_t>(i));
+      if (!stack.empty()) {
+        r2d::draw_quad(sx + 5.0f, by + 6.0f, 22.0f, 22.0f, item_tint(stack.item));
+        char label[32]; std::snprintf(label, sizeof(label), "%d %s", i + 1, item_name(stack.item));
+        (void)r2d::draw_text(sx + 30.0f, by + 5.0f, label, font_, selected ? r2d::rgba(255,255,255) : r2d::rgba(168,172,182));
+        char amount[8]; std::snprintf(amount, sizeof(amount), "%u", stack.count);
+        (void)r2d::draw_text(sx + 50.0f, by + 23.0f, amount, font_, r2d::rgba(255,255,255));
+      }
       if (selected) {
         r2d::draw_line(sx - 1.0f, by - 1.0f, sx + slot_w - 7.0f, by - 1.0f,
                        2.0f, r2d::rgba(255, 255, 255, 210));
@@ -649,8 +566,35 @@ class VoxelApp final : public ws::ui::App {
     (void)r2d::draw_text(
         12.0f, 32.0f,
         "LMB break - RMB place - 1-5 select - WASD move - space jump - "
-        "shift sprint - esc menu",
+        "shift sprint - E inventory - C crafting - F1-F6 craft - esc menu",
         font_, r2d::rgba(160, 164, 174));
+  }
+
+  void draw_inventory_panels(const r2d::FrameSize& frame) {
+    if (font_.empty()) return;
+    const float x = frame.width * 0.5f - 250.0f, y = frame.height * 0.5f - 190.0f;
+    r2d::draw_quad(x, y, 500, 380, r2d::rgba(22,25,32,238));
+    if (inventory_open_) {
+      (void)r2d::draw_text(x+18,y+16,"INVENTORY  (E to close)",font_,r2d::rgba(245,245,250));
+      for (int i=0;i<27;++i) {
+        const int col=i%9,row=i/9; const float sx=x+18+col*52, sy=y+54+row*58;
+        r2d::draw_quad(sx,sy,46,50,r2d::rgba(55,60,70));
+        const auto& st=inventory_.slot(static_cast<std::size_t>(i));
+        if (!st.empty()) {
+          r2d::draw_quad(sx+7,sy+7,20,20,item_tint(st.item));
+          char txt[24]; std::snprintf(txt,sizeof(txt),"%s x%u",item_name(st.item),st.count);
+          (void)r2d::draw_text(sx+3,sy+31,txt,font_,r2d::rgba(230,232,238));
+        }
+      }
+    }
+    if (crafting_open_) {
+      (void)r2d::draw_text(x+18,y+250,"CRAFTING  (F1-F6 craft, C to close)",font_,r2d::rgba(245,245,250));
+      for (std::size_t i=0;i<voxel::kRecipes.size();++i) {
+        const auto& recipe=voxel::kRecipes[i]; char txt[96];
+        std::snprintf(txt,sizeof(txt),"F%u  %s x%u  [%s]",static_cast<unsigned>(i+1),item_name(recipe.output),recipe.output_count,voxel::can_craft(inventory_,recipe)?"ready":"missing materials");
+        (void)r2d::draw_text(x+22,y+278+static_cast<float>(i)*16,txt,font_,voxel::can_craft(inventory_,recipe)?r2d::rgba(150,230,160):r2d::rgba(155,160,170));
+      }
+    }
   }
 
   // --- the pause menu ----------------------------------------------------------------
@@ -718,19 +662,44 @@ class VoxelApp final : public ws::ui::App {
   }
 
  private:
+  // --- helpers -----------------------------------------------------------------------
+  void rebuild_around(int x, int z) {
+    const int cx = x / voxel::kChunkSizeX;
+    const int cz = z / voxel::kChunkSizeZ;
+    world_.rebuild_chunk(cx, cz);
+    // If the block sits on a chunk boundary, rebuild the neighbor too.
+    if (x % voxel::kChunkSizeX == 0 && cx > 0) {
+      world_.rebuild_chunk(cx - 1, cz);
+    }
+    if (x % voxel::kChunkSizeX == voxel::kChunkSizeX - 1 && cx < voxel::kWorldChunksX - 1) {
+      world_.rebuild_chunk(cx + 1, cz);
+    }
+    if (z % voxel::kChunkSizeZ == 0 && cz > 0) {
+      world_.rebuild_chunk(cx, cz - 1);
+    }
+    if (z % voxel::kChunkSizeZ == voxel::kChunkSizeZ - 1 && cz < voxel::kWorldChunksZ - 1) {
+      world_.rebuild_chunk(cx, cz + 1);
+    }
+  }
+
+  void play_sound(int id, float gain) {
+    if (!audio_ok_ || id < 0 || id >= 2 || !sounds_[id].valid()) {
+      return;
+    }
+    (void)audio_.play(sounds_[id], gain);
+  }
+
   // --- the state -------------------------------------------------------------------
   static constexpr std::uint32_t kSeed = 0xC0FFEEu;
   static constexpr int kSoundBreak = 0;
   static constexpr int kSoundPlace = 1;
 
   voxel::World world_;
-  std::optional<pd::World3D> phys_;
-  std::unordered_map<std::uint64_t, pd::BodyId> physics_cells_{};
-  // How many shell cells the body cap refused (0 = none; the warn-once
-  // guard in add_physics_at keeps the log at one error + one warning).
-  std::uint32_t cells_refused_ = 0;
   voxel::Player player_;
   int hotbar_ = 0;
+  voxel::Inventory inventory_{};
+  bool inventory_open_ = false;
+  bool crafting_open_ = false;
   // The pause menu's state: paused_ gates the whole simulation (the
   // controller tick, physics, break/place all skip while it is up) and
   // owns the cursor mode; mouse_x_/mouse_y_ is the live OS pointer -

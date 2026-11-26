@@ -9,21 +9,20 @@ Jolt behind `ws::physics3d`, OpenAL Soft behind `ws::audio`.
 
 - **A procedurally generated 128 × 64 × 128 voxel world** (8×8 chunks of
   16×64×16): value-noise fbm terrain with grass/dirt/stone layers, sand
-  shorelines, water at the shore level, scattered wood trunks.
+  shorelines, water at the shore level, scattered wood trunks and leaf canopies, plus deterministic coal and iron ore deposits.
   Deterministic per seed (seed `0xC0FFEE`).
 - **A first-person player**: WASD movement, mouse look, space jump
-  (~1.5 m apex — clears a full block with margin), shift sprint — a
-  physics3d dynamic Box (0.6 × 1.8 × 0.6)
-  against a static **collision shell** (one Box per exposed solid cell,
-  ~17k bodies), at a 60 Hz fixed tick. The controller was validated
-  headlessly first (`libs/physics/tests/test_voxel_proto.cpp`): rest,
-  exact walk speed, and the jump apex are pinned by tests.
-- **Block interaction**: left mouse breaks, right mouse places (the
-  hotbar's selected type), both through an Amanatides & Woo DDA voxel
-  raycast with a 7-block reach. Placement is guarded against entombing
-  the player. Edits rebuild the touched chunk's mesh (and a boundary
-  block's neighbor chunk).
-- **HUD**: crosshair, a 5-slot block hotbar (keys 1–5), an FPS counter,
+  (~1.5 m apex — clears a full block with margin), shift sprint. The
+  player uses a backend-independent swept-AABB character controller
+  against the chunk data directly: no static terrain rigid bodies and no
+  player rigid body. Collision work is limited to the player's swept
+  local bounds, with axis-separated wall sliding, overlap recovery,
+  jump buffering and coyote time. Jolt remains available through
+  `ws::physics3d::World3D` for ordinary dynamic objects.
+- **Block interaction**: left mouse breaks and collects drops; right mouse places the selected hotbar stack and consumes one item. The DDA raycast has a 7-block reach and placement cannot entomb the player.
+- **Expanded blocks**: cobblestone, planks, bricks, glass, leaves, coal ore and iron ore join the original terrain palette. Generated trees have leaf crowns and underground stone contains deterministic coal/iron deposits. New variants reuse the closest existing pack textures with distinct tints.
+- **Inventory and crafting**: 27 stackable slots, a 9-slot hotbar, stack limit 64, item counts, and a starter recipe book. E opens inventory, C opens crafting, and F1-F6 craft the listed recipes when materials are available.
+- **HUD**: crosshair, a 9-slot item hotbar (keys 1–9), an FPS counter,
   position/grounded readout, and the controls line.
 - **Audio**: synthesized place/break "tock" one-shots (in-memory PCM
   through `ws::audio::SoundDesc` — no asset files).
@@ -36,10 +35,13 @@ Jolt behind `ws::physics3d`, OpenAL Soft behind `ws::audio`.
 | W A S D | move |
 | space | jump |
 | shift | sprint |
-| 1–5 | hotbar select |
+| 1–9 | hotbar select |
+| E | inventory |
+| C | crafting |
+| F1–F6 | craft listed recipe |
 | LMB | break block |
 | RMB | place block |
-| esc | quit |
+| esc | pause menu |
 
 ## Building
 
@@ -68,19 +70,17 @@ contract).
 ```
 src/world.hpp/.cpp    the voxel data model: the block table (8×8 chunks),
                       seeded fbm terrain, per-(chunk, block-type) chunk
-                      meshing (face-culled quads → one r3d::MeshData each),
-                      and the DDA voxel raycast.
-src/player.hpp/.cpp   the FPS controller: the physics3d Box body, yaw/pitch
-                      look, velocity-exact movement (the controller owns
-                      the horizontal velocity; gravity owns the vertical),
-                      contact-driven grounding.
-src/renderer.hpp/.cpp the game→render coordinate bridge: the mirrored
-                      camera (game +Y up → r3d's +Y down) and the scene
-                      light; draws every chunk mesh.
-src/main.cpp          the VoxelApp: the App shell subclass, input mapping,
-                      the interaction (raycast + chunk rebuild + physics
-                      cell add/remove), the HUD, the audio one-shots, and
-                      the desktop/Android entry points.
+                      meshing, and a zero-copy VoxelGrid3D view over chunks.
+src/inventory.hpp     stackable item inventory, recipe definitions and atomic crafting.\nsrc/player.hpp/.cpp   the FPS character controller: yaw/pitch look,
+                      gravity/jump integration, swept-AABB movement,
+                      axis-separated sliding and probe-based grounding.
+libs/physics/...      backend-independent VoxelGrid3D: bounded occupancy
+                      queries, Amanatides-Woo DDA raycast, AABB overlap,
+                      swept-AABB collision and penetration recovery.
+src/renderer.hpp/.cpp the game→render coordinate bridge: camera and light;
+                      draws every chunk mesh.
+src/main.cpp          the VoxelApp: input mapping, block interaction,
+                      chunk mesh rebuilds, HUD, audio and app entry points.
 ```
 
 Two coordinate frames, spelled once each (see `world.hpp`'s header
@@ -91,13 +91,10 @@ camera builder mirrors the player's pose).
 
 ## Known limits (the honest list)
 
-- The collision grid is the **shell** — every solid cell with an open
-  face (see `World::is_exposed`), re-derived around every edit: digging
-  deep and tunneling mid-hill just work. The shell is ~17k bodies for
-  the shipped seed (measured; the regression test pins it inside the
-  budget, and a full World3D acceptance case creates every shell body
-  plus the player's). The one soft spot: the border columns' outboard
-  faces are not collision (the void reads solid for the exposure test).
+- The voxel collision view reads the world's current chunk data on every
+  query. Edits become collision-visible immediately; there is no
+  collision-mesh rebuild or per-voxel rigid-body lifecycle. Out-of-world
+  cells are empty, matching the world's open-void boundary policy.
 - The water block type exists in the palette but is not meshed or
   swimmable — it only shapes the terrain (sand shorelines).
 - Mouse look is free-cursor (window-edge clamped): the shell has no

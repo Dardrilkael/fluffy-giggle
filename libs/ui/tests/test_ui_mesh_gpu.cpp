@@ -184,6 +184,9 @@ public:
         pass.renderArea.extent = {kW, kH};
         pass.clearValueCount = 2;
         pass.pClearValues = clears;
+        // The shadow map is a pass of its own: recorded BEFORE the main pass
+        // begins, exactly where the app records it.
+        renderer_->record_shadow_pass(cmd_, 0);
         vkCmdBeginRenderPass(cmd_, &pass, VK_SUBPASS_CONTENTS_INLINE);
         renderer_->flush(cmd_, 0, static_cast<float>(kW), static_cast<float>(kH));
         vkCmdEndRenderPass(cmd_);
@@ -718,4 +721,273 @@ TEST_CASE("gpu: the MSAA 3-attachment pass + framebuffer build validly") {
     gpu.destroy_image(msaa_depth.image, msaa_depth.allocation);
     gpu.destroy_image(resolve_target.image, resolve_target.allocation);
     CHECK(true);  // the pass built, bound and tore down cleanly
+}
+
+// --- lighting: highlights and point lights --------------------------------------------
+
+namespace {
+
+// A directional light that contributes nothing, so a test sees the point
+// lights (and the ambient floor) alone.
+Light3D dark_directional() {
+    Light3D light;
+    light.color[0] = light.color[1] = light.color[2] = 0.0f;
+    return light;
+}
+
+// One sphere at the origin under the default camera, drawn once.
+void draw_sphere_frame(Renderer2D& r, ws::ui::r3d::Mesh sphere, const MeshMaterial& material) {
+    r.frame_begin(kW, kH);
+    r.begin(Camera3D{});
+    r.draw_mesh(sphere, Transform3D{}, material);
+}
+
+}  // namespace
+
+TEST_CASE("gpu: specular adds a highlight; matte stays matte") {
+    for_each_tier([](Rig& rig) {
+        Renderer2D& r = rig.r();
+        const auto sphere = r.create_mesh(generate_sphere(60.0f, 32, 48));
+        REQUIRE(sphere);
+        // The light sits at the camera: the sphere's center faces both the
+        // light and the eye, so a highlight lands dead center.
+        Light3D light;
+        light.dir[0] = 0.0f;
+        light.dir[1] = 0.0f;
+        light.dir[2] = -1.0f;
+        REQUIRE(r.set_light(light));
+
+        MeshMaterial matte;
+        matte.tint = ws::ui::r2d::rgba(255, 60, 60);
+        draw_sphere_frame(r, *sphere, matte);
+        r.frame_end();
+        rig.render(rig.bindless() ? "spec_matte_bindless" : "spec_matte_chunked");
+        const Rgba flat = rig.px(160, 120);
+
+        MeshMaterial glossy = matte;
+        glossy.specular = 1.0f;
+        glossy.shininess = 64.0f;
+        draw_sphere_frame(r, *sphere, glossy);
+        r.frame_end();
+        rig.render(rig.bindless() ? "spec_glossy_bindless" : "spec_glossy_chunked");
+        const Rgba shiny = rig.px(160, 120);
+        const Rgba edge = rig.px(160 + 36, 120);  // off-center: highlight fades
+
+        CHECK(flat.r > 200);
+        CHECK(flat.g < 100);        // the tint: red, not white
+        CHECK(shiny.g > 200);       // the highlight whitened the center
+        CHECK(shiny.b > 200);
+        CHECK(edge.g < shiny.g - 60);  // and it is a spot, not a wash
+        CHECK(rig.validation_messages() == 0);
+    });
+}
+
+TEST_CASE("gpu: a point light lights its side; it is gone the next frame") {
+    for_each_tier([](Rig& rig) {
+        Renderer2D& r = rig.r();
+        const auto sphere = r.create_mesh(generate_sphere(60.0f, 32, 48));
+        REQUIRE(sphere);
+        REQUIRE(r.set_light(dark_directional()));
+        MeshMaterial material;
+        material.tint = ws::ui::r2d::rgba(255, 90, 90);
+
+        // Frame 1: a point light off to the left of the sphere.
+        draw_sphere_frame(r, *sphere, material);
+        PointLight3D lamp;
+        lamp.position[0] = -150.0f;
+        lamp.position[2] = -120.0f;
+        lamp.radius = 400.0f;
+        REQUIRE(r.add_point_light(lamp));
+        r.frame_end();
+        rig.render(rig.bindless() ? "point_on_bindless" : "point_on_chunked");
+        const Rgba left_lit = rig.px(160 - 30, 120);
+        const Rgba right_lit = rig.px(160 + 30, 120);
+
+        // Frame 2: the app did not call add_point_light again.
+        draw_sphere_frame(r, *sphere, material);
+        r.frame_end();
+        rig.render(rig.bindless() ? "point_off_bindless" : "point_off_chunked");
+        const Rgba left_dark = rig.px(160 - 30, 120);
+        const Rgba right_dark = rig.px(160 + 30, 120);
+
+        CHECK(left_lit.r > right_lit.r + 40);  // the lamp's side is brighter
+        CHECK(left_lit.r > left_dark.r + 40);  // it lit that side
+        CHECK(std::abs(right_lit.r - right_dark.r) < 6);  // far side: ambient
+        CHECK(std::abs(left_dark.r - right_dark.r) < 6);  // lamp gone: symmetric
+        CHECK(rig.validation_messages() == 0);
+    });
+}
+
+TEST_CASE("gpu: lights accumulate, and the radius really is the reach") {
+    for_each_tier([](Rig& rig) {
+        Renderer2D& r = rig.r();
+        const auto sphere = r.create_mesh(generate_sphere(60.0f, 32, 48));
+        REQUIRE(sphere);
+        REQUIRE(r.set_light(dark_directional()));
+        MeshMaterial material;
+        material.tint = ws::ui::r2d::rgba(255, 255, 255);
+        const auto lamp_at = [](float x, float radius) {
+            PointLight3D l;
+            l.position[0] = x;
+            l.position[2] = -120.0f;
+            l.radius = radius;
+            return l;
+        };
+
+        // One lamp left.
+        draw_sphere_frame(r, *sphere, material);
+        REQUIRE(r.add_point_light(lamp_at(-150.0f, 400.0f)));
+        r.frame_end();
+        rig.render();
+        const Rgba one_left = rig.px(160 - 30, 120);
+        const Rgba one_right = rig.px(160 + 30, 120);
+
+        // A second lamp, right: both sides lit now, roughly equally.
+        draw_sphere_frame(r, *sphere, material);
+        REQUIRE(r.add_point_light(lamp_at(-150.0f, 400.0f)));
+        REQUIRE(r.add_point_light(lamp_at(150.0f, 400.0f)));
+        r.frame_end();
+        rig.render(rig.bindless() ? "two_lamps_bindless" : "two_lamps_chunked");
+        const Rgba two_left = rig.px(160 - 30, 120);
+        const Rgba two_right = rig.px(160 + 30, 120);
+        CHECK(two_right.r > one_right.r + 40);       // the new lamp's side
+        CHECK(std::abs(two_left.r - two_right.r) < 12);  // symmetric
+        CHECK(std::abs(two_left.r - one_left.r) < 12);   // the old side held
+
+        // A lamp whose radius stops short of the sphere does nothing.
+        draw_sphere_frame(r, *sphere, material);
+        REQUIRE(r.add_point_light(lamp_at(-150.0f, 60.0f)));
+        r.frame_end();
+        rig.render();
+        const Rgba out_of_reach = rig.px(160 - 30, 120);
+        CHECK(std::abs(out_of_reach.r - one_right.r) < 6);  // just ambient
+        CHECK(rig.validation_messages() == 0);
+    });
+}
+
+// --- shadows ----------------------------------------------------------------------------
+
+namespace {
+
+// A cube hovering over a ground plate, a light straight overhead, a camera
+// looking down at them from the front. The plate's normal is +Y - DOWN in
+// this y-down world - so it is rolled half a turn to face the light. The
+// cube's shadow lands at the world origin = the screen center.
+struct ShadowScene {
+    ws::ui::r3d::Mesh cube;
+    ws::ui::r3d::Mesh plate;
+};
+
+ShadowScene make_shadow_scene(Renderer2D& r) {
+    ShadowScene scene;
+    scene.cube = *r.create_mesh(generate_cube(60.0f));
+    scene.plate = *r.create_mesh(generate_plane(150.0f, 1));
+    return scene;
+}
+
+void draw_shadow_scene(Renderer2D& r, const ShadowScene& scene, bool cube_casts,
+                       bool plate_receives) {
+    Camera3D camera;
+    camera.eye[0] = 0.0f;
+    camera.eye[1] = -300.0f;
+    camera.eye[2] = -300.0f;
+    r.frame_begin(kW, kH);
+    r.begin(camera);
+    Transform3D plate_transform;
+    plate_transform.roll = 3.14159265f;
+    MeshMaterial plate;
+    plate.tint = ws::ui::r2d::rgba(255, 255, 255);
+    plate.casts_shadow = false;  // the receiver must not blot out the map
+    plate.receives_shadow = plate_receives;
+    r.draw_mesh(scene.plate, plate_transform, plate);
+    Transform3D cube_transform;
+    cube_transform.translation[1] = -100.0f;
+    MeshMaterial cube;
+    cube.tint = ws::ui::r2d::rgba(255, 60, 60);
+    cube.casts_shadow = cube_casts;
+    r.draw_mesh(scene.cube, cube_transform, cube);
+    r.frame_end();
+}
+
+Light3D overhead_light(bool shadows) {
+    Light3D light;  // default direction: straight up (world -y)
+    light.cast_shadows = shadows;
+    return light;
+}
+
+}  // namespace
+
+TEST_CASE("gpu: a caster shadows a receiver; every opt-out removes it") {
+    for_each_tier([](Rig& rig) {
+        Renderer2D& r = rig.r();
+        const ShadowScene scene = make_shadow_scene(r);
+        const char* tier = rig.bindless() ? "bindless" : "chunked";
+        const auto frame = [&](bool shadows, bool cube_casts, bool receives,
+                               const char* name) {
+            REQUIRE(r.set_light(overhead_light(shadows)));
+            draw_shadow_scene(r, scene, cube_casts, receives);
+            rig.render((std::string(name) + "_" + tier).c_str());
+        };
+
+        frame(true, true, true, "shadow_on");
+        const Rgba shadowed = rig.px(160, 125);  // under the cube
+        const Rgba lit_beside = rig.px(235, 125);  // plate, clear of the shadow
+        const Rgba cube_top = rig.px(160, 40);   // the cube's top face: lit, unshadowed
+        const Rgba cube_front = rig.px(160, 80);  // its front face: ambient only
+        CHECK(lit_beside.r > 200);   // the lit plate: ambient + full light
+        CHECK(shadowed.r < 110);     // in shadow: ~ the ambient floor
+        CHECK(shadowed.r > 30);      // not black - ambient survives
+        CHECK(cube_top.r > 200);     // a caster does not shadow itself
+        CHECK(cube_front.r < 110);   // a face turned from the light: ambient
+
+        frame(false, true, true, "shadow_off");
+        CHECK(rig.px(160, 125).r > 200);   // light off the switch: no shadow
+
+        frame(true, true, false, "shadow_noreceive");
+        CHECK(rig.px(160, 125).r > 200);   // the plate opted out of receiving
+
+        frame(true, false, true, "shadow_nocast");
+        CHECK(rig.px(160, 125).r > 200);   // the cube opted out of casting
+
+        frame(true, true, true, "shadow_on_again");
+        CHECK(rig.px(160, 125).r < 110);   // and it comes back
+        CHECK(rig.validation_messages() == 0);
+    });
+}
+
+TEST_CASE("gpu: shadows follow a moving caster") {
+    for_each_tier([](Rig& rig) {
+        Renderer2D& r = rig.r();
+        const ShadowScene scene = make_shadow_scene(r);
+        REQUIRE(r.set_light(overhead_light(true)));
+        Rgba last_left{}, last_right{};
+        for (const float x : {-60.0f, 60.0f}) {
+            Camera3D camera;
+            camera.eye[1] = -300.0f;
+            camera.eye[2] = -300.0f;
+            r.frame_begin(kW, kH);
+            r.begin(camera);
+            Transform3D plate_transform;
+            plate_transform.roll = 3.14159265f;
+            MeshMaterial plate;
+            plate.casts_shadow = false;
+            r.draw_mesh(scene.plate, plate_transform, plate);
+            Transform3D cube_transform;
+            cube_transform.translation[0] = x;
+            cube_transform.translation[1] = -100.0f;
+            r.draw_mesh(scene.cube, cube_transform, MeshMaterial{});
+            r.frame_end();
+            rig.render();
+            // 0.68 px per world unit at this distance: +-60 is ~ +-41 px.
+            (x < 0 ? last_left : last_right) = rig.px(x < 0 ? 160 - 41 : 160 + 41, 125);
+            if (x < 0) {
+                CHECK(rig.px(160 - 41, 125).r < 110);   // shadow on the left
+                CHECK(rig.px(160 + 41, 125).r > 200);   // right is lit
+            } else {
+                CHECK(rig.px(160 + 41, 125).r < 110);   // it moved right
+                CHECK(rig.px(160 - 41, 125).r > 200);   // left is lit again
+            }
+        }
+        CHECK(rig.validation_messages() == 0);
+    });
 }

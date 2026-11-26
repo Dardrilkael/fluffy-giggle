@@ -14,6 +14,7 @@
 
 #include <array>
 #include <cmath>
+#include <limits>
 #include <cstdint>
 #include <vector>
 
@@ -610,8 +611,150 @@ TEST_CASE("pack_tint / scene block / push layouts") {
     CHECK(block.light_color_ambient[3] == 1.0f);
     CHECK(make_scene_block(Light3D{}).light_color_ambient[3] == doctest::Approx(0.25f));
 
-    CHECK(sizeof(MeshPush) == 120u);
-    CHECK(sizeof(SceneBlock) == 32u);
+    CHECK(sizeof(MeshPush) == 128u);
+    CHECK(sizeof(SceneBlock) == 48u + 32u * kMaxPointLights + 64u + 16u);
+}
+
+TEST_CASE("model_quaternion rotates exactly like the reference matrix") {
+    using namespace ws::ui::r3d::detail;
+    const float angles[][3] = {{0, 0, 0},       {0.5f, 0, 0},      {0, 0.7f, 0},
+                               {0, 0, -1.1f},   {0.3f, -0.8f, 1.9f}, {3.0f, 1.2f, -2.5f},
+                               {-2.0f, 0.4f, 0.9f}};
+    for (const auto& a : angles) {
+        Transform3D t;
+        t.yaw = a[0];
+        t.pitch = a[1];
+        t.roll = a[2];
+        const Quat q = model_quaternion(t);
+        // Unit length (the shader's rotate() assumes it).
+        CHECK(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w ==
+              doctest::Approx(1.0f).epsilon(1e-5f));
+        const auto m = model_matrix(t);
+        const float basis[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        for (const auto& v : basis) {
+            // v + w*t + cross(q.xyz, t), t = 2*cross(q.xyz, v): the
+            // vertex shader's formula, spelled on the CPU.
+            const float qv[3] = {q.x, q.y, q.z};
+            const float tt[3] = {2 * (qv[1] * v[2] - qv[2] * v[1]),
+                                 2 * (qv[2] * v[0] - qv[0] * v[2]),
+                                 2 * (qv[0] * v[1] - qv[1] * v[0])};
+            const float rotated[3] = {
+                v[0] + q.w * tt[0] + (qv[1] * tt[2] - qv[2] * tt[1]),
+                v[1] + q.w * tt[1] + (qv[2] * tt[0] - qv[0] * tt[2]),
+                v[2] + q.w * tt[2] + (qv[0] * tt[1] - qv[1] * tt[0])};
+            for (int row = 0; row < 3; ++row) {
+                const float expected = m.rows[row][0] * v[0] +
+                                       m.rows[row][1] * v[1] + m.rows[row][2] * v[2];
+                CHECK(rotated[row] == doctest::Approx(expected).epsilon(1e-4f).scale(1.0));
+            }
+        }
+    }
+}
+
+TEST_CASE("pack_surface: 8-bit strength, 8-bit exponent, clamped and NaN-safe") {
+    using ws::ui::r3d::detail::pack_surface;
+    const auto strength = [](std::uint32_t w) { return w & 0xFFu; };
+    const auto exponent = [](std::uint32_t w) { return (w >> 8) & 0xFFu; };
+    CHECK(strength(pack_surface(0.0f, 32.0f)) == 0u);
+    CHECK(strength(pack_surface(1.0f, 32.0f)) == 255u);
+    CHECK(strength(pack_surface(0.5f, 32.0f)) == 128u);
+    CHECK(strength(pack_surface(7.0f, 32.0f)) == 255u);   // clamps high
+    CHECK(strength(pack_surface(-3.0f, 32.0f)) == 0u);    // clamps low
+    CHECK(strength(pack_surface(std::nanf(""), 32.0f)) == 0u);  // NaN is matte
+    CHECK(exponent(pack_surface(1.0f, 64.0f)) == 64u);
+    CHECK(exponent(pack_surface(1.0f, 0.0f)) == 1u);      // floor 1
+    CHECK(exponent(pack_surface(1.0f, 9000.0f)) == 255u); // ceiling 255
+    CHECK(exponent(pack_surface(1.0f, std::nanf(""))) == 1u);
+    CHECK((pack_surface(1.0f, 64.0f) >> 16) == 0u);  // no stray high bits
+}
+
+TEST_CASE("scene block carries the point lights, clamped and capped") {
+    using namespace ws::ui::r3d::detail;
+    PointLight3D points[kMaxPointLights + 3];
+    for (int i = 0; i < kMaxPointLights + 3; ++i) {
+        points[i].position[0] = static_cast<float>(i);
+        points[i].color[0] = 0.5f;
+        points[i].radius = 100.0f + static_cast<float>(i);
+    }
+    points[1].color[1] = -4.0f;  // nonsense: clamps to 0
+    const SceneBlock block =
+        make_scene_block(Light3D{}, points, kMaxPointLights + 3);
+    CHECK(block.point_count[0] == kMaxPointLights);  // capped, extras ignored
+    CHECK(block.points[0].position_radius[3] == 100.0f);
+    CHECK(block.points[kMaxPointLights - 1].position_radius[0] ==
+          static_cast<float>(kMaxPointLights - 1));
+    CHECK(block.points[1].color[1] == 0.0f);
+    CHECK(block.points[2].color[0] == 0.5f);
+    // No lights: a count of 0 and an untouched array.
+    CHECK(make_scene_block(Light3D{}).point_count[0] == 0);
+}
+
+// --- add_point_light ---------------------------------------------------------------
+
+TEST_CASE("add_point_light: frame-scoped, validated, capped") {
+    Renderer2D r;
+    PointLight3D light;
+    light.position[0] = 5.0f;
+
+    // Outside a frame: refused (it would be forgotten before it drew).
+    const auto outside = r.add_point_light(light);
+    REQUIRE_FALSE(outside);
+    CHECK(outside.error().code == 6008);
+
+    r.frame_begin(100.0f, 100.0f);
+    CHECK(r.add_point_light(light));
+    REQUIRE(r.point_lights().size() == 1u);
+    CHECK(r.point_lights()[0].position[0] == 5.0f);
+
+    PointLight3D bad = light;
+    bad.radius = 0.0f;
+    const auto zero_radius = r.add_point_light(bad);
+    REQUIRE_FALSE(zero_radius);
+    CHECK(zero_radius.error().code == 6007);
+    bad.radius = -5.0f;
+    CHECK(r.add_point_light(bad).error().code == 6007);
+    bad.radius = std::numeric_limits<float>::infinity();
+    CHECK(r.add_point_light(bad).error().code == 6007);
+    bad = light;
+    bad.position[1] = std::nanf("");
+    CHECK(r.add_point_light(bad).error().code == 6007);
+    CHECK(r.point_lights().size() == 1u);  // refusals change nothing
+
+    // Fill to the cap, then one more is refused.
+    while (static_cast<int>(r.point_lights().size()) < kMaxPointLights) {
+        REQUIRE(r.add_point_light(light));
+    }
+    const auto over = r.add_point_light(light);
+    REQUIRE_FALSE(over);
+    CHECK(over.error().code == 6006);
+    CHECK(static_cast<int>(r.point_lights().size()) == kMaxPointLights);
+
+    // A new frame forgets them; so does an abandoned one.
+    r.frame_end();
+    r.frame_begin(100.0f, 100.0f);
+    CHECK(r.point_lights().empty());
+    CHECK(r.add_point_light(light));
+    r.frame_drop();
+    CHECK(r.point_lights().empty());
+}
+
+TEST_CASE("draw_mesh records the material's highlight") {
+    Renderer2D r;
+    const auto cube = r.create_mesh(generate_cube(1.0f));
+    REQUIRE(cube);
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(ws::ui::r2d::Camera3D{});
+    MeshMaterial shiny;
+    shiny.specular = 0.75f;
+    shiny.shininess = 96.0f;
+    r.draw_mesh(*cube, Transform3D{}, shiny);
+    r.draw_mesh(*cube, Transform3D{}, MeshMaterial{});  // the defaults
+    r.frame_end();
+    REQUIRE(r.mesh_commands().size() == 2u);
+    CHECK(r.mesh_commands()[0].specular == 0.75f);
+    CHECK(r.mesh_commands()[0].shininess == 96.0f);
+    CHECK(r.mesh_commands()[1].specular == 0.0f);   // matte by default
+    CHECK(r.mesh_commands()[1].shininess == 32.0f);
 }
 
 // --- the weave: mesh draws between quad chunks --------------------------------------
@@ -742,4 +885,170 @@ TEST_CASE("weave: meshes after the last quad mark the chunk count; drops reset")
     r.frame_drop();
     CHECK(r.mesh_commands().empty());
     CHECK(r.mesh_chunk_marks().empty());
+}
+
+// --- shadow math -------------------------------------------------------------------
+
+namespace {
+
+using ws::ui::r3d::detail::BoundSphere;
+
+// clip = M * (p, 1), column-major; returns x', y', z' (the matrix is
+// orthographic, w stays 1).
+void apply(const float m[16], const float p[3], float out[3]) {
+    for (int row = 0; row < 3; ++row) {
+        out[row] = m[0 + row] * p[0] + m[4 + row] * p[1] + m[8 + row] * p[2] + m[12 + row];
+    }
+}
+
+}  // namespace
+
+TEST_CASE("bound_of / world_bound: the sphere encloses the mesh and follows the draw") {
+    using namespace ws::ui::r3d::detail;
+    const MeshData cube = generate_cube(100.0f);
+    const BoundSphere local = bound_of(cube.vertices.data(), cube.vertices.size());
+    CHECK(local.center[0] == doctest::Approx(0.0f).scale(1.0));
+    CHECK(local.center[1] == doctest::Approx(0.0f).scale(1.0));
+    CHECK(local.center[2] == doctest::Approx(0.0f).scale(1.0));
+    CHECK(local.radius == doctest::Approx(50.0f * std::sqrt(3.0f)).epsilon(1e-4f));
+    // Every vertex is inside (the guarantee the shadow fit relies on).
+    for (const Vertex3D& v : cube.vertices) {
+        const float d = std::sqrt(v.pos[0] * v.pos[0] + v.pos[1] * v.pos[1] +
+                                  v.pos[2] * v.pos[2]);
+        CHECK(d <= local.radius + 1e-3f);
+    }
+    // An off-center mesh: the center is the AABB's, not the origin.
+    MeshData shifted = cube;
+    for (Vertex3D& v : shifted.vertices) {
+        v.pos[0] += 200.0f;
+    }
+    CHECK(bound_of(shifted.vertices.data(), shifted.vertices.size()).center[0] ==
+          doctest::Approx(200.0f));
+    CHECK(bound_of(nullptr, 0).radius == 0.0f);
+
+    // Placing it: translation moves the center, scale scales the radius, a
+    // yaw swings an off-center sphere around the origin.
+    Transform3D t;
+    t.translation[1] = -30.0f;
+    t.scale = 2.0f;
+    const BoundSphere placed = world_bound(local, t);
+    CHECK(placed.center[1] == doctest::Approx(-30.0f));
+    CHECK(placed.radius == doctest::Approx(2.0f * local.radius));
+    BoundSphere off;
+    off.center[2] = 10.0f;
+    off.radius = 1.0f;
+    Transform3D quarter;
+    quarter.yaw = 1.57079632679f;  // local +Z -> world +X
+    const BoundSphere swung = world_bound(off, quarter);
+    CHECK(swung.center[0] == doctest::Approx(10.0f).epsilon(1e-4f));
+    CHECK(swung.center[2] == doctest::Approx(0.0f).scale(1.0));
+}
+
+TEST_CASE("fit_shadow_map: casters fill the map, receivers extend only the depth") {
+    using namespace ws::ui::r3d::detail;
+    const float to_light[3] = {0.3f, -1.0f, 0.2f};
+    BoundSphere casters[2];
+    casters[0].center[0] = -40.0f; casters[0].center[1] = -60.0f; casters[0].radius = 20.0f;
+    casters[1].center[0] = 55.0f;  casters[1].center[1] = -90.0f; casters[1].center[2] = 30.0f;
+    casters[1].radius = 15.0f;
+    BoundSphere ground;  // a big receiver far below the casters
+    ground.center[1] = 400.0f;
+    ground.radius = 500.0f;
+
+    const ShadowFit fit = fit_shadow_map(to_light, casters, 2, &ground, 1, 2048);
+    REQUIRE(fit.valid);
+    CHECK(fit.texel_world > 0.0f);
+
+    // Every point of every caster sphere lands inside the map in x/y and in
+    // depth [0, 1] - sampled on the sphere's axis-extreme points.
+    const BoundSphere all[3] = {casters[0], casters[1], ground};
+    for (int i = 0; i < 3; ++i) {
+        for (int axis = 0; axis < 3; ++axis) {
+            for (const float sign : {-1.0f, 1.0f}) {
+                float p[3] = {all[i].center[0], all[i].center[1], all[i].center[2]};
+                p[axis] += sign * all[i].radius * 0.99f;
+                float c[3];
+                apply(fit.view_proj, p, c);
+                if (i < 2) {  // casters: inside x/y too
+                    CHECK(c[0] >= -1.0f);
+                    CHECK(c[0] <= 1.0f);
+                    CHECK(c[1] >= -1.0f);
+                    CHECK(c[1] <= 1.0f);
+                }
+                CHECK(c[2] >= 0.0f);  // receivers and casters: inside depth
+                CHECK(c[2] <= 1.0f);
+            }
+        }
+    }
+    // Depth ordering: a caster sits NEARER the light (smaller depth) than a
+    // receiver beneath it along the light's direction.
+    float above[3] = {0.0f, -60.0f, 0.0f};
+    float below[3] = {0.0f, 100.0f, 0.0f};
+    float ca[3], cb[3];
+    apply(fit.view_proj, above, ca);
+    apply(fit.view_proj, below, cb);
+    CHECK(ca[2] < cb[2]);
+
+    // The receivers did not widen x/y: the same casters alone give the same
+    // x/y mapping (only the depth range differs).
+    const ShadowFit alone = fit_shadow_map(to_light, casters, 2, nullptr, 0, 2048);
+    REQUIRE(alone.valid);
+    CHECK(alone.view_proj[0] == doctest::Approx(fit.view_proj[0]));
+    CHECK(alone.view_proj[5] == doctest::Approx(fit.view_proj[5]));
+    CHECK(alone.view_proj[10] != doctest::Approx(fit.view_proj[10]));  // depth scale
+
+    // No casters, a zero light direction, or a zero resolution: no fit.
+    CHECK_FALSE(fit_shadow_map(to_light, nullptr, 0, &ground, 1, 2048).valid);
+    const float zero[3] = {0.0f, 0.0f, 0.0f};
+    CHECK_FALSE(fit_shadow_map(zero, casters, 2, nullptr, 0, 2048).valid);
+    CHECK_FALSE(fit_shadow_map(to_light, casters, 2, nullptr, 0, 0).valid);
+    // A light straight along the hint axis still builds a basis.
+    const float straight[3] = {0.0f, -1.0f, 0.0f};
+    CHECK(fit_shadow_map(straight, casters, 2, nullptr, 0, 2048).valid);
+    const float straight_down[3] = {0.0f, 1.0f, 0.0f};
+    CHECK(fit_shadow_map(straight_down, casters, 2, nullptr, 0, 2048).valid);
+    // A point-sized caster still gets a real volume.
+    BoundSphere point;
+    CHECK(fit_shadow_map(to_light, &point, 1, nullptr, 0, 2048).valid);
+}
+
+TEST_CASE("scene block: the shadow matrix rides only a valid fit") {
+    using namespace ws::ui::r3d::detail;
+    const float to_light[3] = {0.0f, -1.0f, 0.0f};
+    BoundSphere caster;
+    caster.radius = 10.0f;
+    const ShadowFit fit = fit_shadow_map(to_light, &caster, 1, nullptr, 0, 1024);
+    REQUIRE(fit.valid);
+
+    const SceneBlock with = make_scene_block(Light3D{}, nullptr, 0, &fit);
+    CHECK(with.shadow_params[0] == 1.0f);
+    CHECK(with.shadow_params[3] == doctest::Approx(1.5f * fit.texel_world));
+    CHECK(with.light_view_proj[15] == 1.0f);
+    CHECK(with.light_view_proj[0] == fit.view_proj[0]);
+
+    const SceneBlock none = make_scene_block(Light3D{});
+    CHECK(none.shadow_params[0] == 0.0f);
+    ShadowFit invalid;
+    CHECK(make_scene_block(Light3D{}, nullptr, 0, &invalid).shadow_params[0] == 0.0f);
+}
+
+TEST_CASE("create_mesh stores its bounds; draws carry them and the shadow flags") {
+    Renderer2D r;
+    const auto cube = r.create_mesh(generate_cube(80.0f));
+    REQUIRE(cube);
+    r.frame_begin(100.0f, 100.0f);
+    r.begin(ws::ui::r2d::Camera3D{});
+    MeshMaterial floor_material;
+    floor_material.casts_shadow = false;
+    floor_material.receives_shadow = false;
+    r.draw_mesh(*cube, Transform3D{}, floor_material);
+    r.draw_mesh(*cube, Transform3D{}, MeshMaterial{});
+    r.frame_end();
+    REQUIRE(r.mesh_commands().size() == 2u);
+    CHECK(r.mesh_commands()[0].bound_radius == doctest::Approx(40.0f * std::sqrt(3.0f)).epsilon(1e-4f));
+    CHECK_FALSE(r.mesh_commands()[0].casts_shadow);
+    CHECK_FALSE(r.mesh_commands()[0].receives_shadow);
+    CHECK(r.mesh_commands()[1].casts_shadow);     // both default on
+    CHECK(r.mesh_commands()[1].receives_shadow);
+    CHECK_FALSE(Light3D{}.cast_shadows);          // shadows are opt-in
 }

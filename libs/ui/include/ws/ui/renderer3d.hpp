@@ -16,7 +16,14 @@
 //     each mesh also living on the GPU as one host-visible buffer
 //   - four generators (cube, uv-sphere, plane, cylinder)
 //   - command recording against the frame's Camera3D epoch
-//   - the light state: one directional light + an ambient floor
+//   - lighting: one persistent directional light + an ambient floor
+//     (set_light), up to kMaxPointLights frame-scoped point lights
+//     (add_point_light), a per-material Blinn-Phong highlight
+//     (MeshMaterial::specular / shininess), and optional shadows from the
+//     directional light (Light3D::cast_shadows; per-draw casts_shadow /
+//     receives_shadow). Lit factor: ambient + (1 - ambient) * (the sum of
+//     the lights' Lambert terms), with each highlight added on top of the
+//     albedo in the light's own color.
 //   - the flush: mesh draws are WOVEN between the quad chunks in one
 //     stable (layer, camera-epoch) painter's order, so a billboard can
 //     sit in front of or behind a mesh. Depth-tested (LEQUAL, written),
@@ -95,6 +102,20 @@ struct MeshData {
 struct MeshMaterial {
     std::uint32_t tint = r2d::rgba(255, 255, 255);
     r2d::Texture texture{};
+    // The Blinn-Phong highlight. specular is its strength in [0, 1] (0, the
+    // default, is matte: no highlight at all); shininess is the exponent in
+    // [1, 255] (higher = a tighter, glossier spot). The highlight is the
+    // lights' own color, added after the albedo (it is not tinted by the
+    // surface), and both values are stored in 8 bits each.
+    float specular = 0.0f;
+    float shininess = 32.0f;
+    // Shadows (only when the directional light has cast_shadows on): does
+    // this draw darken what lies behind it from the light, and does it
+    // receive the shadows of others? Both default on; turn casts_shadow off
+    // for a draw that should not occlude (a ground plane, a sky dome) and
+    // receives_shadow off for one that should stay evenly lit.
+    bool casts_shadow = true;
+    bool receives_shadow = true;
 };
 
 // The placement of one draw: translation, UNIFORM scale, and a
@@ -132,7 +153,30 @@ struct Light3D {
                                          // dir), clamped at 0)
     float color[3] = {1.0f, 1.0f, 1.0f};  // linear rgb, [0, inf)
     float ambient = 0.25f;  // the flat floor every surface keeps, [0, 1]
+    // Shadows from THIS light (the directional one; point lights cast none).
+    // Opt-in: the renderer fits one orthographic shadow map to the frame's
+    // shadow-casting meshes each frame and the lit factor of every receiving
+    // surface is scaled by how much of the light reaches it (filtered, so
+    // edges are soft). The map is fitted to the casters' bounds - one huge
+    // caster (a big ground plane with casts_shadow left on) spends the map's
+    // resolution on itself, so switch casts_shadow off for such draws.
+    bool cast_shadows = false;
 };
+
+// A point light: a position in WORLD space that lights outward and fades to
+// nothing at `radius` (smooth, squared falloff: (1 - d / radius)^2, clamped).
+// Shaded exactly like the directional light - Lambert diffuse plus the
+// material's Blinn-Phong highlight - and added to it. Point lights are
+// FRAME-scoped (see add_point_light): immediate-mode, like a draw, so a
+// light can follow whatever carries it.
+struct PointLight3D {
+    float position[3] = {0.0f, 0.0f, 0.0f};
+    float color[3] = {1.0f, 1.0f, 1.0f};  // linear rgb, [0, inf)
+    float radius = 200.0f;                // world units, > 0
+};
+
+// How many point lights one frame can carry (the shader's fixed array).
+inline constexpr int kMaxPointLights = 8;
 
 // --- the registry ------------------------------------------------------------------
 
@@ -186,6 +230,21 @@ void draw_mesh(Mesh mesh, const Transform3D& transform,
 // the color has no alpha. Valid anywhere - it is scene state, not a
 // draw (the same standing set_layer() keeps).
 [[nodiscard]] ws::core::Status set_light(const Light3D& light);
+
+// Adds one point light to THIS frame (between frame start and end, i.e.
+// from on_update): it lights every mesh draw of the frame, whatever order
+// the calls came in, and is forgotten when the frame ends - call it again
+// next frame, the way you call draw_mesh. Unlike set_light's persistent
+// directional light this is a draw-style submission, so a moving light is
+// just a different position each frame.
+// Failures (a refused light changes nothing; the ui error family):
+//   - no_app          : no renderer is alive
+//   - too_many_lights : kMaxPointLights are already in the frame
+//   - bad_light       : a non-positive or non-finite radius, or a
+//                       non-finite position/color
+//   - outside_frame   : called outside a frame (the light would be
+//                       forgotten before it was ever drawn)
+[[nodiscard]] ws::core::Status add_point_light(const PointLight3D& light);
 
 // --- generators --------------------------------------------------------------------
 

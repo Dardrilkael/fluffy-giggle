@@ -13,22 +13,21 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <cstdint>
 #include <string>
 
 #include <cmath>
 #include <numbers>
 
 #include <ws/math/vecmath.hpp>
-#include <ws/physics/3d/body.hpp>
-#include <ws/physics/3d/shape.hpp>
-#include <ws/physics/3d/world.hpp>
-#include <ws/physics/common.hpp>  // kMaxBodiesPerWorld (the shell budget)
 
 #include "bench.hpp"
 #include "perf.hpp"
 #include "menu.hpp"
+#include "player.hpp"
 #include "texture_atlas.hpp"
 #include "world.hpp"
+#include "inventory.hpp"
 
 namespace {
 
@@ -356,93 +355,6 @@ TEST_CASE("shell: a dig exposes the wall behind it, a place buries what it cover
   CHECK(world.is_exposed(x, 40, z));
 }
 
-TEST_CASE("shell: the count fits the body budget - the capacity regression") {
-  // The shipped bug: the first build's surface-BAND grid needed ~50k
-  // bodies against max_bodies = 20000, so create_body failed at the
-  // 20001st cell, flooded the log, and the player's own body (created
-  // after the grid) was refused too - a dead world that rendered
-  // nothing. The shell (17,254 cells for this seed - the terrain's
-  // natural flats keep it far thinner than the band's blind walk)
-  // must fit comfortably inside the cap with room for the player and
-  // every edit's re-derivation.
-  const voxel::World world = make_world();
-  int shell = 0;
-  for (int x = 0; x < voxel::kWorldSizeX; ++x) {
-    for (int z = 0; z < voxel::kWorldSizeZ; ++z) {
-      const int top = world.surface_height(x, z);
-      for (int y = top; y >= 0; --y) {
-        shell += world.is_exposed(x, y, z) ? 1 : 0;
-      }
-    }
-  }
-  MESSAGE("shell cells: " << shell);
-  // The shell is populated (a real skin, not a degenerate one)...
-  CHECK(shell > 10000);
-  // ...comfortable under the old, buggy 20000 budget even before the
-  // cap question (the band never was)...
-  CHECK(shell < 20000);
-  // ...and miles under the lib's published cap.
-  CHECK(shell < static_cast<int>(ws::physics::kMaxBodiesPerWorld) - 1000);
-}
-
-TEST_CASE("shell: every shell body creates in a real World3D, then the player") {
-  // The acceptance half of the capacity regression: run the SAME shell
-  // the app builds against the REAL World3D (the same Desc the app
-  // spells, max_bodies = kMaxBodiesPerWorld), and confirm every cell
-  // creates - including the player's own body AFTER the whole shell,
-  // the exact call order the shipped bug broke.
-  const voxel::World world = make_world();
-  ws::physics3d::World3D::Desc desc{};
-  desc.gravity = ws::math::Vec3{0.0f, -32.0f, 0.0f};
-  desc.fixed_dt = 1.0f / 60.0f;
-  desc.thread_count = 0;
-  desc.max_bodies = ws::physics::kMaxBodiesPerWorld;
-  auto phys = ws::physics3d::World3D::create(desc);
-  REQUIRE(phys.has_value());
-
-  int created = 0;
-  for (int x = 0; x < voxel::kWorldSizeX; ++x) {
-    for (int z = 0; z < voxel::kWorldSizeZ; ++z) {
-      const int top = world.surface_height(x, z);
-      for (int y = top; y >= 0; --y) {
-        if (!world.is_exposed(x, y, z)) {
-          continue;
-        }
-        ws::physics3d::BodyDesc cell{};
-        cell.kind = ws::physics::BodyKind::static_;
-        cell.shape = ws::physics3d::Box{
-            ws::math::Vec3{0.5f, 0.5f, 0.5f}};
-        cell.transform = ws::physics3d::Transform{
-            ws::math::Vec3{static_cast<float>(x) + 0.5f,
-                           static_cast<float>(y) + 0.5f,
-                           static_cast<float>(z) + 0.5f},
-            {}};
-        const auto id = phys->create_body(cell);
-        REQUIRE(id.has_value());
-        ++created;
-      }
-    }
-  }
-  MESSAGE("bodies created: " << created);
-  CHECK(created > 10000);  // the shell, whole
-  CHECK(created < 20000);   // inside even the old buggy budget
-
-  // The player's body, after the entire shell - the order the bug broke.
-  ws::physics3d::BodyDesc player{};
-  player.kind = ws::physics::BodyKind::dynamic;
-  player.shape = ws::physics3d::Box{
-      ws::math::Vec3{0.3f, 0.9f, 0.3f}};
-  player.transform = ws::physics3d::Transform{
-      ws::math::Vec3{64.5f, 40.0f, 64.5f}, {}};
-  const auto player_id = phys->create_body(player);
-  REQUIRE(player_id.has_value());
-  // And it steps: one advance with the whole shell standing.
-  REQUIRE(phys->advance(1.0f / 60.0f).has_value());
-  const auto state = phys->body_state(*player_id);
-  REQUIRE(state.has_value());
-  CHECK(state->position.y < 40.0f);  // gravity is already pulling it
-}
-
 // --- the frame regression: the game->render map is a ROTATION ----------------------
 //
 // The field report "mouse x is inverted" was the first build's frame
@@ -502,6 +414,120 @@ TEST_CASE("frame: the camera reads the rotated world the right way round") {
   const Vec3 south = eye + Vec3{0.0f, 0.0f, -10.0f};
   const Vec3 w_s = south - eye;
   CHECK(ws::math::dot(w_s, fwd) < -9.0f);
+}
+
+TEST_CASE("player: swept grid controller lands, stays supported, and jumps") {
+  voxel::World world = make_world();
+  const auto grid = world.collision_grid();
+  constexpr int x = 64;
+  constexpr int z = 64;
+  const int top = world.surface_height(x, z);
+  REQUIRE(top >= 0);
+
+  voxel::Player player;
+  REQUIRE(player.spawn(ws::math::Vec3{
+      static_cast<float>(x) + 0.5f,
+      static_cast<float>(top) + 3.0f,
+      static_cast<float>(z) + 0.5f}));
+
+  const voxel::Player::MoveInput idle{};
+  for (int i = 0; i < 120; ++i) {
+    player.tick(idle, 1.0f / 60.0f, grid);
+  }
+  CHECK(player.grounded());
+  CHECK(player.velocity().y == doctest::Approx(0.0f));
+  CHECK(player.position().y >= static_cast<float>(top) + 1.0f +
+                                  0.9f - 0.01f);
+  CHECK_FALSE(grid.overlaps(player.bounds()));
+
+  // Standing still must remain stable without accumulating gravity or
+  // sinking incrementally into the supporting voxel.
+  const float supported_y = player.position().y;
+  for (int i = 0; i < 300; ++i) {
+    player.tick(idle, 1.0f / 60.0f, grid);
+  }
+  CHECK(player.grounded());
+  CHECK(player.velocity().y == doctest::Approx(0.0f));
+  CHECK(player.position().y == doctest::Approx(supported_y).epsilon(0.0001));
+
+  const float rest_y = player.position().y;
+  voxel::Player::MoveInput jump{};
+  jump.jump = true;
+  player.tick(jump, 1.0f / 60.0f, grid);
+  for (int i = 0; i < 18; ++i) {
+    player.tick(idle, 1.0f / 60.0f, grid);
+  }
+  CHECK(player.position().y > rest_y + 1.2f);
+  CHECK(player.eye_position().y ==
+        doctest::Approx(player.position().y + 0.82f));
+}
+
+TEST_CASE("voxel grid: raycast shares the DDA traversal used by interaction") {
+  voxel::World world = make_world();
+  const auto grid = world.collision_grid();
+  const int x = 64;
+  const int z = 64;
+  const int top = world.surface_height(x, z);
+  REQUIRE(top >= 0);
+  const auto hit = grid.raycast(
+      ws::math::Vec3{static_cast<float>(x) + 0.5f,
+                     static_cast<float>(top) + 5.0f,
+                     static_cast<float>(z) + 0.5f},
+      ws::math::Vec3{0.0f, -1.0f, 0.0f}, 10.0f);
+  CHECK(hit.hit);
+  CHECK(hit.cell.x == x);
+  CHECK(hit.cell.z == z);
+  CHECK(hit.normal.y == 1);
+  CHECK(hit.distance == doctest::Approx(4.0f));
+}
+
+TEST_CASE("voxel grid: swept AABB stops at walls and slides along them") {
+  // A one-cell-thick wall at x=3, extending over the player's z/y span.
+  struct Grid {
+    static bool solid(const void*, int x, int y, int z) noexcept {
+      return x == 3 && y >= 0 && y < 4 && z >= -2 && z < 3;
+    }
+  };
+  const ws::physics3d::VoxelGrid3D grid{
+      {{-8, -4, -8}, {16, 12, 16}, nullptr, &Grid::solid}};
+  const ws::physics3d::Aabb player{
+      ws::math::Vec3{1.0f, 1.0f, 0.0f},
+      ws::math::Vec3{1.6f, 2.8f, 0.6f}};
+  const auto moved = grid.sweep_aabb(player, ws::math::Vec3{4.0f, 0.0f, 2.0f});
+  CHECK(moved.hit_x);
+  CHECK(moved.bounds.max.x <= doctest::Approx(3.0f).epsilon(0.002));
+  CHECK(moved.bounds.min.z > player.min.z + 1.5f);
+}
+
+TEST_CASE("voxel grid: high-speed vertical sweep cannot tunnel through floor") {
+  struct Grid {
+    static bool solid(const void*, int x, int y, int z) noexcept {
+      return y == 0 && x >= -2 && x <= 2 && z >= -2 && z <= 2;
+    }
+  };
+  const ws::physics3d::VoxelGrid3D grid{
+      {{-4, -2, -4}, {8, 8, 8}, nullptr, &Grid::solid}};
+  const ws::physics3d::Aabb player{
+      ws::math::Vec3{-0.3f, 5.0f, -0.3f},
+      ws::math::Vec3{0.3f, 6.8f, 0.3f}};
+  const auto moved = grid.sweep_aabb(player, ws::math::Vec3{0.0f, -20.0f, 0.0f});
+  CHECK(moved.hit_y);
+  CHECK(moved.bounds.min.y >= doctest::Approx(1.0f).epsilon(0.002));
+  CHECK(grid.overlaps(moved.bounds) == false);
+}
+
+TEST_CASE("voxel grid: world edits are visible without rebuilding collision data") {
+  voxel::World world = make_world();
+  const auto grid = world.collision_grid();
+  constexpr int x = 64;
+  constexpr int z = 64;
+  const int y = world.surface_height(x, z);
+  REQUIRE(y >= 0);
+  CHECK(grid.is_solid(x, y, z));
+  REQUIRE(world.set_block(x, y, z, voxel::Block::air));
+  CHECK_FALSE(grid.is_solid(x, y, z));
+  REQUIRE(world.set_block(x, y, z, voxel::Block::stone));
+  CHECK(grid.is_solid(x, y, z));
 }
 
 TEST_CASE("menu: the pause layout centers the pair on the frame") {
@@ -647,7 +673,7 @@ TEST_CASE("atlas: the automatic creator's derived contract is pinned") {
   CHECK(voxel::atlas::kTileFor[0][0] == -1);  // air
   // Every slot the table names exists (the PNG walk answers every
   // named slot and refuses the rest).
-  for (int b = 1; b < 7; ++b) {
+  for (int b = 1; b < static_cast<int>(voxel::Block::count_); ++b) {
     for (int f = 0; f < 6; ++f) {
       const int tile = voxel::atlas::kTileFor[b][f];
       if (tile < 0) {
@@ -661,4 +687,46 @@ TEST_CASE("atlas: the automatic creator's derived contract is pinned") {
   std::size_t dead = 0;
   CHECK(voxel::atlas::tile_png(voxel::atlas::kTileCount, dead) == nullptr);
   CHECK(dead == 0);
+}
+
+TEST_CASE("inventory: stack merging, overflow and removal") {
+  voxel::Inventory inventory;
+  CHECK(inventory.add(voxel::Item::stone, 60) == 60);
+  CHECK(inventory.add(voxel::Item::stone, 10) == 10);
+  CHECK(inventory.count(voxel::Item::stone) == 70);
+  CHECK(inventory.slot(0).count == 64);
+  CHECK(inventory.slot(1).count == 6);
+  CHECK_FALSE(inventory.remove(voxel::Item::stone, 71));
+  CHECK(inventory.remove(voxel::Item::stone, 65));
+  CHECK(inventory.count(voxel::Item::stone) == 5);
+}
+
+TEST_CASE("crafting: consumes ingredients and creates output atomically") {
+  voxel::Inventory inventory;
+  CHECK(inventory.add(voxel::Item::wood, 2) == 2);
+  const auto& planks = voxel::kRecipes[0];
+  REQUIRE(voxel::can_craft(inventory, planks));
+  CHECK(voxel::craft(inventory, planks));
+  CHECK(inventory.count(voxel::Item::wood) == 1);
+  CHECK(inventory.count(voxel::Item::planks) == 4);
+  CHECK(voxel::craft(inventory, planks));
+  CHECK(inventory.count(voxel::Item::wood) == 0);
+  CHECK(inventory.count(voxel::Item::planks) == 8);
+  CHECK_FALSE(voxel::craft(inventory, planks));
+}
+
+TEST_CASE("worldgen: ores and leaves use the expanded block palette") {
+  const voxel::World world = make_world();
+  int coal = 0, iron = 0, leaves = 0;
+  for (int x = 0; x < voxel::kWorldSizeX; ++x)
+    for (int z = 0; z < voxel::kWorldSizeZ; ++z)
+      for (int y = 0; y < voxel::kChunkSizeY; ++y) {
+        const auto b = world.block_at(x,y,z);
+        coal += b == voxel::Block::coal_ore;
+        iron += b == voxel::Block::iron_ore;
+        leaves += b == voxel::Block::leaves;
+      }
+  CHECK(coal > 0);
+  CHECK(iron > 0);
+  CHECK(leaves > 0);
 }

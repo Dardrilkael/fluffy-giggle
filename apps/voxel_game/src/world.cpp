@@ -34,6 +34,13 @@ const std::uint32_t kTints[static_cast<std::size_t>(Block::count_)] = {
     ws::ui::r2d::rgba(106, 82, 51, 255),  // wood
     ws::ui::r2d::rgba(218, 210, 158, 255),  // sand
     ws::ui::r2d::rgba(50, 104, 170, 255),  // water
+    ws::ui::r2d::rgba(105, 105, 110, 255), // cobblestone
+    ws::ui::r2d::rgba(164, 126, 83, 255),  // planks
+    ws::ui::r2d::rgba(174, 76, 61, 255),   // bricks
+    ws::ui::r2d::rgba(160, 210, 220, 190), // glass
+    ws::ui::r2d::rgba(65, 125, 55, 255),   // leaves
+    ws::ui::r2d::rgba(45, 45, 48, 255),    // coal ore
+    ws::ui::r2d::rgba(170, 125, 95, 255),  // iron ore
 };
 
 // --- the noise -------------------------------------------------------------------
@@ -427,10 +434,27 @@ void World::generate(std::uint32_t seed) {
                 Block::water;
           }
           if (height > kWaterLevel + 1 && tree_at(wx, wz, seed)) {
-            for (int y = height + 1; y <= height + 4; ++y) {
-              chunk[static_cast<std::size_t>(block_index(lx, y, lz))] =
-                  Block::wood;
+            for (int y = height + 1; y <= height + 4; ++y)
+              chunk[static_cast<std::size_t>(block_index(lx, y, lz))] = Block::wood;
+            for (int dy = 3; dy <= 5; ++dy) {
+              const int radius = dy == 5 ? 1 : 2;
+              for (int dx = -radius; dx <= radius; ++dx)
+                for (int dz = -radius; dz <= radius; ++dz) {
+                  const int ax = lx + dx, az = lz + dz, ay = height + dy;
+                  if (ax < 0 || ax >= kChunkSizeX || az < 0 || az >= kChunkSizeZ || ay >= kChunkSizeY ||
+                      (dx == 0 && dz == 0 && dy <= 4)) continue;
+                  auto& leaf = chunk[static_cast<std::size_t>(block_index(ax, ay, az))];
+                  if (leaf == Block::air) leaf = Block::leaves;
+                }
             }
+          }
+          for (int y = 3; y < std::min(height - 3, 18); ++y) {
+            const std::uint32_t roll = static_cast<std::uint32_t>(wx * 73856093u) ^
+                static_cast<std::uint32_t>(y * 19349663u) ^
+                static_cast<std::uint32_t>(wz * 83492791u) ^ seed;
+            auto& cell = chunk[static_cast<std::size_t>(block_index(lx, y, lz))];
+            if (cell == Block::stone && (roll % 997u) == 0u)
+              cell = (y < 10 && (roll & 1u)) ? Block::coal_ore : Block::iron_ore;
           }
         }
       }
@@ -543,87 +567,36 @@ bool World::is_exposed(int x, int y, int z) const {
 
 // --- the DDA raycast --------------------------------------------------------------
 
+bool World::solid_query(const void* context, int x, int y,
+                         int z) noexcept {
+  const auto* world = static_cast<const World*>(context);
+  return world != nullptr && is_solid(world->block_at(x, y, z));
+}
+
+ws::physics3d::VoxelGrid3D World::collision_grid() const noexcept {
+  return ws::physics3d::VoxelGrid3D{
+      ws::physics3d::VoxelGrid3D::Desc{
+          ws::math::IVec3{0, 0, 0},
+          ws::math::IVec3{kWorldSizeX, kChunkSizeY, kWorldSizeZ},
+          this, &World::solid_query}};
+}
+
 World::RayHit World::raycast(const float origin[3],
                              const float direction[3],
                              float max_distance) const {
-  RayHit out;
-  float len = std::sqrt(direction[0] * direction[0] +
-                        direction[1] * direction[1] +
-                        direction[2] * direction[2]);
-  if (len < 1e-8f) {
-    return out;
-  }
-  const float inv = 1.0f / len;
-  const float dx = direction[0] * inv;
-  const float dy = direction[1] * inv;
-  const float dz = direction[2] * inv;
-
-  int ix = static_cast<int>(std::floor(origin[0]));
-  int iy = static_cast<int>(std::floor(origin[1]));
-  int iz = static_cast<int>(std::floor(origin[2]));
-
-  const float stepx = dx > 0.0f ? 1.0f : (dx < 0.0f ? -1.0f : 0.0f);
-  const float stepy = dy > 0.0f ? 1.0f : (dy < 0.0f ? -1.0f : 0.0f);
-  const float stepz = dz > 0.0f ? 1.0f : (dz < 0.0f ? -1.0f : 0.0f);
-  const float boundx = static_cast<float>(dx > 0.0f ? ix + 1 : ix);
-  const float boundy = static_cast<float>(dy > 0.0f ? iy + 1 : iy);
-  const float boundz = static_cast<float>(dz > 0.0f ? iz + 1 : iz);
-  // t at which each boundary is reached; +inf-equivalent (1e30) when the
-  // axis never crosses (a 0 component). Mutable: the walk advances them.
-  float tx = dx != 0.0f ? (boundx - origin[0]) / dx : 1e30f;
-  float ty = dy != 0.0f ? (boundy - origin[1]) / dy : 1e30f;
-  float tz = dz != 0.0f ? (boundz - origin[2]) / dz : 1e30f;
-  const float dtx = dx != 0.0f ? std::abs(1.0f / dx) : 1e30f;
-  const float dty = dy != 0.0f ? std::abs(1.0f / dy) : 1e30f;
-  const float dtz = dz != 0.0f ? std::abs(1.0f / dz) : 1e30f;
-
-  int last_axis = -1;
-  int last_step = 0;
-  float t = 0.0f;
-  for (int guard = 0; guard < 1024; ++guard) {
-    if (is_solid(block_at(ix, iy, iz))) {
-      out.hit = true;
-      out.cell[0] = ix;
-      out.cell[1] = iy;
-      out.cell[2] = iz;
-      out.normal[0] = last_axis == 0 ? -last_step : 0;
-      out.normal[1] = last_axis == 1 ? -last_step : 0;
-      out.normal[2] = last_axis == 2 ? -last_step : 0;
-      out.distance = t;
-      return out;
-    }
-    if (tx <= ty && tx <= tz) {
-      if (tx > max_distance) {
-        break;
-      }
-      t = tx;
-      tx += dtx;
-      ix += static_cast<int>(stepx);
-      last_axis = 0;
-      last_step = static_cast<int>(stepx);
-    } else if (ty <= tz) {
-      if (ty > max_distance) {
-        break;
-      }
-      t = ty;
-      ty += dty;
-      iy += static_cast<int>(stepy);
-      last_axis = 1;
-      last_step = static_cast<int>(stepy);
-    } else {
-      if (tz > max_distance) {
-        break;
-      }
-      t = tz;
-      tz += dtz;
-      iz += static_cast<int>(stepz);
-      last_axis = 2;
-      last_step = static_cast<int>(stepz);
-    }
-    if (iy < 0 || iy >= kChunkSizeY) {
-      break;
-    }
-  }
+  const auto hit = collision_grid().raycast(
+      ws::math::Vec3{origin[0], origin[1], origin[2]},
+      ws::math::Vec3{direction[0], direction[1], direction[2]},
+      max_distance);
+  RayHit out{};
+  out.hit = hit.hit;
+  out.cell[0] = hit.cell.x;
+  out.cell[1] = hit.cell.y;
+  out.cell[2] = hit.cell.z;
+  out.normal[0] = hit.normal.x;
+  out.normal[1] = hit.normal.y;
+  out.normal[2] = hit.normal.z;
+  out.distance = hit.distance;
   return out;
 }
 

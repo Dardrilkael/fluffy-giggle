@@ -1031,16 +1031,29 @@ bool Renderer2D::create_pipeline(VkRenderPass render_pass) {
 // --- Renderer2D: the mesh path's device half (r3d, Phase 2) -------------------
 
 bool Renderer2D::create_mesh_resources() {
-    // Set 1: the frame slot's scene block (the one light), fragment-only.
-    VkDescriptorSetLayoutBinding binding{};
-    binding.binding = 0;
-    binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    binding.descriptorCount = 1;
-    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // The shadow map's objects first: the scene layout below bakes the
+    // comparison sampler in as an immutable sampler.
+    if (!create_shadow_resources()) {
+        ws::core::error("ui: r3d - mesh path disabled (shadow resources)");
+        destroy_mesh_resources();
+        return false;
+    }
+    // Set 1: the frame slot's scene - binding 0 the block (the lights + the
+    // shadow matrix), binding 1 the slot's shadow map; fragment-only.
+    VkDescriptorSetLayoutBinding binding[2]{};
+    binding[0].binding = 0;
+    binding[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    binding[0].descriptorCount = 1;
+    binding[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    binding[1].binding = 1;
+    binding[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    binding[1].descriptorCount = 1;
+    binding[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    binding[1].pImmutableSamplers = &shadow_sampler_;
     VkDescriptorSetLayoutCreateInfo layout_info{};
     layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout_info.bindingCount = 1;
-    layout_info.pBindings = &binding;
+    layout_info.bindingCount = 2;
+    layout_info.pBindings = binding;
     if (vkCreateDescriptorSetLayout(device_, &layout_info, nullptr,
                                     &scene_set_layout_) != VK_SUCCESS) {
         ws::core::error("ui: r3d - mesh path disabled (scene set layout)");
@@ -1077,14 +1090,16 @@ bool Renderer2D::create_mesh_resources() {
                 "r3d mesh pipeline layout");
 
     // One scene set + one mapped uniform buffer per frame slot.
-    VkDescriptorPoolSize pool_size{};
-    pool_size.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    pool_size.descriptorCount = kMaxFramesInFlight;
+    VkDescriptorPoolSize pool_sizes[2]{};
+    pool_sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    pool_sizes[0].descriptorCount = kMaxFramesInFlight;
+    pool_sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    pool_sizes[1].descriptorCount = kMaxFramesInFlight;
     VkDescriptorPoolCreateInfo pool_info{};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_info.maxSets = kMaxFramesInFlight;
-    pool_info.poolSizeCount = 1;
-    pool_info.pPoolSizes = &pool_size;
+    pool_info.poolSizeCount = 2;
+    pool_info.pPoolSizes = pool_sizes;
     if (vkCreateDescriptorPool(device_, &pool_info, nullptr, &scene_pool_) !=
         VK_SUCCESS) {
         ws::core::error("ui: r3d - mesh path disabled (scene pool)");
@@ -1134,14 +1149,24 @@ bool Renderer2D::create_mesh_resources() {
         VkDescriptorBufferInfo info{};
         info.buffer = scene.buffer;
         info.range = sizeof(r3d::detail::SceneBlock);
-        VkWriteDescriptorSet write{};
-        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = scene.set;
-        write.dstBinding = 0;
-        write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        write.pBufferInfo = &info;
-        vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+        VkDescriptorImageInfo shadow_image{};
+        shadow_image.sampler = shadow_sampler_;
+        shadow_image.imageView = shadow_slots_[slot].view;
+        shadow_image.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet writes[2]{};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = scene.set;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[0].pBufferInfo = &info;
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = scene.set;
+        writes[1].dstBinding = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[1].pImageInfo = &shadow_image;
+        vkUpdateDescriptorSets(device_, 2, writes, 0, nullptr);
     }
     return true;
 }
@@ -1182,6 +1207,9 @@ void Renderer2D::destroy_mesh_resources() {
         vkDestroyDescriptorSetLayout(device_, scene_set_layout_, nullptr);
         scene_set_layout_ = VK_NULL_HANDLE;
     }
+    // After the layout that bakes its sampler in, and after the sets that
+    // point at its images.
+    destroy_shadow_resources();
 }
 
 bool Renderer2D::create_mesh_pipeline(VkRenderPass render_pass) {
@@ -1323,6 +1351,418 @@ bool Renderer2D::create_mesh_pipeline(VkRenderPass render_pass) {
                 reinterpret_cast<std::uint64_t>(pipeline_mesh_),
                 "r3d mesh pipeline");
     return true;
+}
+
+bool Renderer2D::create_shadow_resources() {
+    // A format that is a depth attachment AND a linearly-filterable sampled
+    // image (the comparison taps are bilinear): 32-bit float when the device
+    // offers it, 16-bit unorm (guaranteed) otherwise.
+    const VkFormatFeatureFlags wanted =
+        VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT |
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    for (const VkFormat candidate : {VK_FORMAT_D32_SFLOAT, VK_FORMAT_D16_UNORM}) {
+        VkFormatProperties props{};
+        vkGetPhysicalDeviceFormatProperties(physical_device_, candidate, &props);
+        if ((props.optimalTilingFeatures & wanted) == wanted) {
+            shadow_format_ = candidate;
+            break;
+        }
+    }
+    if (shadow_format_ == VK_FORMAT_UNDEFINED) {
+        ws::core::error("ui: r3d - no depth format supports shadow sampling");
+        return false;
+    }
+
+    // The comparison sampler: a lookup returns the lit FRACTION (the depth
+    // compare, bilinearly filtered), and outside the map reads as fully lit
+    // (a white border = depth 1.0).
+    VkSamplerCreateInfo sampler_info{};
+    sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampler_info.magFilter = VK_FILTER_LINEAR;
+    sampler_info.minFilter = VK_FILTER_LINEAR;
+    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    sampler_info.compareEnable = VK_TRUE;
+    sampler_info.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    sampler_info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+    if (vkCreateSampler(device_, &sampler_info, nullptr, &shadow_sampler_) !=
+        VK_SUCCESS) {
+        return false;
+    }
+
+    // The depth-only pass. The map lives in READ_ONLY between uses (initial
+    // AND final), so a frame that records no shadow pass still leaves a
+    // samplable image behind; the clear makes the old contents irrelevant.
+    VkAttachmentDescription depth{};
+    depth.format = shadow_format_;
+    depth.samples = VK_SAMPLE_COUNT_1_BIT;
+    depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depth.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depth.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    depth.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    VkAttachmentReference depth_ref{
+        0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.pDepthStencilAttachment = &depth_ref;
+    VkSubpassDependency deps[2]{};
+    // Last frame's fragment reads of this map are done before the pass
+    // overwrites it (the slot's fence already guarantees it; this makes the
+    // pass self-contained)...
+    deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    deps[0].dstSubpass = 0;
+    deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    deps[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                           VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    deps[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    // ...and the main pass's fragment shader sees the finished map.
+    deps[1].srcSubpass = 0;
+    deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    deps[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    deps[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    VkRenderPassCreateInfo pass_info{};
+    pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    pass_info.attachmentCount = 1;
+    pass_info.pAttachments = &depth;
+    pass_info.subpassCount = 1;
+    pass_info.pSubpasses = &subpass;
+    pass_info.dependencyCount = 2;
+    pass_info.pDependencies = deps;
+    if (vkCreateRenderPass(device_, &pass_info, nullptr, &shadow_pass_) !=
+        VK_SUCCESS) {
+        return false;
+    }
+
+    // One map per frame slot.
+    shadow_slots_.assign(kMaxFramesInFlight, ShadowSlot{});
+    for (std::uint32_t slot = 0; slot < kMaxFramesInFlight; ++slot) {
+        ShadowSlot& map = shadow_slots_[slot];
+        gfx::ImageOut image{};
+        const ws::core::Status created = gpu_->create_image(
+            {kShadowMapSize, kShadowMapSize,
+             static_cast<std::uint32_t>(shadow_format_),
+             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                 VK_IMAGE_USAGE_SAMPLED_BIT,
+             1},
+            image);
+        if (!created) {
+            ws::core::error("ui: r3d - shadow map allocation failed: {}",
+                            created.error().message);
+            return false;
+        }
+        map.image = gfx::handle_from_u64<VkImage>(image.image);
+        map.allocation = image.allocation;
+        VkImageViewCreateInfo view{};
+        view.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view.image = map.image;
+        view.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view.format = shadow_format_;
+        view.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+        if (vkCreateImageView(device_, &view, nullptr, &map.view) != VK_SUCCESS) {
+            return false;
+        }
+        VkFramebufferCreateInfo fb{};
+        fb.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        fb.renderPass = shadow_pass_;
+        fb.attachmentCount = 1;
+        fb.pAttachments = &map.view;
+        fb.width = kShadowMapSize;
+        fb.height = kShadowMapSize;
+        fb.layers = 1;
+        if (vkCreateFramebuffer(device_, &fb, nullptr, &map.framebuffer) !=
+            VK_SUCCESS) {
+            return false;
+        }
+        const std::string name = "r3d shadow map slot " + std::to_string(slot);
+        name_object(VK_OBJECT_TYPE_IMAGE,
+                    reinterpret_cast<std::uint64_t>(map.image), name.c_str());
+    }
+
+    // The caster pipeline: position-only vertices, depth only, no fragment
+    // stage, its own layout (a 96-byte vertex push, no sets). Culling is OFF:
+    // the light's basis is built for coverage, not handedness, so back-face
+    // culling could drop the very faces that matter; a constant + slope
+    // depth bias takes the acne cure instead.
+    VkPushConstantRange push_range{};
+    push_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    push_range.size = static_cast<uint32_t>(sizeof(r3d::detail::ShadowPush));
+    VkPipelineLayoutCreateInfo layout_info{};
+    layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layout_info.pushConstantRangeCount = 1;
+    layout_info.pPushConstantRanges = &push_range;
+    if (vkCreatePipelineLayout(device_, &layout_info, nullptr,
+                               &shadow_pipeline_layout_) != VK_SUCCESS) {
+        return false;
+    }
+
+    const spirv::ShaderWords vert_words = spirv::shadow_vert_words();
+    std::uint64_t vert_raw = 0;
+    const ws::core::Status module = gpu_->create_shader_module(
+        vert_words.words, vert_words.count, &vert_raw);
+    if (!module) {
+        ws::core::error("ui: r3d - shadow vertex shader module failed: {}",
+                        module.error().message);
+        return false;
+    }
+    VkPipelineShaderStageCreateInfo stage{};
+    stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stage.module = gfx::handle_from_u64<VkShaderModule>(vert_raw);
+    stage.pName = "main";
+    VkVertexInputBindingDescription vertex_binding{};
+    vertex_binding.stride = static_cast<uint32_t>(sizeof(r3d::Vertex3D));
+    VkVertexInputAttributeDescription position{
+        0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(r3d::Vertex3D, pos)};
+    VkPipelineVertexInputStateCreateInfo vertex_input{};
+    vertex_input.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertex_input.vertexBindingDescriptionCount = 1;
+    vertex_input.pVertexBindingDescriptions = &vertex_binding;
+    vertex_input.vertexAttributeDescriptionCount = 1;
+    vertex_input.pVertexAttributeDescriptions = &position;
+    VkPipelineInputAssemblyStateCreateInfo input_assembly{};
+    input_assembly.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewport_state{};
+    viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewport_state.viewportCount = 1;
+    viewport_state.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo raster{};
+    raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.depthBiasEnable = VK_TRUE;
+    raster.depthBiasConstantFactor = 1.25f;
+    raster.depthBiasSlopeFactor = 1.75f;
+    raster.lineWidth = 1.0f;
+    VkPipelineDepthStencilStateCreateInfo depth_state{};
+    depth_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depth_state.depthTestEnable = VK_TRUE;
+    depth_state.depthWriteEnable = VK_TRUE;
+    depth_state.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    VkPipelineMultisampleStateCreateInfo multisample{};
+    multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendStateCreateInfo blend{};  // no color attachments
+    blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    VkDynamicState dynamic_states[2] = {VK_DYNAMIC_STATE_VIEWPORT,
+                                        VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{};
+    dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamic.dynamicStateCount = 2;
+    dynamic.pDynamicStates = dynamic_states;
+    VkGraphicsPipelineCreateInfo pipeline_info{};
+    pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipeline_info.stageCount = 1;
+    pipeline_info.pStages = &stage;
+    pipeline_info.pVertexInputState = &vertex_input;
+    pipeline_info.pInputAssemblyState = &input_assembly;
+    pipeline_info.pViewportState = &viewport_state;
+    pipeline_info.pRasterizationState = &raster;
+    pipeline_info.pMultisampleState = &multisample;
+    pipeline_info.pDepthStencilState = &depth_state;
+    pipeline_info.pColorBlendState = &blend;
+    pipeline_info.pDynamicState = &dynamic;
+    pipeline_info.layout = shadow_pipeline_layout_;
+    pipeline_info.renderPass = shadow_pass_;
+    const VkResult err = vkCreateGraphicsPipelines(
+        device_, pipeline_cache_, 1, &pipeline_info, nullptr, &pipeline_shadow_);
+    gpu_->destroy_shader_module(vert_raw);  // baked into the pipeline
+    if (err != VK_SUCCESS) {
+        pipeline_shadow_ = VK_NULL_HANDLE;
+        ws::core::error("ui: r3d - shadow pipeline creation failed ({})",
+                        static_cast<int>(err));
+        return false;
+    }
+    name_object(VK_OBJECT_TYPE_PIPELINE,
+                reinterpret_cast<std::uint64_t>(pipeline_shadow_),
+                "r3d shadow pipeline");
+
+    // One-time: every map starts UNDEFINED, but the scene sets promise
+    // READ_ONLY, and a frame that records no shadow pass must still leave a
+    // samplable image. A single barrier submit (the texture upload's
+    // synchronous pattern) moves them all there once.
+    VkCommandBufferAllocateInfo cmd_info{};
+    cmd_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmd_info.commandPool = upload_pool_;
+    cmd_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmd_info.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkResult submit_err = vkAllocateCommandBuffers(device_, &cmd_info, &cmd);
+    if (submit_err == VK_SUCCESS) {
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        submit_err = vkBeginCommandBuffer(cmd, &begin);
+    }
+    if (submit_err == VK_SUCCESS) {
+        std::vector<VkImageMemoryBarrier> barriers(shadow_slots_.size());
+        for (std::size_t i = 0; i < shadow_slots_.size(); ++i) {
+            VkImageMemoryBarrier& b = barriers[i];
+            b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            b.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+            b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image = shadow_slots_[i].image;
+            b.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+        }
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
+                             0, nullptr, static_cast<uint32_t>(barriers.size()),
+                             barriers.data());
+        submit_err = vkEndCommandBuffer(cmd);
+    }
+    if (submit_err == VK_SUCCESS) {
+        vkResetFences(device_, 1, &upload_fence_);
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &cmd;
+        submit_err = vkQueueSubmit(queue_, 1, &submit, upload_fence_);
+    }
+    if (submit_err == VK_SUCCESS) {
+        submit_err = vkWaitForFences(device_, 1, &upload_fence_, VK_TRUE, UINT64_MAX);
+    }
+    if (cmd != VK_NULL_HANDLE) {
+        vkFreeCommandBuffers(device_, upload_pool_, 1, &cmd);
+    }
+    if (submit_err != VK_SUCCESS) {
+        ws::core::error("ui: r3d - shadow map layout transition failed ({})",
+                        static_cast<int>(submit_err));
+        return false;
+    }
+    return true;
+}
+
+void Renderer2D::destroy_shadow_resources() {
+    // Null-tolerant: create_shadow_resources calls this (through
+    // destroy_mesh_resources) on its own partial failures; the caller has
+    // already idled the device.
+    if (pipeline_shadow_ != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device_, pipeline_shadow_, nullptr);
+        pipeline_shadow_ = VK_NULL_HANDLE;
+    }
+    if (shadow_pipeline_layout_ != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device_, shadow_pipeline_layout_, nullptr);
+        shadow_pipeline_layout_ = VK_NULL_HANDLE;
+    }
+    for (ShadowSlot& map : shadow_slots_) {
+        if (map.framebuffer != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(device_, map.framebuffer, nullptr);
+        }
+        if (map.view != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_, map.view, nullptr);
+        }
+        if (map.image != VK_NULL_HANDLE) {
+            gpu_->destroy_image(gfx::handle_to_u64(map.image), map.allocation);
+        }
+    }
+    shadow_slots_.clear();
+    shadow_fits_ = {};
+    if (shadow_pass_ != VK_NULL_HANDLE) {
+        vkDestroyRenderPass(device_, shadow_pass_, nullptr);
+        shadow_pass_ = VK_NULL_HANDLE;
+    }
+    if (shadow_sampler_ != VK_NULL_HANDLE) {
+        vkDestroySampler(device_, shadow_sampler_, nullptr);
+        shadow_sampler_ = VK_NULL_HANDLE;
+    }
+    shadow_format_ = VK_FORMAT_UNDEFINED;
+}
+
+void Renderer2D::record_shadow_pass(VkCommandBuffer cmd, uint32_t frame_slot) {
+    if (frame_slot >= shadow_fits_.size()) {
+        return;
+    }
+    shadow_fits_[frame_slot] = {};  // no map this frame unless proven below
+    if (pipeline_shadow_ == VK_NULL_HANDLE || !light_.cast_shadows ||
+        mesh_commands_.empty() || frame_slot >= shadow_slots_.size()) {
+        return;
+    }
+
+    // The casters set the map's x/y extent, casters + receivers its depth.
+    std::vector<r3d::detail::BoundSphere> casters;
+    std::vector<r3d::detail::BoundSphere> receivers;
+    for (const MeshCommand& m : mesh_commands_) {
+        if (m.gpu_buffer == 0 || m.index_count == 0) {
+            continue;
+        }
+        r3d::detail::BoundSphere local;
+        for (int i = 0; i < 3; ++i) {
+            local.center[i] = m.bound_center[i];
+        }
+        local.radius = m.bound_radius;
+        const r3d::detail::BoundSphere world =
+            r3d::detail::world_bound(local, m.transform);
+        if (m.casts_shadow) {
+            casters.push_back(world);
+        }
+        if (m.receives_shadow) {
+            receivers.push_back(world);
+        }
+    }
+    const r3d::detail::ShadowFit fit = r3d::detail::fit_shadow_map(
+        light_.dir, casters.data(), casters.size(), receivers.data(),
+        receivers.size(), kShadowMapSize);
+    if (!fit.valid) {
+        return;  // nothing casts: the scene block says "no map"
+    }
+
+    VkClearValue clear{};
+    clear.depthStencil = {1.0f, 0};
+    VkRenderPassBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    begin.renderPass = shadow_pass_;
+    begin.framebuffer = shadow_slots_[frame_slot].framebuffer;
+    begin.renderArea.extent = {kShadowMapSize, kShadowMapSize};
+    begin.clearValueCount = 1;
+    begin.pClearValues = &clear;
+    vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_shadow_);
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(kShadowMapSize);
+    viewport.height = static_cast<float>(kShadowMapSize);
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    const VkRect2D scissor{{0, 0}, {kShadowMapSize, kShadowMapSize}};
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    const VkDeviceSize offset = 0;
+    for (const MeshCommand& m : mesh_commands_) {
+        if (!m.casts_shadow || m.gpu_buffer == 0 || m.index_count == 0) {
+            continue;
+        }
+        r3d::detail::ShadowPush push{};
+        std::memcpy(push.light_vp, fit.view_proj, sizeof push.light_vp);
+        const r3d::detail::Quat rotation = r3d::detail::model_quaternion(m.transform);
+        push.rotation[0] = rotation.x;
+        push.rotation[1] = rotation.y;
+        push.rotation[2] = rotation.z;
+        push.rotation[3] = rotation.w;
+        for (int k = 0; k < 3; ++k) {
+            push.translation_scale[k] = m.transform.translation[k];
+        }
+        push.translation_scale[3] = m.transform.scale;
+        vkCmdPushConstants(cmd, shadow_pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT,
+                           0, static_cast<uint32_t>(sizeof push), &push);
+        const VkBuffer buffer = gfx::handle_from_u64<VkBuffer>(m.gpu_buffer);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &buffer, &offset);
+        vkCmdBindIndexBuffer(cmd, buffer, m.gpu_index_offset, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, m.index_count, 1, 0, 0, 0);
+    }
+    vkCmdEndRenderPass(cmd);
+    shadow_fits_[frame_slot] = fit;  // the flush tells the shader a map is live
 }
 
 bool Renderer2D::upload_mesh(MeshEntry& entry) {
@@ -1865,8 +2305,9 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
     // fence was waited) before any mesh draw reads it.
     if (has_meshes) {
         SceneSlot& scene = scene_slots_[frame_slot];
-        const r3d::detail::SceneBlock block =
-            r3d::detail::make_scene_block(light_);
+        const r3d::detail::SceneBlock block = r3d::detail::make_scene_block(
+            light_, point_lights_.data(), point_lights_.size(),
+            &shadow_fits_[frame_slot]);
         std::memcpy(scene.mapped, &block, sizeof block);
         gpu_->flush_buffer(scene.allocation, 0, sizeof block);
     }
@@ -1926,10 +2367,25 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
         }
         r3d::detail::MeshPush push{};
         std::memcpy(push.vp, mesh_vp.m, sizeof push.vp);
-        const r3d::detail::Model3x4 model = r3d::detail::model_matrix(m.transform);
-        std::memcpy(push.model, model.rows, sizeof push.model);
+        const r3d::detail::Quat rotation =
+            r3d::detail::model_quaternion(m.transform);
+        push.rotation[0] = rotation.x;
+        push.rotation[1] = rotation.y;
+        push.rotation[2] = rotation.z;
+        push.rotation[3] = rotation.w;
+        for (int k = 0; k < 3; ++k) {
+            push.translation_scale[k] = m.transform.translation[k];
+        }
+        push.translation_scale[3] = m.transform.scale;
         push.tint = r3d::detail::pack_tint(m.tint);
         push.tex_slot = tier_.bindless ? mesh_texture_slot(m) : 0u;
+        push.surface = r3d::detail::pack_surface(m.specular, m.shininess);
+        push.flags = m.receives_shadow ? r3d::detail::kMeshFlagReceivesShadow : 0u;
+        // The block's camera position, for the highlight's view vector.
+        const Camera3D& camera = frame_cameras_[m.camera_epoch - 1].camera3d;
+        for (int k = 0; k < 3; ++k) {
+            push.eye[k] = camera.eye[k];
+        }
         vkCmdPushConstants(
             cmd, mesh_pipeline_layout_,
             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
