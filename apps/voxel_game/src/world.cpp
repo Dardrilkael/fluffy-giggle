@@ -16,9 +16,8 @@
 #include <cmath>
 #include <cstddef>
 
-#include <ws/core/log.hpp>
 #include <ws/math/noise.hpp>
-#include <ws/ui/renderer2d.hpp>  // rgba()
+#include <utility>
 
 namespace voxel {
 
@@ -33,21 +32,21 @@ static_assert(sizeof(atlas::kTileFor) / sizeof(atlas::kTileFor[0]) ==
 
 namespace {
 
+constexpr std::uint32_t pack_rgba(std::uint8_t r, std::uint8_t g,
+                                   std::uint8_t b, std::uint8_t a) noexcept {
+  return (static_cast<std::uint32_t>(r) << 24) |
+         (static_cast<std::uint32_t>(g) << 16) |
+         (static_cast<std::uint32_t>(b) << 8) |
+         static_cast<std::uint32_t>(a);
+}
 const std::uint32_t kTints[static_cast<std::size_t>(Block::count_)] = {
-    0u,                                   // air (never drawn)
-    ws::ui::r2d::rgba(106, 170, 64, 255),  // grass - a mid green
-    ws::ui::r2d::rgba(134, 96, 67, 255),  // dirt
-    ws::ui::r2d::rgba(125, 125, 130, 255),  // stone
-    ws::ui::r2d::rgba(106, 82, 51, 255),  // wood
-    ws::ui::r2d::rgba(218, 210, 158, 255),  // sand
-    ws::ui::r2d::rgba(50, 104, 170, 255),  // water
-    ws::ui::r2d::rgba(105, 105, 110, 255), // cobblestone
-    ws::ui::r2d::rgba(164, 126, 83, 255),  // planks
-    ws::ui::r2d::rgba(174, 76, 61, 255),   // bricks
-    ws::ui::r2d::rgba(160, 210, 220, 190), // glass
-    ws::ui::r2d::rgba(65, 125, 55, 255),   // leaves
-    ws::ui::r2d::rgba(45, 45, 48, 255),    // coal ore
-    ws::ui::r2d::rgba(170, 125, 95, 255),  // iron ore
+    0u, pack_rgba(106, 170, 64, 255), pack_rgba(134, 96, 67, 255),
+    pack_rgba(125, 125, 130, 255), pack_rgba(106, 82, 51, 255),
+    pack_rgba(218, 210, 158, 255), pack_rgba(50, 104, 170, 255),
+    pack_rgba(105, 105, 110, 255), pack_rgba(164, 126, 83, 255),
+    pack_rgba(174, 76, 61, 255), pack_rgba(160, 210, 220, 190),
+    pack_rgba(65, 125, 55, 255), pack_rgba(45, 45, 48, 255),
+    pack_rgba(170, 125, 95, 255),
 };
 
 // --- deterministic terrain fields ------------------------------------------------
@@ -117,7 +116,7 @@ constexpr float kUVB[6][2][3] = {
 // Emits one merged quad for the greedy rectangle (slice sa, [pu, pu+w)
 // x [pv, pv+h) on face fi's plane lattice. The lattice walk mirrors
 // the mask build exactly - the two can never disagree where a cell is.
-void emit_quad(ws::ui::r3d::MeshData& out, Block /*type*/, int fi, int ox,
+void emit_quad(CpuMeshData& out, Block /*type*/, int fi, int ox,
                 int oz, int sa, int pu, int pv, int w, int h,
                 int u_len, int v_len) {
   const FaceDir& face = kFaces[fi];
@@ -211,7 +210,7 @@ void emit_quad(ws::ui::r3d::MeshData& out, Block /*type*/, int fi, int ox,
   const std::uint32_t base =
       static_cast<std::uint32_t>(out.vertices.size());
   for (int ci = 0; ci < 4; ++ci) {
-    ws::ui::r3d::Vertex3D vertex;
+    CpuMeshVertex vertex;
     vertex.pos[0] = game_to_render(corners[ci][0], 0);
     vertex.pos[1] = game_to_render(corners[ci][1], 1);
     vertex.pos[2] = game_to_render(corners[ci][2], 2);
@@ -239,10 +238,11 @@ void emit_quad(ws::ui::r3d::MeshData& out, Block /*type*/, int fi, int ox,
 // exposed-face mask on the face's plane lattice, then carves greedy
 // rectangles out of it.
 void greedy_faces(const World& world, Block type, int fi, int cx, int cz,
-                  ws::ui::r3d::MeshData& out) {
+                  CpuMeshData& out) {
   const FaceDir& face = kFaces[fi];
   const int ox = cx * kChunkSizeX;
   const int oz = cz * kChunkSizeZ;
+  const auto chunk = world.chunk_data(cx, cz);
   // The plane lattice axes (chunk-local): u/v are the face basis'
   // integer directions; the slice axis is the face's normal axis.
   const int ux = static_cast<int>(kUVB[fi][0][0]);
@@ -274,11 +274,17 @@ void greedy_faces(const World& world, Block type, int fi, int cx, int cz,
   };
   // The mask + used grid, per slice (the sweep only merges within one
   // slice: two cells at different slice positions are NOT coplanar).
-  std::vector<bool> mask(static_cast<std::size_t>(u_len) * v_len, false);
-  std::vector<bool> used(static_cast<std::size_t>(u_len) * v_len, false);
+  // Max plane: 16 * 64 = 1024 cells. Reuse fixed stack scratch rather than
+  // allocating vector<bool> bitsets for every face/tile rebuild.
+  constexpr std::size_t kMaxPlaneArea =
+      static_cast<std::size_t>(kChunkSizeY) * kChunkSizeX;
+  std::array<std::uint8_t, kMaxPlaneArea> mask{};
+  std::array<std::uint8_t, kMaxPlaneArea> used{};
+  const std::size_t plane_area =
+      static_cast<std::size_t>(u_len) * static_cast<std::size_t>(v_len);
   for (int sa = 0; sa < a_len; ++sa) {
-    std::fill(mask.begin(), mask.end(), false);
-    std::fill(used.begin(), used.end(), false);
+    std::fill_n(mask.begin(), plane_area, std::uint8_t{0});
+    std::fill_n(used.begin(), plane_area, std::uint8_t{0});
     bool any = false;
     for (int pu = 0; pu < u_len; ++pu) {
       for (int pv = 0; pv < v_len; ++pv) {
@@ -286,11 +292,17 @@ void greedy_faces(const World& world, Block type, int fi, int cx, int cz,
         const int gx = ox + c[0];
         const int gy = c[1];
         const int gz = oz + c[2];
-        if (world.block_at(gx, gy, gz) != type) {
-          continue;
-        }
+        if (chunk[static_cast<std::size_t>(
+                block_index(c[0], c[1], c[2]))] != type) continue;
+
+        const int nx = c[0] + face.dx;
+        const int ny = c[1] + face.dy;
+        const int nz = c[2] + face.dz;
         const Block neighbor =
-            world.block_at(gx + face.dx, gy + face.dy, gz + face.dz);
+            nx >= 0 && nx < kChunkSizeX && ny >= 0 && ny < kChunkSizeY &&
+                    nz >= 0 && nz < kChunkSizeZ
+                ? chunk[static_cast<std::size_t>(block_index(nx, ny, nz))]
+                : world.block_at(gx + face.dx, gy + face.dy, gz + face.dz);
         if (type == Block::water) {
           // Water is non-solid, but adjacent water cells must not each
           // emit a coincident top surface. Water only has a top tile.
@@ -349,9 +361,9 @@ void greedy_faces(const World& world, Block type, int fi, int cx, int cz,
 
 // One (chunk, tile) mesh: every face of every block whose kTileFor
 // entry selects this tile, merged greedily per face direction.
-[[nodiscard]] ws::ui::r3d::MeshData build_chunk_tile_mesh(
+[[nodiscard]] CpuMeshData build_chunk_tile_mesh(
     const World& world, int cx, int cz, int tile) {
-  ws::ui::r3d::MeshData out;
+  CpuMeshData out;
   for (int type = 1; type < static_cast<int>(Block::count_); ++type) {
     for (int fi = 0; fi < 6; ++fi) {
       if (atlas::kTileFor[static_cast<std::size_t>(type)][fi] != tile) {
@@ -509,41 +521,19 @@ bool World::set_block(int x, int y, int z, Block block) {
   return true;
 }
 
-void World::rebuild_chunk(int cx, int cz) {
-  // Kill the chunk's previous meshes (an edit rebuilds the chunk).
-  for (auto it = chunk_meshes_.begin(); it != chunk_meshes_.end();) {
-    if (it->cx == cx && it->cz == cz) {
-      if (it->mesh.id != 0u) {
-        (void)ws::ui::r3d::destroy_mesh(it->mesh);
-      }
-      it = chunk_meshes_.erase(it);
-    } else {
-      ++it;
-    }
+std::vector<ChunkMeshData> World::build_chunk_meshes(
+    int cx, int cz) const {
+  std::vector<ChunkMeshData> out;
+  if (cx < 0 || cx >= kWorldChunksX || cz < 0 || cz >= kWorldChunksZ) {
+    return out;
   }
-  // One mesh per TILE present with visible faces (greedy-merged).
+  out.reserve(atlas::kTileCount);
   for (int tile = 0; tile < atlas::kTileCount; ++tile) {
-    ws::ui::r3d::MeshData data = build_chunk_tile_mesh(*this, cx, cz, tile);
-    if (data.vertices.empty()) {
-      continue;
-    }
-    const auto mesh = ws::ui::r3d::create_mesh(data);
-    if (!mesh.has_value()) {
-      ws::core::log_error(mesh.error());
-      continue;  // one failed tile leaves the rest of the chunk visible
-    }
-    chunk_meshes_.push_back(
-        ChunkMesh{cx, cz, tile, *mesh,
-                  static_cast<std::uint32_t>(data.indices.size())});
+    CpuMeshData geometry = build_chunk_tile_mesh(*this, cx, cz, tile);
+    if (geometry.vertices.empty()) continue;
+    out.push_back(ChunkMeshData{tile, std::move(geometry)});
   }
-}
-
-void World::rebuild_all() {
-  for (int cz = 0; cz < kWorldChunksZ; ++cz) {
-    for (int cx = 0; cx < kWorldChunksX; ++cx) {
-      rebuild_chunk(cx, cz);
-    }
-  }
+  return out;
 }
 
 int World::surface_height(int x, int z) const {
