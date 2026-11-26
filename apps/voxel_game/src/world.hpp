@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <vector>
 
+#include <ws/physics/3d/voxel_grid.hpp>
 #include <ws/ui/renderer3d.hpp>  // MeshData, Mesh (the registry handle)
 
 namespace voxel {
@@ -135,16 +136,9 @@ class World {
     return chunk_meshes_;
   }
 
-  // A merged axis-aligned collision cuboid in GAME-space coordinates.
-  // Cuboids exactly cover the solid voxel union without overlaps.
-  struct CollisionBox {
-    ws::math::Vec3 center{};
-    ws::math::Vec3 half_extents{};
-  };
-  // Greedily decomposes one chunk's solid cells into maximal cuboids.
-  // Static collision uses these instead of one body per exposed voxel.
-  [[nodiscard]] std::vector<CollisionBox> collision_boxes(int cx,
-                                                           int cz) const;
+  // A zero-copy, read-only collision view over the world's chunk data.
+  // The view is cheap to copy and remains valid while this World lives.
+  [[nodiscard]] ws::physics3d::VoxelGrid3D collision_grid() const noexcept;
 
   // The highest solid block's y at a column, -1 when none (the spawn
   // probe).
@@ -174,6 +168,9 @@ class World {
                                float max_distance) const;
 
  private:
+  static bool solid_query(const void* context, int x, int y,
+                          int z) noexcept;
+
   // Chunk-major: chunks_[cz * kWorldChunksX + cx], each kBlocksPerChunk.
   std::vector<std::vector<Block>> chunks_;
   std::vector<ChunkMesh> chunk_meshes_;
