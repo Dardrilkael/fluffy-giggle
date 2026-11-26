@@ -104,6 +104,47 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
         return false;
     }
 
+    // Timestamp queries are optional. A graphics queue can execute without
+    // timestamp support (timestampValidBits == 0); keep rendering normally
+    // rather than turning a profiler feature into a device requirement.
+    timestamp_period_ns_ = properties.limits.timestampPeriod;
+    timestamp_valid_bits_ = 0;
+    uint32_t queue_family_count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(
+        physical_device_, &queue_family_count, nullptr);
+    std::vector<VkQueueFamilyProperties> queue_families(queue_family_count);
+    if (queue_family_count != 0) {
+        vkGetPhysicalDeviceQueueFamilyProperties(
+            physical_device_, &queue_family_count, queue_families.data());
+    }
+    if (queue_family_ < queue_family_count &&
+        properties.limits.timestampComputeAndGraphics == VK_TRUE) {
+        timestamp_valid_bits_ =
+            queue_families[queue_family_].timestampValidBits;
+    }
+    if (timestamp_valid_bits_ != 0 && timestamp_period_ns_ > 0.0) {
+        VkQueryPoolCreateInfo query_info{};
+        query_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        query_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        query_info.queryCount = 2u * kMaxFramesInFlight;
+        if (vkCreateQueryPool(device_, &query_info, nullptr,
+                              &gpu_timestamp_pool_) != VK_SUCCESS) {
+            gpu_timestamp_pool_ = VK_NULL_HANDLE;
+            timestamp_valid_bits_ = 0;
+            ws::core::warn("ui: GPU timestamp query pool unavailable");
+        } else {
+            name_object(VK_OBJECT_TYPE_QUERY_POOL,
+                        reinterpret_cast<std::uint64_t>(gpu_timestamp_pool_),
+                        "r2d GPU frame timestamps");
+        }
+    } else {
+        timestamp_valid_bits_ = 0;
+    }
+    gpu_timestamp_pending_.fill(false);
+    gpu_timestamp_recording_.fill(false);
+    gpu_frame_ms_ = 0.0f;
+    gpu_frame_serial_ = 0;
+
     VkCommandPoolCreateInfo upload_pool_info{};
     upload_pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     upload_pool_info.queueFamilyIndex = queue_family_;
@@ -335,6 +376,19 @@ void Renderer2D::shutdown() {
         return;  // never initialized, or already shut down
     }
     vkDeviceWaitIdle(device_);
+    // The idle wait retires even the final frame slots that might never be
+    // acquired again (for example, when the app closes immediately).
+    for (uint32_t slot = 0; slot < kMaxFramesInFlight; ++slot) {
+        collect_gpu_timing(slot);
+    }
+    if (gpu_timestamp_pool_ != VK_NULL_HANDLE) {
+        vkDestroyQueryPool(device_, gpu_timestamp_pool_, nullptr);
+        gpu_timestamp_pool_ = VK_NULL_HANDLE;
+    }
+    gpu_timestamp_pending_.fill(false);
+    gpu_timestamp_recording_.fill(false);
+    timestamp_valid_bits_ = 0;
+    timestamp_period_ns_ = 0.0;
     if (pipeline_ != VK_NULL_HANDLE) {
         vkDestroyPipeline(device_, pipeline_, nullptr);
         pipeline_ = VK_NULL_HANDLE;
@@ -2124,6 +2178,68 @@ void Renderer2D::write_chunk_set(VkDescriptorSet set,
     vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
 }
 
+void Renderer2D::collect_gpu_timing(uint32_t frame_slot) {
+    if (gpu_timestamp_pool_ == VK_NULL_HANDLE ||
+        frame_slot >= kMaxFramesInFlight ||
+        !gpu_timestamp_pending_[frame_slot]) {
+        return;
+    }
+
+    const std::uint32_t first_query = frame_slot * 2u;
+    std::uint64_t timestamps[2] = {};
+    const VkResult result = vkGetQueryPoolResults(
+        device_, gpu_timestamp_pool_, first_query, 2u, sizeof(timestamps),
+        timestamps, sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT);
+    if (result == VK_SUCCESS) {
+        const std::uint64_t mask =
+            timestamp_valid_bits_ >= 64u
+                ? ~std::uint64_t(0)
+                : ((std::uint64_t(1) << timestamp_valid_bits_) - 1u);
+        const std::uint64_t ticks =
+            (timestamps[1] - timestamps[0]) & mask;
+        gpu_frame_ms_ = static_cast<float>(
+            static_cast<double>(ticks) * timestamp_period_ns_ / 1'000'000.0);
+        ++gpu_frame_serial_;
+    } else {
+        // The caller only collects after this frame slot's fence, so
+        // VK_NOT_READY indicates a driver/query failure rather than normal
+        // asynchronous behavior. Drop this sample and keep the next frame.
+        ws::core::warn("ui: GPU timestamp query result unavailable ({})",
+                       static_cast<int>(result));
+    }
+    gpu_timestamp_pending_[frame_slot] = false;
+}
+
+void Renderer2D::begin_gpu_timing(VkCommandBuffer cmd,
+                                  uint32_t frame_slot) {
+    if (gpu_timestamp_pool_ == VK_NULL_HANDLE ||
+        frame_slot >= kMaxFramesInFlight) {
+        return;
+    }
+    // acquire() has waited this slot's fence before exposing its command
+    // buffer. The previous result is therefore readable without WAIT_BIT.
+    collect_gpu_timing(frame_slot);
+    const std::uint32_t first_query = frame_slot * 2u;
+    vkCmdResetQueryPool(cmd, gpu_timestamp_pool_, first_query, 2u);
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         gpu_timestamp_pool_, first_query);
+    gpu_timestamp_recording_[frame_slot] = true;
+}
+
+void Renderer2D::end_gpu_timing(VkCommandBuffer cmd,
+                                uint32_t frame_slot) {
+    if (gpu_timestamp_pool_ == VK_NULL_HANDLE ||
+        frame_slot >= kMaxFramesInFlight ||
+        !gpu_timestamp_recording_[frame_slot]) {
+        return;
+    }
+    const std::uint32_t end_query = frame_slot * 2u + 1u;
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                         gpu_timestamp_pool_, end_query);
+    gpu_timestamp_recording_[frame_slot] = false;
+    gpu_timestamp_pending_[frame_slot] = true;
+}
+
 void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
                        float fb_width, float fb_height) {
     // The submission clock - and the retire drain - run before any early
@@ -2504,6 +2620,10 @@ Stats Renderer2D::stats() const {
                                          free_slots_.size());
     out.bindless = tier_.bindless;
     out.update_after_bind = tier_.update_after_bind;
+    out.gpu_timing_supported = gpu_timestamp_pool_ != VK_NULL_HANDLE;
+    out.gpu_frame_valid = gpu_frame_serial_ != 0;
+    out.gpu_frame_ms = gpu_frame_ms_;
+    out.gpu_frame_serial = gpu_frame_serial_;
     return out;
 }
 
