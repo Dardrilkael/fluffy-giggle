@@ -119,7 +119,8 @@ ws::ui::r3d::Light3D scene_light() {
   return light;
 }
 
-ws::ui::r2d::Camera3D begin_scene(const Player& player) {
+ws::ui::r2d::Camera3D begin_scene(const Player& player, float fov_degrees,
+                                          float render_distance) {
   // The player's GAME-space eye and look, mapped to render space by
   // world.hpp's game_to_render - the SAME map the mesher baked the
   // geometry with, so the camera and the world can never disagree
@@ -140,11 +141,11 @@ ws::ui::r2d::Camera3D begin_scene(const Player& player) {
   camera.up[0] = 0.0f;
   camera.up[1] = -1.0f;
   camera.up[2] = 0.0f;
-  camera.fov_y = 1.2217f;  // 70 degrees, the FPS default
+  camera.fov_y = fov_degrees * 0.01745329251994329577f;
   // A tighter near plane reduces visible clipping when the FPS camera
   // approaches voxel faces; keep the far plane unchanged for world visibility.
   camera.near_z = 0.03f;
-  camera.far_z = 260.0f;   // the whole 128-block world is in view
+  camera.far_z = render_distance;
   ws::ui::r2d::begin(camera);
   (void)ws::ui::r3d::set_light(scene_light());
   return camera;
