@@ -391,8 +391,11 @@ class VoxelApp final : public ws::ui::App {
     // --- hotbar + break/place ------------------------------------------------
     for (int i = 0; i < kHotbarSlots; ++i)
       if (input.key_pressed[kKey1 + i]) hotbar_ = i;
-    for (int i = 0; i < static_cast<int>(voxel::kRecipes.size()); ++i)
-      if (input.key_pressed[kKeyF1 + i]) (void)voxel::craft(inventory_, voxel::kRecipes[static_cast<std::size_t>(i)]);
+    if (crafting_open_) {
+      for (int i = 0; i < static_cast<int>(voxel::kRecipes.size()); ++i)
+        if (input.key_pressed[kKeyF1 + i])
+          (void)voxel::craft(inventory_, voxel::kRecipes[static_cast<std::size_t>(i)]);
+    }
     const bool wants_break =
         (input.mouse_pressed[0] && !bench_.running()) ||
         (bench_.running() && bench_.wants_edit() && bench_.edit_ready() &&
