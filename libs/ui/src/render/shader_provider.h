@@ -20,6 +20,7 @@
 #include "render/shaders/spirv.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,27 @@ struct ShaderWords {
     const std::uint32_t* words = nullptr;
     std::size_t count = 0;
 };
+
+// PCF filtering modes (must match mesh.frag PCF_MODE defines):
+// 0 = 3x3 PCF (baseline, 9 taps)
+// 1 = 2x2 PCF (4 taps)
+// 2 = 1-tap (single comparison, no filtering)
+// 3 = Optimized 3x3 PCF (9 taps, manually unrolled)
+inline int pcf_mode() {
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
+    const char* value = std::getenv("WS_SHADOW_PCF_MODE");
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+    if (value) {
+        int mode = std::atoi(value);
+        if (mode >= 0 && mode <= 3) return mode;
+    }
+    return 0;  // default: 3x3 PCF
+}
 
 #ifdef WS_UI_DEV_SHADER_RELOAD
 
@@ -76,11 +98,13 @@ inline ShaderWords mesh_vert_words() {
     return {kMeshVertSpv, sizeof(kMeshVertSpv) / sizeof(kMeshVertSpv[0])};
 }
 inline ShaderWords mesh_frag_words(bool bindless) {
+    int mode = pcf_mode();
     if (bindless) {
-        return {kMeshFragBindlessSpv,
-                sizeof(kMeshFragBindlessSpv) / sizeof(kMeshFragBindlessSpv[0])};
+        const std::uint32_t* base = kMeshFragBindlessSpv + kMeshFragBindlessSpvOffsets[mode];
+        return {base, static_cast<std::size_t>(kMeshFragBindlessSpvSizes[mode])};
     }
-    return {kMeshFragSpv, sizeof(kMeshFragSpv) / sizeof(kMeshFragSpv[0])};
+    const std::uint32_t* base = kMeshFragSpv + kMeshFragSpvOffsets[mode];
+    return {base, static_cast<std::size_t>(kMeshFragSpvSizes[mode])};
 }
 // The shadow-map pass's vertex stage (depth-only; no fragment stage).
 inline ShaderWords shadow_vert_words() {

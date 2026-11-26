@@ -65,14 +65,23 @@ layout(set = 1, binding = 0, std140) uniform Scene {
 } scene;
 layout(set = 1, binding = 1) uniform sampler2DShadow u_shadow;
 
+// PCF filtering modes (set via -DPCF_MODE at compile time):
+// 0 = 3x3 PCF (baseline, 9 taps)
+// 1 = 2x2 PCF (4 taps)
+// 2 = 1-tap (single comparison, no filtering)
+// 3 = Optimized 3x3 PCF (9 taps with precomputed offsets, same taps as mode 0)
+#ifndef PCF_MODE
+#define PCF_MODE 0
+#endif
+
 // The fraction of the directional light that reaches this fragment: 1 = fully
-// lit, 0 = fully shadowed. A 3x3 grid of comparison taps, each already a
-// bilinear 2x2 compare in hardware - soft, cheap edges. Anything outside the
-// map (or beyond its depth range) is treated as lit. textureLod, not
-// texture(): the early returns make this non-uniform control flow, where an
-// implicit derivative would be undefined (the map has one level anyway). The
-// tap offsets are computed in uv space (textureLodOffset would need
-// compile-time-constant offsets, which a loop cannot give).
+// lit, 0 = fully shadowed. PCF modes are selected at compile time to avoid
+// runtime branching. Each tap is a hardware bilinear 2x2 comparison (the
+// comparison sampler does the filtering). textureLod is used (not texture())
+// because early returns create non-uniform control flow where implicit
+// derivatives would be undefined (the shadow map has one mip level).
+// Tap offsets are computed in uv space (textureLodOffset requires
+// compile-time-constant offsets, which a loop cannot provide).
 float shadow_factor(vec3 world, vec3 n) {
     if (scene.shadow_params.x < 0.5 || (pc.flags & 1u) == 0u) {
         return 1.0;
@@ -91,6 +100,8 @@ float shadow_factor(vec3 world, vec3 n) {
         return 1.0;
     }
     float lit = 0.0;
+#if PCF_MODE == 0
+    // 3x3 PCF (baseline): 9 taps in a 3x3 grid
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             const vec2 tap = uv + vec2(float(x), float(y)) * scene.shadow_params.y;
@@ -98,6 +109,44 @@ float shadow_factor(vec3 world, vec3 n) {
         }
     }
     return lit / 9.0;
+#elif PCF_MODE == 1
+    // 2x2 PCF: 4 taps in a 2x2 grid (half the taps of 3x3)
+    for (int y = 0; y <= 1; ++y) {
+        for (int x = 0; x <= 1; ++x) {
+            const vec2 tap = uv + vec2(float(x) - 0.5, float(y) - 0.5) * scene.shadow_params.y;
+            lit += textureLod(u_shadow, vec3(tap, depth), 0.0);
+        }
+    }
+    return lit / 4.0;
+#elif PCF_MODE == 2
+    // 1-tap: single comparison at the center (no filtering, hard shadows)
+    lit = textureLod(u_shadow, vec3(uv, depth), 0.0);
+    return lit;
+#elif PCF_MODE == 3
+    // Optimized 3x3 PCF: same 9 taps as mode 0, but with manually unrolled
+    // loop to help the compiler with instruction scheduling and register
+    // allocation. The taps are identical to mode 0.
+    const float texel = scene.shadow_params.y;
+    lit += textureLod(u_shadow, vec3(uv + vec2(-texel, -texel), depth), 0.0);
+    lit += textureLod(u_shadow, vec3(uv + vec2( 0.0, -texel), depth), 0.0);
+    lit += textureLod(u_shadow, vec3(uv + vec2( texel, -texel), depth), 0.0);
+    lit += textureLod(u_shadow, vec3(uv + vec2(-texel,  0.0), depth), 0.0);
+    lit += textureLod(u_shadow, vec3(uv + vec2( 0.0,  0.0), depth), 0.0);
+    lit += textureLod(u_shadow, vec3(uv + vec2( texel,  0.0), depth), 0.0);
+    lit += textureLod(u_shadow, vec3(uv + vec2(-texel,  texel), depth), 0.0);
+    lit += textureLod(u_shadow, vec3(uv + vec2( 0.0,  texel), depth), 0.0);
+    lit += textureLod(u_shadow, vec3(uv + vec2( texel,  texel), depth), 0.0);
+    return lit / 9.0;
+#else
+    // Fallback: 3x3 PCF (same as mode 0)
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            const vec2 tap = uv + vec2(float(x), float(y)) * scene.shadow_params.y;
+            lit += textureLod(u_shadow, vec3(tap, depth), 0.0);
+        }
+    }
+    return lit / 9.0;
+#endif
 }
 
 // One light's contribution: Lambert diffuse into `diffuse`, the Blinn-Phong

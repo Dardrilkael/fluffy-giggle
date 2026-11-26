@@ -176,14 +176,26 @@ Compile-Spv $compiler (Join-Path $shaderDir "batch.frag") $fragBindlessSpv `
     -TargetEnv "vulkan1.1" -Defines @("WS_BINDLESS")
 
 # The r3d mesh pipeline's stages (mesh_spirv.h): the same flags, the same
-# two-tier fragment split as batch.frag.
+# two-tier fragment split as batch.frag, plus 4 PCF_MODE variants per tier.
 $meshVertSpv = Join-Path $tmp "mesh.vert.spv"
-$meshFragSpv = Join-Path $tmp "mesh.frag.spv"
-$meshFragBindlessSpv = Join-Path $tmp "mesh.frag-bindless.spv"
 Compile-Spv $compiler (Join-Path $shaderDir "mesh.vert") $meshVertSpv
-Compile-Spv $compiler (Join-Path $shaderDir "mesh.frag") $meshFragSpv
-Compile-Spv $compiler (Join-Path $shaderDir "mesh.frag") $meshFragBindlessSpv `
-    -TargetEnv "vulkan1.1" -Defines @("WS_BINDLESS")
+
+# PCF modes: 0=3x3, 1=2x2, 2=1tap, 3=3x3-opt
+$pcfModes = @(0, 1, 2, 3)
+$meshFragSpv = @()
+$meshFragBindlessSpv = @()
+foreach ($mode in $pcfModes) {
+    $modeSuffix = "pcf$mode"
+    $spvPath = Join-Path $tmp "mesh.frag-$modeSuffix.spv"
+    $spvBindlessPath = Join-Path $tmp "mesh.frag-bindless-$modeSuffix.spv"
+    Compile-Spv $compiler (Join-Path $shaderDir "mesh.frag") $spvPath `
+        -Defines @("PCF_MODE=$mode")
+    Compile-Spv $compiler (Join-Path $shaderDir "mesh.frag") $spvBindlessPath `
+        -TargetEnv "vulkan1.1" -Defines @("WS_BINDLESS", "PCF_MODE=$mode")
+    $meshFragSpv += $spvPath
+    $meshFragBindlessSpv += $spvBindlessPath
+}
+
 # The shadow-map pass's vertex stage (depth-only: no fragment shader).
 $shadowVertSpv = Join-Path $tmp "shadow.vert.spv"
 Compile-Spv $compiler (Join-Path $shaderDir "shadow.vert") $shadowVertSpv
@@ -194,8 +206,14 @@ $vertLines = [string[]](Emit-SpvArray $vertSpv)
 $fragLines = [string[]](Emit-SpvArray $fragSpv)
 $fragBindlessLines = [string[]](Emit-SpvArray $fragBindlessSpv)
 $meshVertLines = [string[]](Emit-SpvArray $meshVertSpv)
-$meshFragLines = [string[]](Emit-SpvArray $meshFragSpv)
-$meshFragBindlessLines = [string[]](Emit-SpvArray $meshFragBindlessSpv)
+$meshFragLines = @()
+$meshFragBindlessLines = @()
+foreach ($spv in $meshFragSpv) {
+    $meshFragLines += [string[]](Emit-SpvArray $spv)
+}
+foreach ($spv in $meshFragBindlessSpv) {
+    $meshFragBindlessLines += [string[]](Emit-SpvArray $spv)
+}
 $shadowVertLines = [string[]](Emit-SpvArray $shadowVertSpv)
 
 $header = New-Object System.Collections.Generic.List[string]
@@ -240,14 +258,101 @@ $meshHeader.Add("inline constexpr std::uint32_t kMeshVertSpv[] = {")
 $meshHeader.AddRange($meshVertLines)
 $meshHeader.Add("};")
 $meshHeader.Add("")
+
+# PCF_MODE variants: 0=3x3, 1=2x2, 2=1tap, 3=3x3-opt
+# Each variant is a complete SPIR-V module; the arrays are concatenated.
+# Offsets into the concatenated arrays for each mode:
+# kMeshFragSpvOffsets[mode] = starting index in kMeshFragSpv for that mode
+# kMeshFragSpvSizes[mode] = word count for that mode
+$pcfModes = @(0, 1, 2, 3)
+
+# Compute offsets and sizes for regular variants
+$fragOffsets = @()
+$fragSizes = @()
+$fragOffset = 0
+foreach ($spvPath in $meshFragSpv) {
+    $bytes = [System.IO.File]::ReadAllBytes($spvPath)
+    $wordCount = $bytes.Length / 4
+    $fragOffsets += $fragOffset
+    $fragSizes += $wordCount
+    $fragOffset += $wordCount
+}
+
+$meshHeader.Add("inline constexpr std::uint32_t kMeshFragSpvOffsets[] = {")
+foreach ($offset in $fragOffsets) {
+    $meshHeader.Add("    $offset,")
+}
+$meshHeader.Add("};")
+$meshHeader.Add("")
+$meshHeader.Add("inline constexpr std::uint32_t kMeshFragSpvSizes[] = {")
+foreach ($size in $fragSizes) {
+    $meshHeader.Add("    $size,")
+}
+$meshHeader.Add("};")
+$meshHeader.Add("")
+
+# Emit all fragment shader variants concatenated
 $meshHeader.Add("inline constexpr std::uint32_t kMeshFragSpv[] = {")
-$meshHeader.AddRange($meshFragLines)
+$modeIndex = 0
+foreach ($spvPath in $meshFragSpv) {
+    $bytes = [System.IO.File]::ReadAllBytes($spvPath)
+    $words = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $bytes.Length; $i += 4) {
+        $words.Add("0x{0:x8}" -f [System.BitConverter]::ToUInt32($bytes, $i))
+    }
+    $meshHeader.Add("    // PCF_MODE = $($pcfModes[$modeIndex])")
+    for ($j = 0; $j -lt $words.Count; $j += 8) {
+        $end = [Math]::Min($j + 7, $words.Count - 1)
+        $meshHeader.Add("    " + ($words[$j..$end] -join ", ") + ",")
+    }
+    $modeIndex++
+}
 $meshHeader.Add("};")
 $meshHeader.Add("")
+
+# Now emit bindless variants
+$fragOffsets = @()
+$fragSizes = @()
+$fragOffset = 0
+foreach ($spvPath in $meshFragBindlessSpv) {
+    $bytes = [System.IO.File]::ReadAllBytes($spvPath)
+    $wordCount = $bytes.Length / 4
+    $fragOffsets += $fragOffset
+    $fragSizes += $wordCount
+    $fragOffset += $wordCount
+}
+
+$meshHeader.Add("inline constexpr std::uint32_t kMeshFragBindlessSpvOffsets[] = {")
+foreach ($offset in $fragOffsets) {
+    $meshHeader.Add("    $offset,")
+}
+$meshHeader.Add("};")
+$meshHeader.Add("")
+$meshHeader.Add("inline constexpr std::uint32_t kMeshFragBindlessSpvSizes[] = {")
+foreach ($size in $fragSizes) {
+    $meshHeader.Add("    $size,")
+}
+$meshHeader.Add("};")
+$meshHeader.Add("")
+
 $meshHeader.Add("inline constexpr std::uint32_t kMeshFragBindlessSpv[] = {")
-$meshHeader.AddRange($meshFragBindlessLines)
+$modeIndex = 0
+foreach ($spvPath in $meshFragBindlessSpv) {
+    $bytes = [System.IO.File]::ReadAllBytes($spvPath)
+    $words = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $bytes.Length; $i += 4) {
+        $words.Add("0x{0:x8}" -f [System.BitConverter]::ToUInt32($bytes, $i))
+    }
+    $meshHeader.Add("    // PCF_MODE = $($pcfModes[$modeIndex])")
+    for ($j = 0; $j -lt $words.Count; $j += 8) {
+        $end = [Math]::Min($j + 7, $words.Count - 1)
+        $meshHeader.Add("    " + ($words[$j..$end] -join ", ") + ",")
+    }
+    $modeIndex++
+}
 $meshHeader.Add("};")
 $meshHeader.Add("")
+
 $meshHeader.Add("inline constexpr std::uint32_t kShadowVertSpv[] = {")
 $meshHeader.AddRange($shadowVertLines)
 $meshHeader.Add("};")
