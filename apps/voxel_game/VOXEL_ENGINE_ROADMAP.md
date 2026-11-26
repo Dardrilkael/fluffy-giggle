@@ -55,6 +55,12 @@ only as a deliberate API migration, never by duplicating the implementation.
 - [x] Classify all exposed faces and tile IDs in one chunk traversal, then
   build greedy masks by tile without rereading voxel neighbors.
 - [x] Cache chunk bounds/frustum visibility once per chunk per frame.
+- [x] Keep tile-indexed CPU mesh vectors in the renderer and clear them
+  without releasing capacity between rebuilds.
+- [x] Replace the per-rebuild heap face cache with a fixed-size cache.
+- [ ] Reuse the renderer API upload staging vectors and measure allocation
+  counts before/after; GPU upload still copies into its own mesh data.
+- [ ] Verify CPU/GPU suites on CI and target PC.
 
 **Exit:** same world geometry, CPU meshing without an active renderer, and no
 regression in edit-time p95 frame time.
