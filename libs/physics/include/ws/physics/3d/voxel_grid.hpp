@@ -155,7 +155,7 @@ class VoxelGrid3D {
       entered_axis = axis;
       entered_step = step[axis];
 
-      // A ray cannot re-enter the finite grid after leaving it.
+      // Once a ray is outside and moving farther away, it cannot hit the grid.
       const int grid_min =
           desc_.origin[static_cast<std::size_t>(axis)];
       const int grid_max =
@@ -225,6 +225,7 @@ class VoxelGrid3D {
  private:
   void depenetrate(MoveResult& result, float skin) const noexcept {
     for (int pass = 0; pass < 8; ++pass) {
+      if (!overlaps(result.bounds)) break;
       const Aabb& box = result.bounds;
       const int x0 = static_cast<int>(std::floor(box.min.x));
       const int y0 = static_cast<int>(std::floor(box.min.y));
