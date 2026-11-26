@@ -11,7 +11,7 @@ ws_add_app(voxel_game DEPENDS ws::ui ws::physics ws::audio)
 # world.cpp, which includes ws/ui headers), and DEPENDS carries the rest
 # (ws_add_test's LINK is SINGLE-value).
 ws_add_test(voxel_logic
-  SOURCES src/world.cpp tests/test_voxel_logic.cpp
+  SOURCES src/world.cpp src/player.cpp tests/test_voxel_logic.cpp
   LINK ws::ui
   DEPENDS ws::physics ws::audio)
 if(TARGET test_voxel_logic)
