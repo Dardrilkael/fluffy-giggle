@@ -259,7 +259,8 @@ bool Renderer2D::init(VkDevice device, VkPhysicalDevice physical_device,
     // leaves 2D fully working and mesh draws skipped, never a startup
     // failure.
     if (create_mesh_resources()) {
-        (void)create_mesh_pipeline(render_pass);
+        (void)create_mesh_pipeline(render_pass, true);
+        (void)create_mesh_pipeline(render_pass, false);
     }
     return true;
 }
@@ -286,15 +287,19 @@ bool Renderer2D::on_swapchain_recreated(VkRenderPass render_pass,
         // so it drifts with them (null-tolerated, like the others).
         vkDestroyPipeline(device_, pipeline_mesh_, nullptr);
         pipeline_mesh_ = VK_NULL_HANDLE;
+        vkDestroyPipeline(device_, pipeline_mesh_no_depth_write_, nullptr);
+        pipeline_mesh_no_depth_write_ = VK_NULL_HANDLE;
     }
     format_ = format;
     sample_count_ = sample_count;
     if (pipeline_ == VK_NULL_HANDLE && !create_pipeline(render_pass)) {
         return false;
     }
-    if (pipeline_mesh_ == VK_NULL_HANDLE &&
-        mesh_pipeline_layout_ != VK_NULL_HANDLE) {
-        (void)create_mesh_pipeline(render_pass);  // non-fatal, logged
+    if (mesh_pipeline_layout_ != VK_NULL_HANDLE) {
+        if (pipeline_mesh_ == VK_NULL_HANDLE)
+            (void)create_mesh_pipeline(render_pass, true);
+        if (pipeline_mesh_no_depth_write_ == VK_NULL_HANDLE)
+            (void)create_mesh_pipeline(render_pass, false);
     }
     return true;
 }
@@ -341,6 +346,10 @@ void Renderer2D::shutdown() {
     if (pipeline_mesh_ != VK_NULL_HANDLE) {
         vkDestroyPipeline(device_, pipeline_mesh_, nullptr);
         pipeline_mesh_ = VK_NULL_HANDLE;
+    }
+    if (pipeline_mesh_no_depth_write_ != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device_, pipeline_mesh_no_depth_write_, nullptr);
+        pipeline_mesh_no_depth_write_ = VK_NULL_HANDLE;
     }
     destroy_mesh_resources();
     if (pipeline_layout_ != VK_NULL_HANDLE) {
@@ -1212,7 +1221,10 @@ void Renderer2D::destroy_mesh_resources() {
     destroy_shadow_resources();
 }
 
-bool Renderer2D::create_mesh_pipeline(VkRenderPass render_pass) {
+bool Renderer2D::create_mesh_pipeline(VkRenderPass render_pass,
+                                       bool depth_write) {
+    VkPipeline& target_pipeline =
+        depth_write ? pipeline_mesh_ : pipeline_mesh_no_depth_write_;
     const spirv::ShaderWords vert_words = spirv::mesh_vert_words();
     const spirv::ShaderWords frag_words = spirv::mesh_frag_words(tier_.bindless);
     std::uint64_t vert_raw = 0;
@@ -1291,11 +1303,13 @@ bool Renderer2D::create_mesh_pipeline(VkRenderPass render_pass) {
                                   : VK_FRONT_FACE_CLOCKWISE;
     rasterization.lineWidth = 1.0f;
 
-    // The 3D billboard pipeline's depth state: LEQUAL + write.
+    // Both variants depth-test LEQUAL. Opaque geometry writes depth; the
+    // alpha-friendly variant leaves the depth buffer untouched so fully
+    // transparent texels reveal the already-rendered opaque world.
     VkPipelineDepthStencilStateCreateInfo depth{};
     depth.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depth.depthTestEnable = VK_TRUE;
-    depth.depthWriteEnable = VK_TRUE;
+    depth.depthWriteEnable = depth_write ? VK_TRUE : VK_FALSE;
     depth.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
 
     VkPipelineMultisampleStateCreateInfo multisample{};
@@ -1337,19 +1351,21 @@ bool Renderer2D::create_mesh_pipeline(VkRenderPass render_pass) {
     pipeline_info.renderPass = render_pass;
     pipeline_info.subpass = 0;
     const VkResult err = vkCreateGraphicsPipelines(
-        device_, pipeline_cache_, 1, &pipeline_info, nullptr, &pipeline_mesh_);
+        device_, pipeline_cache_, 1, &pipeline_info, nullptr, &target_pipeline);
     gpu_->destroy_shader_module(gfx::handle_to_u64(vert));  // baked in
     gpu_->destroy_shader_module(gfx::handle_to_u64(frag));
     if (err != VK_SUCCESS) {
-        pipeline_mesh_ = VK_NULL_HANDLE;
-        ws::core::error("ui: r3d - mesh pipeline creation failed ({}); mesh "
-                        "draws will be skipped",
+        target_pipeline = VK_NULL_HANDLE;
+        ws::core::error("ui: r3d - {} mesh pipeline creation failed ({}); "
+                        "that depth mode will fall back to the opaque pipeline",
+                        depth_write ? "opaque" : "alpha-friendly",
                         static_cast<int>(err));
         return false;
     }
     name_object(VK_OBJECT_TYPE_PIPELINE,
-                reinterpret_cast<std::uint64_t>(pipeline_mesh_),
-                "r3d mesh pipeline");
+                reinterpret_cast<std::uint64_t>(target_pipeline),
+                depth_write ? "r3d mesh pipeline (depth write)"
+                            : "r3d mesh pipeline (no depth write)");
     return true;
 }
 
@@ -2335,10 +2351,16 @@ void Renderer2D::flush(VkCommandBuffer cmd, uint32_t frame_slot,
         if (m.camera_epoch == 0 || m.camera_epoch > frame_cameras_.size()) {
             return;  // never recorded outside a block; a guard, not a path
         }
-        if (pipeline_mesh_ != bound) {
+        VkPipeline mesh_pipeline = m.depth_write
+            ? pipeline_mesh_
+            : (pipeline_mesh_no_depth_write_ != VK_NULL_HANDLE
+                   ? pipeline_mesh_no_depth_write_
+                   : pipeline_mesh_);
+        if (mesh_pipeline == VK_NULL_HANDLE) return;
+        if (mesh_pipeline != bound) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              pipeline_mesh_);
-            bound = pipeline_mesh_;
+                              mesh_pipeline);
+            bound = mesh_pipeline;
         }
         vkCmdSetScissor(cmd, 0, 1, &scissor);
 
