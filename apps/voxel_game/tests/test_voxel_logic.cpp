@@ -1359,6 +1359,27 @@ TEST_CASE("meshing: immutable worker snapshots match live-world output") {
       }
     }
   }
+
+  // A pair straddling the x=64 chunk seam must see each other through
+  // the copied halo; each chunk therefore emits five faces, not six.
+  voxel::World seam;
+  seam.generate(0x5EAu);
+  for (int cx : {3, 4}) {
+    for (int y = 0; y < voxel::kChunkSizeY; ++y)
+      for (int z = 0; z < voxel::kChunkSizeZ; ++z)
+        for (int x = 0; x < voxel::kChunkSizeX; ++x)
+          (void)seam.set_block(cx * voxel::kChunkSizeX + x, y,
+                               48 + z, voxel::Block::air);
+  }
+  CHECK(seam.set_block(63, 24, 56, voxel::Block::stone));
+  CHECK(seam.set_block(64, 24, 56, voxel::Block::stone));
+  for (int cx : {3, 4}) {
+    std::vector<voxel::CpuMeshData> tiles;
+    voxel::mesh_chunk_snapshot(seam.snapshot_chunk(cx, 3, 9), tiles);
+    std::size_t index_count = 0;
+    for (const auto& tile : tiles) index_count += tile.indices.size();
+    CHECK(index_count == 5u * 6u);
+  }
 }
 
 TEST_CASE("meshing: exposed faces are classified once and greedily grouped by texture") {
