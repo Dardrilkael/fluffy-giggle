@@ -753,6 +753,25 @@ TEST_CASE("worldgen: climate fields create distinct plains, desert and mountain 
   CHECK(exposed_stone > 0);
 }
 
+TEST_CASE("worldgen: lakes and river channels reach the water plane") {
+  const voxel::World world = make_world();
+  int water_cells = 0;
+  int exposed_water_tops = 0;
+  for (int x = 0; x < voxel::kWorldSizeX; ++x) {
+    for (int z = 0; z < voxel::kWorldSizeZ; ++z) {
+      for (int y = 0; y < voxel::kChunkSizeY - 1; ++y) {
+        if (world.block_at(x, y, z) != voxel::Block::water) continue;
+        ++water_cells;
+        if (world.block_at(x, y + 1, z) == voxel::Block::air) {
+          ++exposed_water_tops;
+        }
+      }
+    }
+  }
+  CHECK(water_cells > 0);
+  CHECK(exposed_water_tops > 0);
+}
+
 TEST_CASE("worldgen: 3D caves carve connected underground air pockets") {
   const voxel::World world = make_world();
   int underground_air = 0;
