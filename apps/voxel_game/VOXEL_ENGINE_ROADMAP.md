@@ -67,14 +67,14 @@ regression in edit-time p95 frame time.
 
 ### 2 — bounded asynchronous meshing
 
-- [ ] Fixed-capacity dirty-chunk queue with duplicate coalescing.
-- [ ] Monotonically increasing per-chunk revisions.
-- [ ] Immutable chunk-plus-halo snapshots before worker dispatch.
-- [ ] Worker threads mesh snapshots only; no renderer/GPU access.
-- [ ] Discard results whose source revision is stale.
-- [ ] Render-thread upload under a per-frame byte/job budget.
+- [x] Fixed-capacity dirty-chunk queue with duplicate coalescing.
+- [x] Monotonically increasing per-chunk revisions.
+- [x] Immutable chunk-plus-halo snapshots before worker dispatch.
+- [x] Worker thread meshes snapshots only; no renderer/GPU access.
+- [x] Discard results whose source revision is stale.
+- [x] Render-thread upload with a two-chunk-per-frame job budget.
 - [ ] Prioritize camera-near chunks without starving initial generation.
-- [ ] Join workers before releasing snapshots during shutdown.
+- [x] Join worker before releasing snapshots during shutdown.
 
 **Exit:** gameplay edits never synchronously mesh/upload; stale jobs cannot
 overwrite current geometry; queue memory is bounded.
