@@ -25,6 +25,8 @@ struct FrameTimings {
     float cpu_mesh_ms = 0.0f;
     float upload_ms = 0.0f;
     float draw_ms = 0.0f;  // CPU draw-command recording/submission only
+    float gpu_frame_ms = 0.0f; // completed Vulkan timestamp interval
+    bool gpu_frame_valid = false; // true only for a newly resolved sample
     std::uint64_t upload_bytes = 0;
     std::uint64_t mesh_vertices = 0;
     std::uint64_t mesh_indices = 0;
