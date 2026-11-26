@@ -407,7 +407,9 @@ class VoxelApp final : public ws::ui::App {
       settings_action(frame);
       r2d::begin(); r2d::set_layer(0);
       r2d::draw_quad(0, 0, frame.width, frame.height, r2d::rgba(135,196,250));
-      const auto cam = voxel::begin_scene(player_, settings_.fov_degrees, settings_.render_distance);
+      const auto cam = voxel::begin_scene(player_, settings_.fov_degrees,
+                                             settings_.render_distance,
+                                             benchmark_shadow_flags_.cast);
       voxel::draw_world(voxel_renderer_, tile_textures_, cam,
                          frame.width / frame.height, nullptr,
                          benchmark_shadow_flags_.cast,
@@ -429,7 +431,9 @@ class VoxelApp final : public ws::ui::App {
                      r2d::rgba(135, 196, 250));
       r2d::end();
 
-      const auto cam = voxel::begin_scene(player_, settings_.fov_degrees, settings_.render_distance);
+      const auto cam = voxel::begin_scene(player_, settings_.fov_degrees,
+                                             settings_.render_distance,
+                                             benchmark_shadow_flags_.cast);
       voxel::draw_world(voxel_renderer_, tile_textures_, cam,
                          frame.width / frame.height, nullptr,
                          benchmark_shadow_flags_.cast,
@@ -465,7 +469,9 @@ class VoxelApp final : public ws::ui::App {
       // The panels are modal: do not move or edit the world while open.
       r2d::begin(); r2d::set_layer(0);
       r2d::draw_quad(0, 0, frame.width, frame.height, r2d::rgba(135,196,250));
-      const auto cam = voxel::begin_scene(player_, settings_.fov_degrees, settings_.render_distance);
+      const auto cam = voxel::begin_scene(player_, settings_.fov_degrees,
+                                             settings_.render_distance,
+                                             benchmark_shadow_flags_.cast);
       voxel::draw_world(voxel_renderer_, tile_textures_, cam,
                          frame.width / frame.height, nullptr,
                          benchmark_shadow_flags_.cast,
@@ -576,7 +582,9 @@ class VoxelApp final : public ws::ui::App {
                    r2d::rgba(135, 196, 250));
     r2d::end();
 
-    const auto cam = voxel::begin_scene(player_, settings_.fov_degrees, settings_.render_distance);
+    const auto cam = voxel::begin_scene(player_, settings_.fov_degrees,
+                                             settings_.render_distance,
+                                             benchmark_shadow_flags_.cast);
     const auto draw_t0 = std::chrono::steady_clock::now();
     voxel::draw_world(voxel_renderer_, tile_textures_, cam,
                        frame.width / frame.height, &last_counters_,
