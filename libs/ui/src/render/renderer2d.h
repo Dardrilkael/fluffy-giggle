@@ -417,6 +417,8 @@ public:
     }
 
 private:
+    void collect_gpu_timing(uint32_t frame_slot);
+
     // Per-frame warn kinds, one bit each: frame_begin() clears the mask, a
     // kind's first occurrence fires and sets its bit - so distinct problems
     // each get their one warn instead of the first problem silencing the
