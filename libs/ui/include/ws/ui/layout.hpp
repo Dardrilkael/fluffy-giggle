@@ -58,7 +58,7 @@ inline constexpr float kButtonGap = 14.0f;
     float frame_w, float frame_h, float x, float y) noexcept {
   const auto buttons = layout(frame_w, frame_h);
   for (int i = 0; i < kButtonCount; ++i) {
-    if (hit(buttons[static_cast<std::size_t>(i)], x, y)) return i;
+    if (layout::hit(buttons[static_cast<std::size_t>(i)], x, y)) return i;
   }
   return -1;
 }
@@ -104,7 +104,7 @@ struct Slot {
     float frame_w, float frame_h, float x, float y) noexcept {
   const auto slots = layout(frame_w, frame_h);
   for (const Slot& slot : slots) {
-    if (hit(slot.bounds, x, y)) return slot.index;
+    if (layout::hit(slot.bounds, x, y)) return slot.index;
   }
   return -1;
 }
