@@ -53,6 +53,7 @@ _ws_declare_lib(ui        DEPENDS core math input gfx jobs settings app platform
 _ws_declare_lib(audio     DEPENDS core)
 _ws_declare_lib(net       DEPENDS core)
 _ws_declare_lib(physics   DEPENDS core math)
+_ws_declare_lib(gameplay DEPENDS core)
 _ws_declare_lib(spice     DEPENDS core math)
 _ws_declare_lib(circsim   DEPENDS core math spice settings plotmath)
 _ws_declare_lib(schematic DEPENDS core math)
