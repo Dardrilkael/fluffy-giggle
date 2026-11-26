@@ -14,6 +14,7 @@
 #include <doctest/doctest.h>
 
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <string>
 
@@ -1037,4 +1038,261 @@ TEST_CASE("worldgen: ores and leaves use the expanded block palette") {
   CHECK(coal > 0);
   CHECK(iron > 0);
   CHECK(leaves > 0);
+}
+TEST_CASE("culling: independent frustum oracle covers multiple camera poses") {
+  struct CameraCase {
+    std::array<float, 3> eye;
+    std::array<float, 3> direction;
+    float fov_degrees;
+    float aspect;
+  };
+  const CameraCase cameras[] = {
+      {{64.0f, -32.0f, -64.0f}, {0.19f, 0.07f, -0.98f}, 63.0f,
+       16.0f / 9.0f},
+      {{64.0f, -32.0f, -64.0f}, {0.99f, 0.04f, -0.10f}, 87.0f,
+       4.0f / 3.0f},
+      {{36.0f, -18.0f, -82.0f}, {-0.24f, -0.26f, 0.94f}, 101.0f,
+       16.0f / 10.0f},
+  };
+
+  constexpr float kNear = 0.03f;
+  constexpr float kFar = 260.0f;
+  constexpr float kMargin = 1.0e-4f;
+  const float up_hint[3] = {0.0f, -1.0f, 0.0f};
+
+  for (const CameraCase& camera : cameras) {
+    float forward[3] = {camera.direction[0], camera.direction[1],
+                        camera.direction[2]};
+    const float forward_length = std::sqrt(
+        forward[0] * forward[0] + forward[1] * forward[1] +
+        forward[2] * forward[2]);
+    REQUIRE(forward_length > 0.0f);
+    for (float& component : forward) component /= forward_length;
+
+    // Build the reference camera basis independently from the extracted
+    // plane coefficients. This oracle uses camera-space inequalities:
+    // near <= depth <= far, |horizontal| <= depth*tan(half-FOVx),
+    // |vertical| <= depth*tan(half-FOVy).
+    float right[3] = {
+        forward[1] * up_hint[2] - forward[2] * up_hint[1],
+        forward[2] * up_hint[0] - forward[0] * up_hint[2],
+        forward[0] * up_hint[1] - forward[1] * up_hint[0]};
+    const float right_length = std::sqrt(
+        right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);
+    REQUIRE(right_length > 0.0f);
+    for (float& component : right) component /= right_length;
+    const float up[3] = {
+        right[1] * forward[2] - right[2] * forward[1],
+        right[2] * forward[0] - right[0] * forward[2],
+        right[0] * forward[1] - right[1] * forward[0]};
+
+    const float fov = camera.fov_degrees *
+                      std::numbers::pi_v<float> / 180.0f;
+    const float tan_vertical = std::tan(fov * 0.5f);
+    const float tan_horizontal = tan_vertical * camera.aspect;
+    const auto fr = voxel::culling::extract_frustum(
+        camera.eye.data(),
+        std::array<float, 3>{
+            camera.eye[0] + forward[0],
+            camera.eye[1] + forward[1],
+            camera.eye[2] + forward[2]}.data(),
+        up_hint, fov, camera.aspect, kNear, kFar);
+
+    int inside_points = 0;
+    int outside_points = 0;
+    int sampled_chunks = 0;
+    int accepted_chunks = 0;
+    int rejected_chunks = 0;
+
+    for (int cz = 0; cz < voxel::kWorldChunksZ; ++cz) {
+      for (int cx = 0; cx < voxel::kWorldChunksX; ++cx) {
+        const float lo[3] = {
+            static_cast<float>(cx * voxel::kChunkSizeX),
+            -static_cast<float>(voxel::kChunkSizeY),
+            -static_cast<float>((cz + 1) * voxel::kChunkSizeZ)};
+        const float hi[3] = {
+            static_cast<float>((cx + 1) * voxel::kChunkSizeX), 0.0f,
+            -static_cast<float>(cz * voxel::kChunkSizeZ)};
+
+        bool has_interior_sample = false;
+        for (int iz = 0; iz <= 8; ++iz) {
+          for (int iy = 0; iy <= 4; ++iy) {
+            for (int ix = 0; ix <= 8; ++ix) {
+              const float point[3] = {
+                  lo[0] + (hi[0] - lo[0]) * static_cast<float>(ix) / 8.0f,
+                  lo[1] + (hi[1] - lo[1]) * static_cast<float>(iy) / 4.0f,
+                  lo[2] + (hi[2] - lo[2]) * static_cast<float>(iz) / 8.0f};
+              const float delta[3] = {
+                  point[0] - camera.eye[0],
+                  point[1] - camera.eye[1],
+                  point[2] - camera.eye[2]};
+              const auto dot3 = [](const float a[3], const float b[3]) {
+                return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+              };
+              const float depth = dot3(delta, forward);
+              const float horizontal = dot3(delta, right);
+              const float vertical = dot3(delta, up);
+              const float horizontal_limit = depth * tan_horizontal;
+              const float vertical_limit = depth * tan_vertical;
+
+              const bool reference_inside =
+                  depth > kNear + kMargin && depth < kFar - kMargin &&
+                  std::abs(horizontal) < horizontal_limit - kMargin &&
+                  std::abs(vertical) < vertical_limit - kMargin;
+              const bool reference_outside =
+                  depth < kNear - kMargin || depth > kFar + kMargin ||
+                  std::abs(horizontal) > horizontal_limit + kMargin ||
+                  std::abs(vertical) > vertical_limit + kMargin;
+
+              if (reference_inside) {
+                ++inside_points;
+                has_interior_sample = true;
+                CHECK(voxel::culling::aabb_visible(fr, point, point));
+              } else if (reference_outside) {
+                ++outside_points;
+                CHECK_FALSE(voxel::culling::aabb_visible(fr, point, point));
+              }
+            }
+          }
+        }
+
+        const bool accepted = voxel::culling::aabb_visible(fr, lo, hi);
+        if (accepted) {
+          ++accepted_chunks;
+        } else {
+          ++rejected_chunks;
+        }
+        if (has_interior_sample) {
+          ++sampled_chunks;
+          // A visible point inside the chunk is a strict no-false-negative
+          // requirement. Corner-only overlap may conservatively add chunks.
+          CHECK(accepted);
+        }
+      }
+    }
+
+    CHECK(inside_points > 0);
+    CHECK(outside_points > 0);
+    CHECK(sampled_chunks > 0);
+    CHECK(accepted_chunks > 0);
+    CHECK(rejected_chunks > 0);
+  }
+}
+
+TEST_CASE("player: replaying the same input sequence is bit-for-bit deterministic") {
+  voxel::World world_a;
+  voxel::World world_b;
+  world_a.generate(0x51A7E5u);
+  world_b.generate(0x51A7E5u);
+  const auto grid_a = world_a.collision_grid();
+  const auto grid_b = world_b.collision_grid();
+  const int surface = world_a.surface_height(64, 64);
+  REQUIRE(surface >= 0);
+
+  voxel::Player first;
+  voxel::Player replay;
+  const ws::math::Vec3 spawn{
+      64.5f, static_cast<float>(surface) + 4.0f, 64.5f};
+  REQUIRE(first.spawn(spawn));
+  REQUIRE(replay.spawn(spawn));
+
+  const auto same_bits = [](float lhs, float rhs) {
+    return std::bit_cast<std::uint32_t>(lhs) ==
+           std::bit_cast<std::uint32_t>(rhs);
+  };
+  const auto compare_state = [&]() {
+    const auto a_position = first.position();
+    const auto b_position = replay.position();
+    CHECK(same_bits(a_position.x, b_position.x));
+    CHECK(same_bits(a_position.y, b_position.y));
+    CHECK(same_bits(a_position.z, b_position.z));
+
+    const auto a_velocity = first.velocity();
+    const auto b_velocity = replay.velocity();
+    CHECK(same_bits(a_velocity.x, b_velocity.x));
+    CHECK(same_bits(a_velocity.y, b_velocity.y));
+    CHECK(same_bits(a_velocity.z, b_velocity.z));
+    CHECK(same_bits(first.yaw_radians(), replay.yaw_radians()));
+
+    const auto a_look = first.look_direction();
+    const auto b_look = replay.look_direction();
+    CHECK(same_bits(a_look.x, b_look.x));
+    CHECK(same_bits(a_look.y, b_look.y));
+    CHECK(same_bits(a_look.z, b_look.z));
+    CHECK(first.grounded() == replay.grounded());
+  };
+
+  constexpr int kFrames = 720;
+  for (int frame = 0; frame < kFrames; ++frame) {
+    voxel::Player::MoveInput input{};
+    input.forward = frame < 160 || (frame >= 420 && frame < 550);
+    input.left = frame >= 160 && frame < 260;
+    input.right = frame >= 260 && frame < 420;
+    input.back = frame >= 620 && frame < 700;
+    input.sprint = frame % 240 >= 180;
+    input.jump = frame == 0 || frame == 160 || frame == 420 || frame == 620;
+    input.look_dx =
+        static_cast<float>((frame * 17) % 19 - 9) * 0.125f;
+    input.look_dy =
+        static_cast<float>((frame * 11) % 15 - 7) * 0.0625f;
+    const float dt = frame % 3 == 0 ? 1.0f / 60.0f
+                     : frame % 3 == 1 ? 1.0f / 120.0f
+                                      : 1.0f / 75.0f;
+
+    first.tick(input, dt, grid_a);
+    replay.tick(input, dt, grid_b);
+    compare_state();
+  }
+}
+
+TEST_CASE("menu: touching rectangles have unambiguous half-open edge ownership") {
+  using voxel::menu::Button;
+  using voxel::menu::hit;
+
+  const Button left{0.0f, 0.0f, 10.0f, 10.0f};
+  const Button right{10.0f, 0.0f, 10.0f, 10.0f};
+  CHECK_FALSE(hit(left, 10.0f, 5.0f));
+  CHECK(hit(right, 10.0f, 5.0f));
+
+  const Button top{0.0f, 0.0f, 10.0f, 10.0f};
+  const Button bottom{0.0f, 10.0f, 10.0f, 10.0f};
+  CHECK_FALSE(hit(top, 5.0f, 10.0f));
+  CHECK(hit(bottom, 5.0f, 10.0f));
+
+  // Four rectangles meet at (10,10). The half-open convention assigns
+  // the shared corner to exactly the bottom-right rectangle.
+  const Button top_left{0.0f, 0.0f, 10.0f, 10.0f};
+  const Button top_right{10.0f, 0.0f, 10.0f, 10.0f};
+  const Button bottom_left{0.0f, 10.0f, 10.0f, 10.0f};
+  const Button bottom_right{10.0f, 10.0f, 10.0f, 10.0f};
+  CHECK_FALSE(hit(top_left, 10.0f, 10.0f));
+  CHECK_FALSE(hit(top_right, 10.0f, 10.0f));
+  CHECK_FALSE(hit(bottom_left, 10.0f, 10.0f));
+  CHECK(hit(bottom_right, 10.0f, 10.0f));
+
+  constexpr float fw = 320.0f;
+  constexpr float fh = 240.0f;
+  CHECK(voxel::menu::click_action(fw, fh, -0.01f, fh * 0.5f) == -1);
+  CHECK(voxel::menu::click_action(fw, fh, fw + 0.01f, fh * 0.5f) == -1);
+  CHECK(voxel::menu::click_action(fw, fh, fw * 0.5f, -0.01f) == -1);
+  CHECK(voxel::menu::click_action(fw, fh, fw * 0.5f, fh + 0.01f) == -1);
+}
+
+TEST_CASE("perf: frame evidence structs start clear and duration conversion is exact") {
+  const auto t0 = std::chrono::steady_clock::time_point{};
+  const auto t1 = t0 + std::chrono::microseconds{125000};
+  CHECK(voxel::perf::ms_since(t0, t1) == doctest::Approx(125.0f));
+
+  const voxel::perf::FrameTimings timings{};
+  CHECK(timings.total_ms == 0.0f);
+  CHECK(timings.physics_ms == 0.0f);
+  CHECK(timings.meshes_ms == 0.0f);
+  CHECK(timings.draw_ms == 0.0f);
+
+  const voxel::perf::Counters counters{};
+  CHECK(counters.draw_calls == 0);
+  CHECK(counters.triangles == 0);
+  CHECK(counters.bodies == 0);
+  CHECK(counters.meshes == 0);
+  CHECK(counters.chunk_vis == 0);
 }
