@@ -53,7 +53,7 @@ inline constexpr float kProbeDistance = 18.0f;
     if (!hit.hit || hit.distance < 0.25f) continue;
 
     const Block surface = world.block_at(
-        hit.cell[0], hit.cell[1], hit.cell[2]);
+        hit.cell.x, hit.cell.y, hit.cell.z);
     const float material_gain = reflectivity(surface);
     if (material_gain <= 0.0f) continue;
 
