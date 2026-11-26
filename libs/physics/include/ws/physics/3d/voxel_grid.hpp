@@ -52,6 +52,7 @@ class VoxelGrid3D {
     }
   };
 
+  VoxelGrid3D() noexcept = default;
   explicit VoxelGrid3D(Desc desc) noexcept : desc_(desc) {}
 
   [[nodiscard]] bool valid() const noexcept {
