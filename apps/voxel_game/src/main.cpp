@@ -547,15 +547,17 @@ class VoxelApp final : public ws::ui::App {
     r2d::end();
 
     // --- the instrumentation close -----------------------------------------
-    timings.total_ms = voxel::perf::ms_since(frame_t0);
-    last_timings_ = timings;
-    frame_times_.add(timings.total_ms);
+    // Refresh percentiles from the preceding window first, then close this
+    // frame's timer so the occasional bounded sort is included in frame cost.
     const auto percentile_now = std::chrono::steady_clock::now();
     if (percentile_clock_.time_since_epoch().count() == 0 ||
         percentile_now - percentile_clock_ >= std::chrono::seconds(1)) {
       frame_percentiles_ = frame_times_.percentiles();
       percentile_clock_ = percentile_now;
     }
+    timings.total_ms = voxel::perf::ms_since(frame_t0);
+    last_timings_ = timings;
+    frame_times_.add(timings.total_ms);
     if (bench_.running()) {
       ++bench_frame_;
       bench_.frame(frame_dt, timings, last_counters_);
