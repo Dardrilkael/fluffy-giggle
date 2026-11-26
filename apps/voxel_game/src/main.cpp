@@ -58,6 +58,7 @@
 #include <ws/ui/renderer3d.hpp>
 
 #include "menu.hpp"
+#include "inventory.hpp"
 #include "bench.hpp"
 #include "perf.hpp"
 #include "player.hpp"
@@ -79,14 +80,67 @@ constexpr int kKeySpace = 32;
 constexpr int kKeyShiftL = 340;  // GLFW_KEY_LEFT_SHIFT
 constexpr int kKey1 = 49;
 
-// The hotbar's place-able types, slot order (keys 1-5).
-constexpr voxel::Block kHotbar[5] = {
-    voxel::Block::grass, voxel::Block::dirt, voxel::Block::stone,
-    voxel::Block::wood, voxel::Block::sand,
-};
-constexpr int kHotbarSlots = 5;
-constexpr const char* kHotbarNames[kHotbarSlots] = {"grass", "dirt",
-                                                    "stone", "wood", "sand"};
+constexpr int kHotbarSlots = static_cast<int>(voxel::kHotbarSize);
+constexpr int kKeyE = 69;
+constexpr int kKeyC = 67;
+constexpr int kKeyF1 = 290;
+
+[[nodiscard]] const char* item_name(voxel::Item item) {
+  constexpr const char* names[] = {"grass","dirt","stone","wood","sand",
+    "cobble","planks","sticks","bricks","glass","leaves","coal","iron ore","iron"};
+  return names[static_cast<std::size_t>(item)];
+}
+[[nodiscard]] std::uint32_t item_tint(voxel::Item item) {
+  switch (item) {
+    case voxel::Item::grass: return voxel::tint_of(voxel::Block::grass);
+    case voxel::Item::dirt: return voxel::tint_of(voxel::Block::dirt);
+    case voxel::Item::stone: return voxel::tint_of(voxel::Block::stone);
+    case voxel::Item::wood: return voxel::tint_of(voxel::Block::wood);
+    case voxel::Item::sand: return voxel::tint_of(voxel::Block::sand);
+    case voxel::Item::cobblestone: return voxel::tint_of(voxel::Block::cobblestone);
+    case voxel::Item::planks: return voxel::tint_of(voxel::Block::planks);
+    case voxel::Item::bricks: return voxel::tint_of(voxel::Block::bricks);
+    case voxel::Item::glass: return voxel::tint_of(voxel::Block::glass);
+    case voxel::Item::leaves: return voxel::tint_of(voxel::Block::leaves);
+    case voxel::Item::coal: return voxel::tint_of(voxel::Block::coal_ore);
+    case voxel::Item::iron_ore: return voxel::tint_of(voxel::Block::iron_ore);
+    case voxel::Item::sticks: return r2d::rgba(180,140,90);
+    case voxel::Item::iron_ingot: return r2d::rgba(205,210,220);
+    default: return r2d::rgba(255,255,255);
+  }
+}
+[[nodiscard]] bool item_to_block(voxel::Item item, voxel::Block& block) {
+  switch (item) {
+    case voxel::Item::grass: block=voxel::Block::grass; return true;
+    case voxel::Item::dirt: block=voxel::Block::dirt; return true;
+    case voxel::Item::stone: block=voxel::Block::stone; return true;
+    case voxel::Item::wood: block=voxel::Block::wood; return true;
+    case voxel::Item::sand: block=voxel::Block::sand; return true;
+    case voxel::Item::cobblestone: block=voxel::Block::cobblestone; return true;
+    case voxel::Item::planks: block=voxel::Block::planks; return true;
+    case voxel::Item::bricks: block=voxel::Block::bricks; return true;
+    case voxel::Item::glass: block=voxel::Block::glass; return true;
+    case voxel::Item::leaves: block=voxel::Block::leaves; return true;
+    default: return false;
+  }
+}
+[[nodiscard]] voxel::Item block_drop(voxel::Block block) {
+  switch (block) {
+    case voxel::Block::grass: return voxel::Item::grass;
+    case voxel::Block::dirt: return voxel::Item::dirt;
+    case voxel::Block::stone: return voxel::Item::cobblestone;
+    case voxel::Block::wood: return voxel::Item::wood;
+    case voxel::Block::sand: return voxel::Item::sand;
+    case voxel::Block::cobblestone: return voxel::Item::cobblestone;
+    case voxel::Block::planks: return voxel::Item::planks;
+    case voxel::Block::bricks: return voxel::Item::bricks;
+    case voxel::Block::glass: return voxel::Item::glass;
+    case voxel::Block::leaves: return voxel::Item::leaves;
+    case voxel::Block::coal_ore: return voxel::Item::coal;
+    case voxel::Block::iron_ore: return voxel::Item::iron_ore;
+    default: return voxel::Item::dirt;
+  }
+}
 
 // --- sound: the break/place one-shots (bounce's synth pattern) -------------------
 constexpr std::uint32_t kRate = 44'100;
@@ -172,6 +226,14 @@ class VoxelApp final : public ws::ui::App {
       dead_ = true;
       return;
     }
+
+    // Starter supplies make the sandbox immediately playable; all later
+    // blocks must be gathered or crafted.
+    (void)inventory_.add(voxel::Item::grass, 32);
+    (void)inventory_.add(voxel::Item::dirt, 32);
+    (void)inventory_.add(voxel::Item::stone, 32);
+    (void)inventory_.add(voxel::Item::wood, 16);
+    (void)inventory_.add(voxel::Item::sand, 16);
 
     // --- the chunk meshes (the renderer's one-time upload) -----------------
     world_.rebuild_all();
@@ -290,6 +352,19 @@ class VoxelApp final : public ws::ui::App {
       return;
     }
 
+    if (input.key_pressed[kKeyE]) inventory_open_ = !inventory_open_;
+    if (input.key_pressed[kKeyC]) crafting_open_ = !crafting_open_;
+    if (inventory_open_ || crafting_open_) {
+      // The panels are modal: do not move or edit the world while open.
+      r2d::begin(); r2d::set_layer(0);
+      r2d::draw_quad(0, 0, frame.width, frame.height, r2d::rgba(135,196,250));
+      const auto cam = voxel::begin_scene(player_, frame.width / frame.height);
+      voxel::draw_world(world_, tile_textures_, cam, frame.width / frame.height);
+      r2d::end();
+      r2d::begin(); r2d::set_layer(10); draw_hud(frame); draw_inventory_panels(frame); r2d::end();
+      return;
+    }
+
     // --- the controller tick -------------------------------------------------
     voxel::Player::MoveInput move{};
     if (bench_.running()) {
@@ -314,11 +389,10 @@ class VoxelApp final : public ws::ui::App {
     timings.physics_ms = voxel::perf::ms_since(phys_t0);
 
     // --- hotbar + break/place ------------------------------------------------
-    for (int i = 0; i < kHotbarSlots; ++i) {
-      if (input.key_pressed[kKey1 + i]) {
-        hotbar_ = i;
-      }
-    }
+    for (int i = 0; i < kHotbarSlots; ++i)
+      if (input.key_pressed[kKey1 + i]) hotbar_ = i;
+    for (int i = 0; i < static_cast<int>(voxel::kRecipes.size()); ++i)
+      if (input.key_pressed[kKeyF1 + i]) (void)voxel::craft(inventory_, voxel::kRecipes[static_cast<std::size_t>(i)]);
     const bool wants_break =
         (input.mouse_pressed[0] && !bench_.running()) ||
         (bench_.running() && bench_.wants_edit() && bench_.edit_ready() &&
@@ -342,8 +416,10 @@ class VoxelApp final : public ws::ui::App {
       const float dir[3] = {look.x, look.y, look.z};
       const voxel::World::RayHit hit = world_.raycast(origin, dir, 7.0f);
       if (do_break && hit.hit) {  // break
+        const voxel::Block broken = world_.block_at(hit.cell[0], hit.cell[1], hit.cell[2]);
         if (world_.set_block(hit.cell[0], hit.cell[1], hit.cell[2],
                              voxel::Block::air)) {
+          (void)inventory_.add(block_drop(broken), 1);
           rebuild_around(hit.cell[0], hit.cell[2]);
           play_sound(kSoundBreak, 0.9f);
         }
@@ -351,12 +427,15 @@ class VoxelApp final : public ws::ui::App {
         const int px = hit.cell[0] + hit.normal[0];
         const int py = hit.cell[1] + hit.normal[1];
         const int pz = hit.cell[2] + hit.normal[2];
-        const voxel::Block place = kHotbar[hotbar_];
+        const auto& selected = inventory_.slot(static_cast<std::size_t>(hotbar_));
+        voxel::Block place{};
+        const bool placeable = !selected.empty() && item_to_block(selected.item, place);
         // Place only into air, and never entomb the player (the AABB
         // overlap rule - the classic voxel place guard).
-        if (world_.block_at(px, py, pz) == voxel::Block::air &&
+        if (placeable && world_.block_at(px, py, pz) == voxel::Block::air &&
             !overlaps_player(px, py, pz)) {
           if (world_.set_block(px, py, pz, place)) {
+            (void)inventory_.remove(selected.item, 1);
             rebuild_around(px, pz);
             play_sound(kSoundPlace, 0.8f);
           }
@@ -427,8 +506,8 @@ class VoxelApp final : public ws::ui::App {
     r2d::draw_line(cx, cy - 7.0f, cx, cy + 7.0f, 2.0f,
                    r2d::rgba(255, 255, 255, 220));
 
-    // The hotbar: 5 slots along the bottom, the selected one framed.
-    constexpr float slot_w = 96.0f;
+    // Nine-slot hotbar, backed by the first nine inventory slots.
+    constexpr float slot_w = 72.0f;
     constexpr float bar_w = slot_w * kHotbarSlots;
     const float bx = (frame.width - bar_w) * 0.5f;
     const float by = frame.height - 48.0f;
@@ -437,13 +516,14 @@ class VoxelApp final : public ws::ui::App {
       const bool selected = i == hotbar_;
       r2d::draw_quad(sx, by, slot_w - 6.0f, 38.0f,
                      r2d::rgba(28, 30, 36, 200));
-      r2d::draw_quad(sx + 6.0f, by + 7.0f, 24.0f, 24.0f,
-                     voxel::tint_of(kHotbar[i]));
-      char label[24];
-      std::snprintf(label, sizeof(label), "%d %s", i + 1, kHotbarNames[i]);
-      (void)r2d::draw_text(sx + 36.0f, by + 10.0f, label, font_,
-                           selected ? r2d::rgba(255, 255, 255)
-                                    : r2d::rgba(168, 172, 182));
+      const auto& stack = inventory_.slot(static_cast<std::size_t>(i));
+      if (!stack.empty()) {
+        r2d::draw_quad(sx + 5.0f, by + 6.0f, 22.0f, 22.0f, item_tint(stack.item));
+        char label[32]; std::snprintf(label, sizeof(label), "%d %s", i + 1, item_name(stack.item));
+        (void)r2d::draw_text(sx + 30.0f, by + 5.0f, label, font_, selected ? r2d::rgba(255,255,255) : r2d::rgba(168,172,182));
+        char amount[8]; std::snprintf(amount, sizeof(amount), "%u", stack.count);
+        (void)r2d::draw_text(sx + 50.0f, by + 23.0f, amount, font_, r2d::rgba(255,255,255));
+      }
       if (selected) {
         r2d::draw_line(sx - 1.0f, by - 1.0f, sx + slot_w - 7.0f, by - 1.0f,
                        2.0f, r2d::rgba(255, 255, 255, 210));
@@ -483,8 +563,35 @@ class VoxelApp final : public ws::ui::App {
     (void)r2d::draw_text(
         12.0f, 32.0f,
         "LMB break - RMB place - 1-5 select - WASD move - space jump - "
-        "shift sprint - esc menu",
+        "shift sprint - E inventory - C crafting - F1-F6 craft - esc menu",
         font_, r2d::rgba(160, 164, 174));
+  }
+
+  void draw_inventory_panels(const r2d::FrameSize& frame) {
+    if (font_.empty()) return;
+    const float x = frame.width * 0.5f - 250.0f, y = frame.height * 0.5f - 190.0f;
+    r2d::draw_quad(x, y, 500, 380, r2d::rgba(22,25,32,238));
+    if (inventory_open_) {
+      (void)r2d::draw_text(x+18,y+16,"INVENTORY  (E to close)",font_,r2d::rgba(245,245,250));
+      for (int i=0;i<27;++i) {
+        const int col=i%9,row=i/9; const float sx=x+18+col*52, sy=y+54+row*58;
+        r2d::draw_quad(sx,sy,46,50,r2d::rgba(55,60,70));
+        const auto& st=inventory_.slot(static_cast<std::size_t>(i));
+        if (!st.empty()) {
+          r2d::draw_quad(sx+7,sy+7,20,20,item_tint(st.item));
+          char txt[24]; std::snprintf(txt,sizeof(txt),"%s x%u",item_name(st.item),st.count);
+          (void)r2d::draw_text(sx+3,sy+31,txt,font_,r2d::rgba(230,232,238));
+        }
+      }
+    }
+    if (crafting_open_) {
+      (void)r2d::draw_text(x+18,y+250,"CRAFTING  (F1-F6 craft, C to close)",font_,r2d::rgba(245,245,250));
+      for (std::size_t i=0;i<voxel::kRecipes.size();++i) {
+        const auto& recipe=voxel::kRecipes[i]; char txt[96];
+        std::snprintf(txt,sizeof(txt),"F%u  %s x%u  [%s]",static_cast<unsigned>(i+1),item_name(recipe.output),recipe.output_count,voxel::can_craft(inventory_,recipe)?"ready":"missing materials");
+        (void)r2d::draw_text(x+22,y+278+static_cast<float>(i)*16,txt,font_,voxel::can_craft(inventory_,recipe)?r2d::rgba(150,230,160):r2d::rgba(155,160,170));
+      }
+    }
   }
 
   // --- the pause menu ----------------------------------------------------------------
@@ -587,6 +694,9 @@ class VoxelApp final : public ws::ui::App {
   voxel::World world_;
   voxel::Player player_;
   int hotbar_ = 0;
+  voxel::Inventory inventory_{};
+  bool inventory_open_ = false;
+  bool crafting_open_ = false;
   // The pause menu's state: paused_ gates the whole simulation (the
   // controller tick, physics, break/place all skip while it is up) and
   // owns the cursor mode; mouse_x_/mouse_y_ is the live OS pointer -
