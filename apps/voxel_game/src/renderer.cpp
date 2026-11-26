@@ -154,7 +154,9 @@ ws::ui::r2d::Camera3D begin_scene(const Player& player, float fov_degrees,
   return camera;
 }
 
-VoxelRenderer::VoxelRenderer() : worker_(&VoxelRenderer::worker_loop,this) {}
+VoxelRenderer::VoxelRenderer()
+    : jobs_(std::make_unique<MeshJob[]>(kQueueCapacity)),
+      worker_(&VoxelRenderer::worker_loop, this) {}
 VoxelRenderer::~VoxelRenderer() {
   { std::lock_guard<std::mutex> lock(queue_mutex_); stopping_=true; }
   queue_cv_.notify_all(); if(worker_.joinable()) worker_.join();
