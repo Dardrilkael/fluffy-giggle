@@ -116,6 +116,11 @@ struct MeshMaterial {
     // receives_shadow off for one that should stay evenly lit.
     bool casts_shadow = true;
     bool receives_shadow = true;
+    // Keep depth testing but skip depth-buffer writes for alpha-blended
+    // surfaces such as foliage. Such meshes should be submitted after
+    // opaque geometry; transparent texels then reveal the opaque depth
+    // buffer instead of hiding blocks behind the texture.
+    bool depth_write = true;
 };
 
 // The placement of one draw: translation, UNIFORM scale, and a
