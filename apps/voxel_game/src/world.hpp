@@ -169,12 +169,7 @@ class World {
   // ray stepped through, negated - the face's outward direction), and
   // the distance. A miss reads hit = false. Place position = cell +
   // normal (the empty cell the hit face looks at).
-  struct RayHit {
-    bool hit = false;
-    int cell[3] = {0, 0, 0};
-    int normal[3] = {0, 0, 0};
-    float distance = 0.0f;
-  };
+  using RayHit = ws::physics3d::VoxelGrid3D::RayHit;
   [[nodiscard]] RayHit raycast(const float origin[3],
                                const float direction[3],
                                float max_distance) const;
