@@ -37,4 +37,5 @@ The sound adapter (`voxel_audio.hpp`) is deliberately the boundary between the t
 - Templates and inline helpers preserve compile-time specialization. The controller remains an ordinary direct method call.
 - Terrain generation iterates chunk-first, obtains one span per chunk, and writes in the same chunk-major cell order used by meshing.
 - Geometry probes and PCM reflection mixing run only when a block sound is played, not on every render frame. Listener updates remain in the existing audio update path.
+- Frustum visibility is computed once per chunk per frame and reused by every material mesh belonging to that chunk.
 - This is a structural performance design, not a measured benchmark claim. Build, test, and FPS comparison are still required on the target machine.
