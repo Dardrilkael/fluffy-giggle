@@ -66,6 +66,7 @@
 #include "player.hpp"
 #include "renderer.hpp"
 #include "world.hpp"
+#include "voxel_audio.hpp"
 
 namespace {
 
@@ -278,28 +279,11 @@ class VoxelApp final : public ws::ui::App {
       }
     }
 
-    // --- audio: the break/place pair ----------------------------------------
-    if (audio_.init().has_value()) {
+    // --- audio: reusable DSP + geometry-derived early reflections ----------
+    audio_ok_ = audio_.init().has_value();
+    if (audio_ok_) {
       break_pcm_ = synth_tock(240.0, 610.0, 26.0);  // low, woody
       place_pcm_ = synth_tock(520.0, 1040.0, 32.0);  // brighter tick
-      struct Load {
-        const std::vector<std::int16_t>* pcm;
-      };
-      const Load loads[2] = {{&break_pcm_}, {&place_pcm_}};
-      for (const Load& load : loads) {
-        ws::audio::SoundDesc sd{};
-        sd.samples = load.pcm->data();
-        sd.frame_count = static_cast<std::uint32_t>(load.pcm->size());
-        sd.channels = 1;
-        sd.sample_rate = kRate;
-        const auto handle = audio_.load_sound(sd);
-        if (!handle.has_value()) {
-          ws::core::warn("voxel: a sound failed to load - running quieter");
-          continue;
-        }
-        sounds_[sounds_loaded_++] = *handle;
-      }
-      audio_ok_ = sounds_loaded_ == 2;
     } else {
       ws::core::warn("voxel: audio device unavailable - running silent");
     }
@@ -450,7 +434,14 @@ class VoxelApp final : public ws::ui::App {
 
     const auto phys_t0 = std::chrono::steady_clock::now();
     player_.tick(move, frame_dt, world_.collision_grid());
-    (void)audio_.update();
+    if (audio_ok_) {
+      const Vec3 listener = player_.eye_position();
+      const Vec3 forward = player_.look_direction();
+      (void)audio_.set_listener_position(listener.x, listener.y, listener.z);
+      (void)audio_.set_listener_orientation(
+          forward.x, forward.y, forward.z, 0.0f, 1.0f, 0.0f);
+      (void)audio_.update();
+    }
     timings.physics_ms = voxel::perf::ms_since(phys_t0);
 
     // --- target ray + hotbar selection --------------------------------------
@@ -492,7 +483,9 @@ class VoxelApp final : public ws::ui::App {
                              voxel::Block::air)) {
           (void)inventory_.add(block_drop(broken), 1);
           rebuild_around(hit.cell[0], hit.cell[2]);
-          play_sound(kSoundBreak, 0.9f);
+          play_sound(kSoundBreak, 0.9f,
+                     Vec3{hit.cell[0] + 0.5f, hit.cell[1] + 0.5f,
+                          hit.cell[2] + 0.5f});
         }
       } else if (do_place && hit.hit) {  // place
         const int px = hit.cell[0] + hit.normal[0];
@@ -508,7 +501,8 @@ class VoxelApp final : public ws::ui::App {
           if (world_.set_block(px, py, pz, place)) {
             (void)inventory_.remove(selected.item, 1);
             rebuild_around(px, pz);
-            play_sound(kSoundPlace, 0.8f);
+            play_sound(kSoundPlace, 0.8f,
+                       Vec3{px + 0.5f, py + 0.5f, pz + 0.5f});
           }
         }
       }
@@ -973,11 +967,30 @@ class VoxelApp final : public ws::ui::App {
     }
   }
 
-  void play_sound(int id, float gain) {
-    if (!audio_ok_ || id < 0 || id >= 2 || !sounds_[id].valid()) {
-      return;
+  void play_sound(int id, float gain, const Vec3& source_position) {
+    if (!audio_ok_ || id < 0 || id >= 2) return;
+    const auto& dry = id == kSoundBreak ? break_pcm_ : place_pcm_;
+    if (dry.empty()) return;
+
+    // Fixed stack storage: the early-reflection pass adds no heap work to
+    // a break/place event. The transient AudioEngine overload copies PCM
+    // into an owned OpenAL buffer before this array leaves scope.
+    constexpr std::uint32_t kMaxProcessedFrames = 16384;
+    std::array<std::int16_t, kMaxProcessedFrames> processed{};
+    const auto response = voxel::acoustics::room_response(
+        world_, player_.eye_position(), kRate);
+    const auto output_frames = ws::audio::process_early_reflections(
+        dry.data(), static_cast<std::uint32_t>(dry.size()), 1,
+        processed.data(), kMaxProcessedFrames, response);
+    if (output_frames == 0) return;
+
+    const ws::audio::SoundDesc desc{
+        processed.data(), output_frames, 1, kRate};
+    const auto source = audio_.play(desc, gain);
+    if (source.has_value()) {
+      (void)audio_.set_position(*source, source_position.x,
+                                source_position.y, source_position.z);
     }
-    (void)audio_.play(sounds_[id], gain);
   }
 
   // --- the state -------------------------------------------------------------------
@@ -1011,8 +1024,6 @@ class VoxelApp final : public ws::ui::App {
       tile_textures_{};
   bool dead_ = false;
   bool audio_ok_ = false;
-  ws::audio::SoundHandle sounds_[2]{};
-  int sounds_loaded_ = 0;
   std::vector<std::int16_t> break_pcm_;
   std::vector<std::int16_t> place_pcm_;
   ws::audio::AudioEngine audio_;
