@@ -161,7 +161,8 @@ public:
         if (device_ != VK_NULL_HANDLE) {
             vkDeviceWaitIdle(device_);
         }
-        voxel_renderer_.destroy_all();  // GPU meshes die before Renderer2D\n        world_.reset();
+        voxel_renderer_.destroy_all();  // GPU meshes die before Renderer2D
+        world_.reset();
         ws::ui::r2d::set_active(nullptr);  // no dangling active pointer
         if (renderer_) {
             renderer_->shutdown();
