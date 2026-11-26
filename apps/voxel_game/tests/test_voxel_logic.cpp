@@ -1532,8 +1532,12 @@ TEST_CASE("async mesher: rapid edits publish only the latest CPU revision") {
   const auto deadline = std::chrono::steady_clock::now() +
                         std::chrono::seconds(5);
   bool received = false;
+  float mesh_ms = 0.0f;
+  std::uint32_t vertex_count = 0;
+  std::uint32_t index_count = 0;
   while (std::chrono::steady_clock::now() < deadline) {
-    if (mesher.take_completed(cx, cz, actual)) {
+    if (mesher.take_completed(cx, cz, actual, mesh_ms,
+                              vertex_count, index_count)) {
       received = true;
       break;
     }
@@ -1541,6 +1545,15 @@ TEST_CASE("async mesher: rapid edits publish only the latest CPU revision") {
   }
   REQUIRE(received);
   REQUIRE(actual.size() == expected.size());
+  std::uint32_t expected_vertices = 0;
+  std::uint32_t expected_indices = 0;
+  for (const auto& tile : expected) {
+    expected_vertices += static_cast<std::uint32_t>(tile.vertices.size());
+    expected_indices += static_cast<std::uint32_t>(tile.indices.size());
+  }
+  CHECK(mesh_ms >= 0.0f);
+  CHECK(vertex_count == expected_vertices);
+  CHECK(index_count == expected_indices);
   for (std::size_t tile = 0; tile < expected.size(); ++tile) {
     CHECK(actual[tile].indices == expected[tile].indices);
     CHECK(actual[tile].vertices.size() == expected[tile].vertices.size());
@@ -1576,10 +1589,14 @@ TEST_CASE("async mesher: a newer request invalidates a published result") {
 
   std::vector<voxel::CpuMeshData> result, expected;
   bool received = false;
+  float mesh_ms = 0.0f;
+  std::uint32_t vertex_count = 0;
+  std::uint32_t index_count = 0;
   const auto latest_deadline = std::chrono::steady_clock::now() +
                                std::chrono::seconds(5);
   while (std::chrono::steady_clock::now() < latest_deadline) {
-    if (mesher.take_completed(cx, cz, result)) {
+    if (mesher.take_completed(cx, cz, result, mesh_ms,
+                              vertex_count, index_count)) {
       received = true;
       break;
     }
@@ -1588,6 +1605,15 @@ TEST_CASE("async mesher: a newer request invalidates a published result") {
   REQUIRE(received);
   world.build_chunk_meshes(cx, cz, expected);
   REQUIRE(result.size() == expected.size());
+  std::uint32_t expected_vertices = 0;
+  std::uint32_t expected_indices = 0;
+  for (const auto& tile : expected) {
+    expected_vertices += static_cast<std::uint32_t>(tile.vertices.size());
+    expected_indices += static_cast<std::uint32_t>(tile.indices.size());
+  }
+  CHECK(mesh_ms >= 0.0f);
+  CHECK(vertex_count == expected_vertices);
+  CHECK(index_count == expected_indices);
   for (std::size_t tile = 0; tile < expected.size(); ++tile)
     CHECK(result[tile].indices == expected[tile].indices);
 }
