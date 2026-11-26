@@ -43,6 +43,24 @@ Jolt behind `ws::physics3d`, OpenAL Soft behind `ws::audio`.
 | RMB | place block |
 | esc | pause menu |
 
+## Texture assets
+
+The atlas is generated from the Minecraft resource-pack files; do not edit
+`src/texture_atlas.hpp` by hand. Extract the archive so the directory
+contains files such as `grass_block_top.png`, `dirt.png`,
+`oak_log.png`, `cobblestone.png`, `coal_ore.png` and `iron_ore.png`.
+Then run from the repository root:
+
+```powershell
+py scripts/create_atlas.py --assets "C:\\path\\to\\extracted\\textures\\block"
+py scripts/create_atlas.py --check
+```
+
+The generator writes the matching PNG data and block-to-face table into
+`src/texture_atlas.hpp`, plus `download/atlas_preview.png`. The game
+now has a compile-time guard that rejects an atlas whose block rows no
+longer match the `Block` enum.
+
 ## Building
 
 The repo's presets, unchanged (CMake ≥ 3.28, Ninja):
