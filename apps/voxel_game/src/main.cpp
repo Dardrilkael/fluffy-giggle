@@ -254,6 +254,14 @@ class VoxelApp final : public ws::ui::App {
     (void)inventory_.add(voxel::Item::wood, 16);
     (void)inventory_.add(voxel::Item::sand, 16);
 
+    // --- reusable selection outline ---------------------------------------
+    const auto outline = voxel::create_target_outline();
+    if (outline.has_value()) {
+      target_outline_ = *outline;
+    } else {
+      ws::core::warn("voxel: target outline mesh unavailable");
+    }
+
     // --- the chunk meshes (the renderer's one-time upload) -----------------
     world_.rebuild_all();
 
@@ -422,9 +430,16 @@ class VoxelApp final : public ws::ui::App {
     (void)audio_.update();
     timings.physics_ms = voxel::perf::ms_since(phys_t0);
 
-    // --- hotbar + break/place ------------------------------------------------
+    // --- target ray + hotbar selection --------------------------------------
     for (int i = 0; i < kHotbarSlots; ++i)
       if (input.key_pressed[kKey1 + i]) hotbar_ = i;
+
+    const Vec3 target_eye = player_.eye_position();
+    const Vec3 target_look = player_.look_direction();
+    const float target_origin[3] = {target_eye.x, target_eye.y, target_eye.z};
+    const float target_direction[3] = {
+        target_look.x, target_look.y, target_look.z};
+    target_hit_ = world_.raycast(target_origin, target_direction, 7.0f);
     if (crafting_open_) {
       for (int i = 0; i < static_cast<int>(voxel::kRecipes.size()); ++i)
         if (input.key_pressed[kKeyF1 + i])
@@ -447,11 +462,7 @@ class VoxelApp final : public ws::ui::App {
     const bool do_break = wants_break || bench_break;
     const bool do_place = wants_place || bench_place;
     if (do_break || do_place) {
-      const Vec3 eye = player_.eye_position();
-      const Vec3 look = player_.look_direction();
-      const float origin[3] = {eye.x, eye.y, eye.z};
-      const float dir[3] = {look.x, look.y, look.z};
-      const voxel::World::RayHit hit = world_.raycast(origin, dir, 7.0f);
+      const auto& hit = target_hit_;
       if (do_break && hit.hit) {  // break
         const voxel::Block broken = world_.block_at(hit.cell[0], hit.cell[1], hit.cell[2]);
         if (world_.set_block(hit.cell[0], hit.cell[1], hit.cell[2],
@@ -491,6 +502,7 @@ class VoxelApp final : public ws::ui::App {
     const auto draw_t0 = std::chrono::steady_clock::now();
     voxel::draw_world(world_, tile_textures_, cam,
                        frame.width / frame.height, &last_counters_);
+    voxel::draw_target_outline(target_outline_, target_hit_);
     const auto draw_t1 = std::chrono::steady_clock::now();
     r2d::end();
     timings.draw_ms = voxel::perf::ms_since(draw_t0, draw_t1);
@@ -886,6 +898,8 @@ class VoxelApp final : public ws::ui::App {
 
   voxel::World world_;
   voxel::Player player_;
+  ws::ui::r3d::Mesh target_outline_{};
+  voxel::World::RayHit target_hit_{};
   int hotbar_ = 0;
   voxel::Inventory inventory_{};
   bool inventory_open_ = false;
