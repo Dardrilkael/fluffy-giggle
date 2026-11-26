@@ -719,6 +719,19 @@ TEST_CASE("inventory: stack merging, overflow and removal") {
   CHECK(inventory.count(voxel::Item::stone) == 5);
 }
 
+TEST_CASE("inventory: swapping moves a stack into the selected hotbar slot") {
+  voxel::Inventory inventory;
+  CHECK(inventory.add(voxel::Item::grass, 12) == 12);
+  CHECK(inventory.add(voxel::Item::iron_ore, 5) == 5);
+  inventory.swap_slots(0, 1);
+  CHECK(inventory.slot(0).item == voxel::Item::iron_ore);
+  CHECK(inventory.slot(0).count == 5);
+  CHECK(inventory.slot(1).item == voxel::Item::grass);
+  CHECK(inventory.slot(1).count == 12);
+  inventory.swap_slots(0, 99);
+  CHECK(inventory.slot(0).item == voxel::Item::iron_ore);
+}
+
 TEST_CASE("crafting: consumes ingredients and creates output atomically") {
   voxel::Inventory inventory;
   CHECK(inventory.add(voxel::Item::wood, 2) == 2);
