@@ -4,6 +4,12 @@ The app is a composition layer. Algorithms and policies that can stand alone
 live in the workspace libraries; the app retains the block vocabulary,
 resource pack, world rules, and rendering composition.
 
+The voxel world's ownership boundary is CPU-only: `World` owns block storage
+and builds renderer-independent CPU mesh snapshots. `VoxelRenderer` owns GPU
+handles and performs upload/destruction/draw work on the render thread. The
+CPU mesher can therefore be tested and later scheduled on workers without an
+active graphics device.
+
 ## Shared code
 
 | Responsibility | Library API | Design / hot-path contract |
