@@ -17,6 +17,7 @@
 #include <cstddef>
 
 #include <ws/core/log.hpp>
+#include <ws/math/noise.hpp>
 #include <ws/ui/renderer2d.hpp>  // rgba()
 
 namespace voxel {
@@ -51,86 +52,11 @@ const std::uint32_t kTints[static_cast<std::size_t>(Block::count_)] = {
 
 // --- deterministic terrain fields ------------------------------------------------
 
-// Integer hash -> [0, 1). The same coordinates and seed always produce
-// the same value, so worlds can be regenerated without storing a heightmap.
-[[nodiscard]] float hash01(std::uint32_t x, std::uint32_t y,
-                           std::uint32_t seed) {
-  std::uint32_t h = seed + 0x9E3779B9u;
-  h ^= x * 0x85EBCA6Bu;
-  h = (h << 13) | (h >> 19);
-  h *= 0xC2B2AE35u;
-  h ^= y * 0x27D4EB2Fu;
-  h = (h << 13) | (h >> 19);
-  h *= 0x165667B1u;
-  h ^= h >> 15;
-  return static_cast<float>(h & 0xFFFFFFu) / 16777216.0f;
-}
-
-[[nodiscard]] float hash3(int x, int y, int z, std::uint32_t seed) {
-  const auto ux = static_cast<std::uint32_t>(x);
-  const auto uy = static_cast<std::uint32_t>(y);
-  const auto uz = static_cast<std::uint32_t>(z);
-  return hash01(ux ^ (uz * 0x9E3779B9u), uy ^ (uz * 0x85EBCA6Bu),
-                seed ^ (uz * 0xC2B2AE35u));
-}
-
-[[nodiscard]] float smooth01(float t) {
-  t = std::clamp(t, 0.0f, 1.0f);
-  return t * t * (3.0f - 2.0f * t);
-}
-
-[[nodiscard]] float noise2d(float x, float z, std::uint32_t seed) {
-  const int xi = static_cast<int>(std::floor(x));
-  const int zi = static_cast<int>(std::floor(z));
-  const float sx = smooth01(x - static_cast<float>(xi));
-  const float sz = smooth01(z - static_cast<float>(zi));
-  const float a = hash01(static_cast<std::uint32_t>(xi),
-                         static_cast<std::uint32_t>(zi), seed);
-  const float b = hash01(static_cast<std::uint32_t>(xi + 1),
-                         static_cast<std::uint32_t>(zi), seed);
-  const float c = hash01(static_cast<std::uint32_t>(xi),
-                         static_cast<std::uint32_t>(zi + 1), seed);
-  const float d = hash01(static_cast<std::uint32_t>(xi + 1),
-                         static_cast<std::uint32_t>(zi + 1), seed);
-  return (a + (b - a) * sx) +
-         ((c + (d - c) * sx) - (a + (b - a) * sx)) * sz;
-}
-
-[[nodiscard]] float fbm(float x, float z, std::uint32_t seed) {
-  float sum = 0.0f;
-  float amplitude = 0.5f;
-  float total = 0.0f;
-  for (int octave = 0; octave < 4; ++octave) {
-    sum += noise2d(x, z, seed + static_cast<std::uint32_t>(octave) *
-                                      0x9E3779B9u) * amplitude;
-    total += amplitude;
-    x *= 2.03f;
-    z *= 2.03f;
-    amplitude *= 0.5f;
-  }
-  return sum / total;
-}
-
-[[nodiscard]] float noise3d(float x, float y, float z,
-                            std::uint32_t seed) {
-  const int xi = static_cast<int>(std::floor(x));
-  const int yi = static_cast<int>(std::floor(y));
-  const int zi = static_cast<int>(std::floor(z));
-  const float sx = smooth01(x - static_cast<float>(xi));
-  const float sy = smooth01(y - static_cast<float>(yi));
-  const float sz = smooth01(z - static_cast<float>(zi));
-  float plane[2]{};
-  for (int dy = 0; dy < 2; ++dy) {
-    const float a = hash3(xi, yi + dy, zi, seed);
-    const float b = hash3(xi + 1, yi + dy, zi, seed);
-    const float c = hash3(xi, yi + dy, zi + 1, seed);
-    const float d = hash3(xi + 1, yi + dy, zi + 1, seed);
-    const float near_z = a + (b - a) * sx;
-    const float far_z = c + (d - c) * sx;
-    plane[dy] = near_z + (far_z - near_z) * sz;
-  }
-  return plane[0] + (plane[1] - plane[0]) * sy;
-}
+using ws::math::noise::fbm2d;
+using ws::math::noise::hash01;
+using ws::math::noise::smooth01;
+using ws::math::noise::value_noise2d;
+using ws::math::noise::value_noise3d;
 
 [[nodiscard]] bool tree_at(int x, int z, std::uint32_t seed,
                            float density) {
@@ -457,17 +383,17 @@ void World::generate(std::uint32_t seed) {
   // detail fields shape hills, mountain ridges and river valleys.
   for (int wz = 0; wz < kWorldSizeZ; ++wz) {
     for (int wx = 0; wx < kWorldSizeX; ++wx) {
-      const float continental = fbm(wx * 0.010f, wz * 0.010f,
+      const float continental = fbm2d(wx * 0.010f, wz * 0.010f,
                                      seed ^ 0x31415926u);
-      const float hills = fbm(wx * 0.027f, wz * 0.027f,
+      const float hills = fbm2d(wx * 0.027f, wz * 0.027f,
                               seed ^ 0x27182818u);
-      const float ridge_noise = noise2d(wx * 0.018f, wz * 0.018f,
+      const float ridge_noise = value_noise2d(wx * 0.018f, wz * 0.018f,
                                         seed ^ 0xA341316Cu);
       const float ridge = 1.0f - std::abs(ridge_noise * 2.0f - 1.0f);
       const float mountain_mask = smooth01((continental - 0.48f) * 3.2f);
-      const float temperature = fbm(wx * 0.009f, wz * 0.009f,
+      const float temperature = fbm2d(wx * 0.009f, wz * 0.009f,
                                     seed ^ 0xB5297A4Du);
-      const float moisture = fbm(wx * 0.013f, wz * 0.013f,
+      const float moisture = fbm2d(wx * 0.013f, wz * 0.013f,
                                  seed ^ 0x68E31DA4u);
       const bool desert = temperature > 0.53f && moisture < 0.43f;
       const bool forest = moisture > 0.54f && temperature > 0.30f;
@@ -480,7 +406,7 @@ void World::generate(std::uint32_t seed) {
 
       // A low-frequency warped noise field creates winding river corridors.
       // The channel floor approaches the water plane; nearby banks become sand.
-      const float river_field = noise2d(wx * 0.016f, wz * 0.016f,
+      const float river_field = value_noise2d(wx * 0.016f, wz * 0.016f,
                                         seed ^ 0xC0FFEE11u);
       const float river_distance = std::abs(river_field - 0.5f);
       const bool river = river_distance < 0.035f && !mountains;
@@ -518,18 +444,18 @@ void World::generate(std::uint32_t seed) {
         // surface. Keep a solid roof and floor so caves do not open
         // randomly through the surface or world bottom.
         if (y > kWorldFloor + 2 && y < height - 4) {
-          const float cave_a = noise3d(wx * 0.075f, y * 0.075f,
+          const float cave_a = value_noise3d(wx * 0.075f, y * 0.075f,
                                        wz * 0.075f, seed ^ 0xDEADBEEFu);
-          const float cave_b = noise3d(wx * 0.145f, y * 0.145f,
+          const float cave_b = value_noise3d(wx * 0.145f, y * 0.145f,
                                        wz * 0.145f, seed ^ 0x8BADF00Du);
           if (cave_a > 0.64f && cave_b > 0.48f) block = Block::air;
         }
 
         // Ore is placed in clustered 3D veins rather than isolated rolls.
         if (block == Block::stone && y >= 4 && y <= 22) {
-          const float vein = noise3d(wx * 0.19f, y * 0.22f, wz * 0.19f,
+          const float vein = value_noise3d(wx * 0.19f, y * 0.22f, wz * 0.19f,
                                      seed ^ 0x51ED270Bu);
-          const float pockets = noise3d(wx * 0.065f, y * 0.08f,
+          const float pockets = value_noise3d(wx * 0.065f, y * 0.08f,
                                         wz * 0.065f, seed ^ 0xBADC0DEu);
           if (vein > 0.69f && pockets > 0.48f) {
             block = y < 11 ? Block::coal_ore : Block::iron_ore;
