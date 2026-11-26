@@ -125,6 +125,11 @@ class World {
   [[nodiscard]] std::vector<ChunkMeshData> build_chunk_meshes(
       int cx, int cz) const;
 
+  // Reusable tile-indexed output for hot rebuild paths. The caller retains
+  // each vector's capacity across edits; tile i always maps to atlas tile i.
+  void build_chunk_meshes(int cx, int cz,
+                          std::vector<CpuMeshData>& tile_meshes) const;
+
   // Direct read-only access to contiguous chunk storage. Chunk-local
   // algorithms use this for interior cells and block_at() only for the halo.
   [[nodiscard]] std::span<const Block> chunk_data(
