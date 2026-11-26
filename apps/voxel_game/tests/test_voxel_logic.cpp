@@ -880,6 +880,29 @@ TEST_CASE("bench: scale mode holds input and measures only after warmup") {
   CHECK(driver.advance_phase(0.0f));
 }
 
+TEST_CASE("bench: shadow modes isolate receiver filtering from the depth pass") {
+  const auto full = voxel::bench::shadow_flags_from_name("full");
+  CHECK(full.cast);
+  CHECK(full.receive);
+  CHECK(std::string_view(voxel::bench::shadow_mode_name(full)) == "full");
+
+  const auto no_receive = voxel::bench::shadow_flags_from_name("no-receive");
+  CHECK(no_receive.cast);
+  CHECK_FALSE(no_receive.receive);
+  CHECK(std::string_view(voxel::bench::shadow_mode_name(no_receive)) ==
+        "no-receive");
+
+  const auto off = voxel::bench::shadow_flags_from_name("off");
+  CHECK_FALSE(off.cast);
+  CHECK_FALSE(off.receive);
+  CHECK(std::string_view(voxel::bench::shadow_mode_name(off)) == "off");
+
+  // Invalid input is deliberately safe: retain normal shadow behavior.
+  const auto invalid = voxel::bench::shadow_flags_from_name("invalid");
+  CHECK(invalid.cast);
+  CHECK(invalid.receive);
+}
+
 TEST_CASE("atlas: the face->tile map matches the block vocabulary") {
   // The generated header's map, pinned: grass wears the grass TOP on
   // top, DIRT on bottom, the grass SIDE everywhere else; the log wears
