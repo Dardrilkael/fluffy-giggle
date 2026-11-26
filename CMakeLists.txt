@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(WS_BUILD_APPS "Build applications under apps/" ON)
 option(WS_BUILD_TESTS "Build tests and register them with ctest" ON)
+option(WS_BUILD_EXPERIMENTS "Build standalone experiments under experiments/" OFF)
 
 # libs/ subset (semicolon list). Empty (default) = the whole workspace; a
 # non-empty list configures only those libs, the apps whose libs are all
@@ -31,6 +32,10 @@ add_subdirectory(libs)
 
 if(WS_BUILD_APPS)
   add_subdirectory(apps)
+endif()
+
+if(WS_BUILD_EXPERIMENTS)
+  add_subdirectory(experiments)
 endif()
 
 # Dependency-rule enforcement as a ctest test (see tools/check_deps.ps1).
