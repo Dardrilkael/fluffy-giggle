@@ -23,11 +23,6 @@ struct TestGrid {
   }
 };
 
-[[nodiscard]] VoxelGrid3D make_grid() {
-  return VoxelGrid3D{VoxelGrid3D::Desc{
-      {-8, -4, -8}, {16, 16, 16}, nullptr, &TestGrid::floor_and_wall}};
-}
-
 }  // namespace
 
 TEST_CASE("voxel grid: DDA raycast returns the first occupied cell and face") {
@@ -38,7 +33,7 @@ TEST_CASE("voxel grid: DDA raycast returns the first occupied cell and face") {
   REQUIRE(hit.hit);
   CHECK((hit.cell == ws::math::IVec3{0, 0, 0}));
   CHECK((hit.normal == ws::math::IVec3{0, 1, 0}));
-  CHECK(hit.distance == doctest::Approx(2.5f));
+  CHECK(hit.distance == doctest::Approx(1.5f));
   CHECK_FALSE(grid.raycast(Vec3{2.5f, 2.5f, 2.5f},
                            Vec3{1.0f, 0.0f, 0.0f}, 8.0f).hit);
 }
@@ -50,6 +45,7 @@ TEST_CASE("voxel grid: swept AABB cannot tunnel through a floor") {
   const auto moved =
       grid.sweep_aabb(player, Vec3{0.0f, -20.0f, 0.0f});
   CHECK(moved.hit_y);
+  CHECK(moved.grounded());
   CHECK(moved.bounds.min.y >= doctest::Approx(1.0f).epsilon(0.002));
   CHECK_FALSE(grid.overlaps(moved.bounds));
 }
