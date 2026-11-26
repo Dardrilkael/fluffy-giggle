@@ -20,7 +20,10 @@ namespace voxel::perf {
 // worker, not time charged to the main-thread frame. Upload time measures
 // CPU conversion/staging plus create_mesh submission, not GPU completion.
 struct FrameTimings {
+    // CPU time spent inside VoxelApp::on_update().
     float total_ms = 0.0f;
+    // Wall interval between consecutive on_update() starts; includes
+    // platform/present pacing and is the closest app-level frame cadence.
     float physics_ms = 0.0f;
     float cpu_mesh_ms = 0.0f;
     float upload_ms = 0.0f;
