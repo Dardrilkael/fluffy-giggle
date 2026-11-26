@@ -36,12 +36,10 @@ struct Frustum {
   const float fov = std::isfinite(fov_y) && fov_y > 0.0f && fov_y < kPi
                         ? fov_y
                         : kDefaultFov;
-  const float near_plane = std::isfinite(near_z) && near_z > 0.0f
-                               ? near_z
-                               : 0.1f;
-  const float far_plane = std::isfinite(far_z) && far_z > near_plane
-                              ? far_z
-                              : 260.0f;
+  const bool valid_depth_range = std::isfinite(near_z) && near_z > 0.0f &&
+                                 std::isfinite(far_z) && far_z > near_z;
+  const float near_plane = valid_depth_range ? near_z : 0.1f;
+  const float far_plane = valid_depth_range ? far_z : 260.0f;
   const float tan_v = std::tan(fov * 0.5f);
   const float tan_hx = tan_v * aspect;
   if (!std::isfinite(tan_v) || !std::isfinite(tan_hx) ||
