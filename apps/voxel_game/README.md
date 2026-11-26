@@ -8,9 +8,13 @@ Jolt behind `ws::physics3d`, OpenAL Soft behind `ws::audio`.
 ## What you get
 
 - **A procedurally generated 128 × 64 × 128 voxel world** (8×8 chunks of
-  16×64×16): value-noise fbm terrain with grass/dirt/stone layers, sand
-  shorelines, water at the shore level, scattered wood trunks and leaf canopies, plus deterministic coal and iron ore deposits.
-  Deterministic per seed (seed `0xC0FFEE`).
+  16×64×16): multi-field FBM height and climate maps create plains,
+  forests, deserts and rocky mountain regions. A warped low-frequency
+  field carves winding river channels and sandy banks; water fills low
+  ground to the water plane. 3D coherent density carves underground caves,
+  clustered 3D noise creates coal/iron ore veins, and tree density varies
+  with forest climate. All fields are deterministic per seed
+  (default seed `0xC0FFEE`) and continuous across chunk boundaries.
 - **A first-person player**: WASD movement, mouse look, space jump
   (~1.5 m apex — clears a full block with margin), shift sprint. The
   player uses a backend-independent swept-AABB character controller
@@ -95,8 +99,9 @@ contract).
 
 ```
 src/world.hpp/.cpp    the voxel data model: the block table (8×8 chunks),
-                      seeded fbm terrain, per-(chunk, block-type) chunk
-                      meshing, and a zero-copy VoxelGrid3D view over chunks.
+                      seeded biome/climate fields, rivers, caves, ore
+                      veins, greedy meshing and a zero-copy VoxelGrid3D
+                      view over chunks.
 src/inventory.hpp     stackable item inventory, recipe definitions and atomic crafting.\nsrc/player.hpp/.cpp   the FPS character controller: yaw/pitch look,
                       gravity/jump integration, swept-AABB movement,
                       axis-separated sliding and probe-based grounding.
@@ -126,5 +131,6 @@ camera builder mirrors the player's pose).
 - Mouse look is free-cursor (window-edge clamped): the shell has no
   pointer-lock seam yet; the deltas are the same, the pointer stays
   visible.
-- No chunk streaming: the 8×8 world exists up front (~a second of
-  mesh uploads at startup).
+- No chunk streaming: the 8×8 world exists up front. The new 3D cave
+  and ore fields add CPU work during startup generation; terrain is still
+  generated once rather than streamed.
