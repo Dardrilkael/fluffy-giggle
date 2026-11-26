@@ -59,6 +59,7 @@
 
 #include "menu.hpp"
 #include "hotbar.hpp"
+#include "settings_menu.hpp"
 #include "inventory.hpp"
 #include "bench.hpp"
 #include "perf.hpp"
@@ -203,7 +204,7 @@ class VoxelApp final : public ws::ui::App {
     ws::input::EventDispatcher d{e};
     (void)d.dispatch<ws::input::MouseMovedEvent>(
         [this](const ws::input::MouseMovedEvent& ev) {
-          if (!paused_ && !inventory_open_ && !crafting_open_ && have_last_mouse_) {
+          if (!paused_ && !inventory_open_ && !crafting_open_ && !settings_open_ && have_last_mouse_) {
             look_dx_ += ev.x - last_mouse_x_;
             look_dy_ += ev.y - last_mouse_y_;
           }
@@ -219,7 +220,7 @@ class VoxelApp final : public ws::ui::App {
     // break/place pass never sees it.
     (void)d.dispatch<ws::input::MouseButtonPressedEvent>(
         [this](const ws::input::MouseButtonPressedEvent& ev) {
-          if (paused_ || inventory_open_ || crafting_open_) {
+          if (paused_ || inventory_open_ || crafting_open_ || settings_open_) {
             clicked_ = ev.button == 0;
             if (clicked_) return true;  // modal UI owns this click
           }
@@ -366,7 +367,7 @@ class VoxelApp final : public ws::ui::App {
                      r2d::rgba(135, 196, 250));
       r2d::end();
 
-      const auto cam = voxel::begin_scene(player_);
+      const auto cam = voxel::begin_scene(player_, settings_.fov_degrees, settings_.render_distance);
       voxel::draw_world(world_, tile_textures_, cam,
                          frame.width / frame.height);
       r2d::end();
