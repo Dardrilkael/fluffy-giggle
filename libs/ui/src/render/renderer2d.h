@@ -472,7 +472,7 @@ private:
     // lifecycle points as create_pipeline: init, format-drift rebake, dev
     // reload). Non-fatal on failure: pipeline_mesh_ stays null and the
     // flush skips mesh draws.
-    bool create_mesh_pipeline(VkRenderPass render_pass);
+    bool create_mesh_pipeline(VkRenderPass render_pass, bool depth_write);
     // The mesh path's layouts + per-frame scene blocks (once, at init,
     // after the tier's set layout exists) and their teardown.
     bool create_mesh_resources();
@@ -685,6 +685,9 @@ private:
     VkDescriptorSetLayout scene_set_layout_ = VK_NULL_HANDLE;
     VkPipelineLayout mesh_pipeline_layout_ = VK_NULL_HANDLE;
     VkPipeline pipeline_mesh_ = VK_NULL_HANDLE;
+    // Alpha-blended mesh variant: retains depth testing but does not write
+    // depth, so transparent texture texels cannot occlude later geometry.
+    VkPipeline pipeline_mesh_no_depth_write_ = VK_NULL_HANDLE;
     // One persistently-mapped scene uniform block (the frame's light) +
     // its descriptor set per frame slot: rewritten at that slot's idle
     // flush, so it never races an in-flight submission.
