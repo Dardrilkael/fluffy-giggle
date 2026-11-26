@@ -161,7 +161,7 @@ public:
         if (device_ != VK_NULL_HANDLE) {
             vkDeviceWaitIdle(device_);
         }
-        world_.reset();  // destroy_mesh BEFORE the renderer dies
+        voxel_renderer_.destroy_all();  // GPU meshes die before Renderer2D\n        world_.reset();
         ws::ui::r2d::set_active(nullptr);  // no dangling active pointer
         if (renderer_) {
             renderer_->shutdown();
@@ -205,7 +205,7 @@ public:
         ws::ui::r2d::end();
 
         const auto cam = voxel::begin_scene(player_);
-        voxel::draw_world(*world_, tiles_, cam,
+        voxel::draw_world(voxel_renderer_, tiles_, cam,
                           static_cast<float>(kW) / static_cast<float>(kH));
         ws::ui::r2d::end();
 
@@ -257,7 +257,7 @@ private:
         if (!player_.spawn(*phys, spawn)) {
             return false;
         }
-        world_->rebuild_all();
+        voxel_renderer_.rebuild_all(*world_);
         // The tiles: the app's own load path (the generated header's
         // per-tile PNGs through the engine's memory decoder).
         tiles_ = voxel::load_tile_textures();
@@ -442,6 +442,7 @@ private:
     ws::gfx::Gpu gpu_;
     std::unique_ptr<Renderer2D> renderer_;
     std::unique_ptr<voxel::World> world_;
+    voxel::VoxelRenderer voxel_renderer_{};
     voxel::Player player_{};
     std::array<ws::ui::r2d::Texture, voxel::atlas::kTileCount>
         tiles_{};  // the app's own per-tile loads
