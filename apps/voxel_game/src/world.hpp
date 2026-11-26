@@ -19,8 +19,8 @@
 //
 // COORDINATE FRAMES (the one real subtlety):
 //   - GAME space: right-handed, +Y UP, +X east, +Z south, one block =
-//     one meter. The physics world, the player, the raycast, the
-//     terrain and the block table all live here.
+//     one meter. The voxel-grid collision queries, player, raycast,
+//     terrain and block table all live here.
 //   - RENDER space: r3d's world has +Y DOWN (the 2D convention the
 //     mesh path inherited). The mesher itself emits render-space
 //     geometry directly: game (gx, gy, gz) -> render (gx+0.5,
