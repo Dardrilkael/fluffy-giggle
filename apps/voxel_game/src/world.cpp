@@ -235,12 +235,13 @@ void emit_quad(CpuMeshData& out, int fi, int ox,
 // Cache the texture tile for every exposed face in one chunk traversal.
 // -1 means that the face is hidden. Tile identity is the render-material
 // boundary, so equal textures can merge even when the block IDs differ.
-using FaceTileCache = std::vector<std::int8_t>;
+using FaceTileCache =
+    std::array<std::int8_t, 6u * static_cast<std::size_t>(kBlocksPerChunk)>;
 
 [[nodiscard]] FaceTileCache classify_chunk_faces(
     const World& world, int cx, int cz) {
-  FaceTileCache face_tiles(6u * static_cast<std::size_t>(kBlocksPerChunk),
-                           static_cast<std::int8_t>(-1));
+  FaceTileCache face_tiles{};
+  face_tiles.fill(static_cast<std::int8_t>(-1));
   const auto chunk = world.chunk_data(cx, cz);
   if (chunk.size() != static_cast<std::size_t>(kBlocksPerChunk)) {
     return face_tiles;
@@ -302,7 +303,7 @@ using FaceTileCache = std::vector<std::int8_t>;
 // grouped by tile, and consumed cells are cleared in-place (no second used
 // bitset). This stage never reads voxel data or checks neighbors.
 void greedy_faces(const FaceTileCache& face_tiles, int fi, int cx, int cz,
-                  std::array<CpuMeshData, atlas::kTileCount>& outputs) {
+                  std::vector<CpuMeshData>& outputs) {
   const FaceDir& face = kFaces[fi];
   const int ox = cx * kChunkSizeX;
   const int oz = cz * kChunkSizeZ;
@@ -558,26 +559,38 @@ bool World::set_block(int x, int y, int z, Block block) {
 
 std::vector<ChunkMeshData> World::build_chunk_meshes(
     int cx, int cz) const {
+  std::vector<CpuMeshData> tile_meshes;
+  build_chunk_meshes(cx, cz, tile_meshes);
   std::vector<ChunkMeshData> out;
-  if (cx < 0 || cx >= kWorldChunksX || cz < 0 || cz >= kWorldChunksZ) {
-    return out;
+  out.reserve(tile_meshes.size());
+  for (std::size_t tile = 0; tile < tile_meshes.size(); ++tile) {
+    auto& geometry = tile_meshes[tile];
+    if (!geometry.vertices.empty()) {
+      out.push_back(ChunkMeshData{static_cast<int>(tile),
+                                  std::move(geometry)});
+    }
+  }
+  return out;
+}
+
+void World::build_chunk_meshes(
+    int cx, int cz, std::vector<CpuMeshData>& tile_meshes) const {
+  tile_meshes.resize(atlas::kTileCount);
+  for (auto& geometry : tile_meshes) {
+    geometry.vertices.clear();
+    geometry.indices.clear();
+  }
+  if (cx < 0 || cx >= kWorldChunksX ||
+      cz < 0 || cz >= kWorldChunksZ) {
+    return;
   }
 
-  // Classify each block's exposed faces exactly once, then greedy-merge the
-  // compact face/tile cache. No material-specific chunk rescans remain.
+  // Fixed-size face cache avoids a heap allocation on every rebuild.
+  // Reusable output vectors retain their high-water capacity between edits.
   const FaceTileCache face_tiles = classify_chunk_faces(*this, cx, cz);
-  std::array<CpuMeshData, atlas::kTileCount> tile_meshes{};
   for (int fi = 0; fi < 6; ++fi) {
     greedy_faces(face_tiles, fi, cx, cz, tile_meshes);
   }
-
-  out.reserve(atlas::kTileCount);
-  for (int tile = 0; tile < atlas::kTileCount; ++tile) {
-    auto& geometry = tile_meshes[static_cast<std::size_t>(tile)];
-    if (geometry.vertices.empty()) continue;
-    out.push_back(ChunkMeshData{tile, std::move(geometry)});
-  }
-  return out;
 }
 
 int World::surface_height(int x, int z) const {
