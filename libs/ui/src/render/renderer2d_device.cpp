@@ -43,7 +43,14 @@ constexpr std::uint32_t kWhiteIndex = 0;
 // the largest supported size that fits their maxImageDimension2D.
 std::uint32_t configured_shadow_map_size(std::uint32_t device_limit) {
     std::uint32_t requested = kDefaultShadowMapSize;
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
     if (const char* value = std::getenv("WS_SHADOW_MAP_RESOLUTION")) {
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
         if (std::strcmp(value, "2048") == 0) requested = 2048;
         else if (std::strcmp(value, "1024") == 0) requested = 1024;
         else if (std::strcmp(value, "512") == 0) requested = 512;
