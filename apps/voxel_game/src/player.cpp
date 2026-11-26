@@ -83,7 +83,7 @@ void Player::tick(const MoveInput& input, float dt,
   if (moved.hit_x) velocity_.x = 0.0f;
   if (moved.hit_y) velocity_.y = 0.0f;
   if (moved.hit_z) velocity_.z = 0.0f;
-  grounded_ = moved.hit_y && displacement.y < 0.0f;
+  grounded_ = moved.grounded();
 
   // A short downward support probe keeps grounding stable over seams and
   // while standing still, without relying on contact-event timing.
@@ -91,7 +91,7 @@ void Player::tick(const MoveInput& input, float dt,
     const auto probe = grid.sweep_aabb(
         bounds(), ws::math::Vec3{0.0f, -0.04f, 0.0f},
         tuning_.collision_skin);
-    if (probe.hit_y) {
+    if (probe.grounded()) {
       position_ = (probe.bounds.min + probe.bounds.max) * 0.5f;
       velocity_.y = 0.0f;
       grounded_ = true;
