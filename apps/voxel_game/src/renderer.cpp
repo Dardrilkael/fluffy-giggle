@@ -154,6 +154,65 @@ ws::ui::r2d::Camera3D begin_scene(const Player& player, float fov_degrees,
   return camera;
 }
 
+VoxelRenderer::VoxelRenderer() : worker_(&VoxelRenderer::worker_loop,this) {}
+VoxelRenderer::~VoxelRenderer() {
+  { std::lock_guard<std::mutex> lock(queue_mutex_); stopping_=true; }
+  queue_cv_.notify_all(); if(worker_.joinable()) worker_.join();
+}
+void VoxelRenderer::worker_loop() {
+  for (;;) {
+    MeshJob job;
+    { std::unique_lock<std::mutex> lock(queue_mutex_);
+      queue_cv_.wait(lock,[this]{return stopping_ || queue_count_!=0;});
+      if(stopping_ && queue_count_==0) return;
+      job=std::move(jobs_[queue_head_]); queue_head_=(queue_head_+1)%kQueueCapacity; --queue_count_;
+    }
+    MeshResult result; result.revision=job.snapshot.revision;
+    mesh_chunk_snapshot(job.snapshot,result.tiles);
+    const auto slot=chunk_slot(job.snapshot.cx,job.snapshot.cz);
+    { std::lock_guard<std::mutex> lock(queue_mutex_);
+      if(result.revision==revisions_[slot]) { result.ready=true; completed_[slot]=std::move(result); }
+    }
+  }
+}
+void VoxelRenderer::request_rebuild_chunk(const World& world,int cx,int cz) {
+  if(cx<0||cx>=kWorldChunksX||cz<0||cz>=kWorldChunksZ) return;
+  std::lock_guard<std::mutex> lock(queue_mutex_);
+  const auto slot=chunk_slot(cx,cz); const auto rev=++revisions_[slot]; completed_[slot].ready=false;
+  MeshJob job; job.snapshot=world.snapshot_chunk(cx,cz,rev);
+  for(std::size_t i=0;i<queue_count_;++i) {
+    const auto q=(queue_head_+i)%kQueueCapacity;
+    if(jobs_[q].snapshot.cx==cx && jobs_[q].snapshot.cz==cz) { jobs_[q]=std::move(job); queue_cv_.notify_one(); return; }
+  }
+  // Capacity equals the total chunk count; after coalescing, a full queue
+  // already contains every chunk, so this is only a defensive fallback.
+  if(queue_count_==kQueueCapacity) { queue_head_=(queue_head_+1)%kQueueCapacity; --queue_count_; }
+  const auto tail=(queue_head_+queue_count_)%kQueueCapacity; jobs_[tail]=std::move(job); ++queue_count_; queue_cv_.notify_one();
+}
+void VoxelRenderer::upload_result(int cx,int cz,const std::vector<CpuMeshData>& tiles) {
+  for(auto it=chunk_meshes_.begin();it!=chunk_meshes_.end();) {
+    if(it->cx==cx&&it->cz==cz) { if(it->mesh.id) (void)ws::ui::r3d::destroy_mesh(it->mesh); it=chunk_meshes_.erase(it); } else ++it;
+  }
+  for(std::size_t tile=0;tile<tiles.size();++tile) {
+    const auto& cpu=tiles[tile]; if(cpu.vertices.empty()) continue;
+    ws::ui::r3d::MeshData upload; upload.vertices.reserve(cpu.vertices.size());
+    for(const auto& source:cpu.vertices) { ws::ui::r3d::Vertex3D v{}; for(int a=0;a<3;++a){v.pos[a]=source.pos[a];v.normal[a]=source.normal[a];} v.uv[0]=source.uv[0];v.uv[1]=source.uv[1];upload.vertices.push_back(v); }
+    upload.indices=cpu.indices; const auto mesh=ws::ui::r3d::create_mesh(upload);
+    if(!mesh.has_value()){ws::core::log_error(mesh.error());continue;}
+    chunk_meshes_.push_back(ChunkMesh{cx,cz,static_cast<int>(tile),*mesh,static_cast<std::uint32_t>(upload.indices.size())});
+  }
+}
+void VoxelRenderer::process_completed(std::size_t max_jobs) {
+  std::size_t count=0;
+  for(std::size_t slot=0;slot<kChunkCount&&count<max_jobs;++slot) {
+    MeshResult result;
+    { std::lock_guard<std::mutex> lock(queue_mutex_); if(!completed_[slot].ready) continue;
+      if(completed_[slot].revision!=revisions_[slot]){completed_[slot].ready=false;continue;}
+      result=std::move(completed_[slot]);completed_[slot].ready=false;
+    }
+    upload_result(static_cast<int>(slot%kWorldChunksX),static_cast<int>(slot/kWorldChunksX),result.tiles);++count;
+  }
+}
 void VoxelRenderer::rebuild_chunk(const World& world, int cx, int cz) {
   for (auto it = chunk_meshes_.begin(); it != chunk_meshes_.end();) {
     if (it->cx == cx && it->cz == cz) {
