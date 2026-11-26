@@ -23,7 +23,7 @@ namespace {
   const float dx = target.x - current.x;
   const float dz = target.z - current.z;
   const float distance = std::sqrt(dx * dx + dz * dz);
-  if (distance <= max_delta || distance < 1.0e-6f) {
+  if (distance < 1.0e-6f || distance <= max_delta) {
     current.x = target.x;
     current.z = target.z;
   } else {
@@ -42,6 +42,9 @@ bool Player::spawn(const ws::math::Vec3& center) noexcept {
   grounded_ = false;
   coyote_time_ = 0.0f;
   jump_buffer_ = 0.0f;
+  // A spawn starts a fresh run facing the default north direction.
+  yaw_ = 0.0f;
+  pitch_ = 0.0f;
   return true;
 }
 
@@ -60,11 +63,8 @@ void Player::tick(const MoveInput& input, float dt,
   pitch_ -= input.look_dy * tuning_.mouse_sensitivity;
   constexpr float kPitchLimit = 1.5533f;
   pitch_ = std::clamp(pitch_, -kPitchLimit, kPitchLimit);
-  if (yaw_ > std::numbers::pi_v<float>) {
-    yaw_ -= 2.0f * std::numbers::pi_v<float>;
-  } else if (yaw_ < -std::numbers::pi_v<float>) {
-    yaw_ += 2.0f * std::numbers::pi_v<float>;
-  }
+  constexpr float kTwoPi = 2.0f * std::numbers::pi_v<float>;
+  yaw_ = std::remainder(yaw_, kTwoPi);
 
   ws::math::Vec3 move{};
   if (input.forward) move = move + yaw_forward(yaw_);
