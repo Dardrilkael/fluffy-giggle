@@ -81,4 +81,4 @@ class CharacterController {
   CharacterTuning tuning_{};
 };
 
-}  // namespace voxel
+}  // namespace ws::physics3d
