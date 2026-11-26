@@ -29,7 +29,6 @@ inline constexpr float kProbeDistance = 18.0f;
     case Block::sand: return 0.43f;
     case Block::grass: return 0.48f;
     case Block::leaves: return 0.20f;
-    case Block::water: return 0.12f;
     default: return 0.0f;
   }
 }
