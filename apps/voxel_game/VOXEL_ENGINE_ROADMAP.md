@@ -37,7 +37,13 @@ only as a deliberate API migration, never by duplicating the implementation.
 - [x] Keep `WS_VOXEL_BENCH` as the repeatable CPU benchmark.
 - [x] Measure world generation, CPU meshing and CPU upload staging/submission separately; report payload bytes and generated vertex/index counts.
 - [x] Report rolling frame-time p50/p95/p99 and per-benchmark-phase percentiles.
-- [x] Add per-frame-slot Vulkan timestamp queries around the submitted shadow + main render passes; collect only after the slot fence, without stalling or including presentation/vsync. Unsupported queues report GPU timing unavailable.
+- [x] Add per-frame-slot Vulkan timestamp queries around the submitted shadow + main render passes; collect only after the slot fence, without stalling or including presentation/vsync.
+- [x] Add a fixed-camera scalability benchmark with a warm-up interval, configurable render distance/window extent/VSync, per-second scene counters, and update-CPU, wall-frame and GPU p50/p95/p99.
+- [x] Keep benchmark update cost separate from the wall interval between update starts so presentation/pacing does not get mislabeled as game CPU work.
+
+**Scalability benchmark protocol**
+
+Set `WS_VOXEL_BENCH_MODE=scale`, `WS_VOXEL_BENCH=23` (3 seconds warm-up + 20 seconds measured), `WS_VOXEL_BENCH_DISTANCE`, `WS_VOXEL_BENCH_WIDTH`, `WS_VOXEL_BENCH_HEIGHT`, and `WS_VOXEL_BENCH_VSYNC=0`. The fixed mode does not move the player or edit blocks. Keep the seed and camera pose unchanged while sweeping one variable at a time. Capture the emitted `bench:config` line, one-second CSV rows and final percentiles for each run. Unsupported queues report GPU timing unavailable.
 
 ### 1 — CPU meshing and renderer ownership
 
