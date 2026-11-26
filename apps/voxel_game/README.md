@@ -9,7 +9,7 @@ Jolt behind `ws::physics3d`, OpenAL Soft behind `ws::audio`.
 
 - **A procedurally generated 128 × 64 × 128 voxel world** (8×8 chunks of
   16×64×16): value-noise fbm terrain with grass/dirt/stone layers, sand
-  shorelines, water at the shore level, scattered wood trunks.
+  shorelines, water at the shore level, scattered wood trunks and leaf canopies, plus deterministic coal and iron ore deposits.
   Deterministic per seed (seed `0xC0FFEE`).
 - **A first-person player**: WASD movement, mouse look, space jump
   (~1.5 m apex — clears a full block with margin), shift sprint. The
@@ -22,7 +22,7 @@ Jolt behind `ws::physics3d`, OpenAL Soft behind `ws::audio`.
 - **Block interaction**: left mouse breaks and collects drops; right mouse places the selected hotbar stack and consumes one item. The DDA raycast has a 7-block reach and placement cannot entomb the player.
 - **Expanded blocks**: cobblestone, planks, bricks, glass, leaves, coal ore and iron ore join the original terrain palette. Generated trees have leaf crowns and underground stone contains deterministic coal/iron deposits. New variants reuse the closest existing pack textures with distinct tints.
 - **Inventory and crafting**: 27 stackable slots, a 9-slot hotbar, stack limit 64, item counts, and a starter recipe book. E opens inventory, C opens crafting, and F1-F6 craft the listed recipes when materials are available.
-- **HUD**: crosshair, a 5-slot block hotbar (keys 1–5), an FPS counter,
+- **HUD**: crosshair, a 9-slot item hotbar (keys 1–9), an FPS counter,
   position/grounded readout, and the controls line.
 - **Audio**: synthesized place/break "tock" one-shots (in-memory PCM
   through `ws::audio::SoundDesc` — no asset files).
@@ -41,7 +41,7 @@ Jolt behind `ws::physics3d`, OpenAL Soft behind `ws::audio`.
 | F1–F6 | craft listed recipe |
 | LMB | break block |
 | RMB | place block |
-| esc | quit |
+| esc | pause menu |
 
 ## Building
 
