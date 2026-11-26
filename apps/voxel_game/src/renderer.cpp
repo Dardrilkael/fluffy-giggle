@@ -88,6 +88,8 @@ void draw_world(const World& world,
   const culling::Frustum fr = culling::extract_frustum(
       camera.eye, camera.target, camera.up, camera.fov_y, aspect,
       camera.near_z, camera.far_z);
+  // Coordinate-indexed deduplication: chunk_vis is independent of
+  // chunk_meshes() iteration order and counts each non-empty chunk once.
   std::array<bool, kWorldChunksX * kWorldChunksZ> visible_chunks{};
 
   if (counters != nullptr) {
