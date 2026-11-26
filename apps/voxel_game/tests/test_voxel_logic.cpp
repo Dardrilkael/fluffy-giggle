@@ -1307,17 +1307,16 @@ TEST_CASE("player: replaying the same input sequence is bit-for-bit deterministi
 
 TEST_CASE("menu: touching rectangles have unambiguous half-open edge ownership") {
   using voxel::menu::Button;
-  using voxel::menu::hit;
 
   const Button left{0.0f, 0.0f, 10.0f, 10.0f};
   const Button right{10.0f, 0.0f, 10.0f, 10.0f};
-  CHECK_FALSE(hit(left, 10.0f, 5.0f));
-  CHECK(hit(right, 10.0f, 5.0f));
+  CHECK_FALSE(voxel::menu::hit(left, 10.0f, 5.0f));
+  CHECK(voxel::menu::hit(right, 10.0f, 5.0f));
 
   const Button top{0.0f, 0.0f, 10.0f, 10.0f};
   const Button bottom{0.0f, 10.0f, 10.0f, 10.0f};
-  CHECK_FALSE(hit(top, 5.0f, 10.0f));
-  CHECK(hit(bottom, 5.0f, 10.0f));
+  CHECK_FALSE(voxel::menu::hit(top, 5.0f, 10.0f));
+  CHECK(voxel::menu::hit(bottom, 5.0f, 10.0f));
 
   // Four rectangles meet at (10,10). The half-open convention assigns
   // the shared corner to exactly the bottom-right rectangle.
@@ -1325,10 +1324,10 @@ TEST_CASE("menu: touching rectangles have unambiguous half-open edge ownership")
   const Button top_right{10.0f, 0.0f, 10.0f, 10.0f};
   const Button bottom_left{0.0f, 10.0f, 10.0f, 10.0f};
   const Button bottom_right{10.0f, 10.0f, 10.0f, 10.0f};
-  CHECK_FALSE(hit(top_left, 10.0f, 10.0f));
-  CHECK_FALSE(hit(top_right, 10.0f, 10.0f));
-  CHECK_FALSE(hit(bottom_left, 10.0f, 10.0f));
-  CHECK(hit(bottom_right, 10.0f, 10.0f));
+  CHECK_FALSE(voxel::menu::hit(top_left, 10.0f, 10.0f));
+  CHECK_FALSE(voxel::menu::hit(top_right, 10.0f, 10.0f));
+  CHECK_FALSE(voxel::menu::hit(bottom_left, 10.0f, 10.0f));
+  CHECK(voxel::menu::hit(bottom_right, 10.0f, 10.0f));
 
   constexpr float fw = 320.0f;
   constexpr float fh = 240.0f;
