@@ -68,15 +68,13 @@ constexpr int kWaterLevel = 12;
 constexpr int kWorldFloor = 1;
 
 // --- the mesher (GREEDY) ----------------------------------------------------------
-// One (chunk, TILE) mesh: the chunk's exposed faces whose (block, face)
-// pair selects THIS atlas tile (kTileFor), merged into large quads by the
-// classic greedy-meshing sweep - same-direction faces that sit coplanar
-// and adjacent merge into one quad. A hillside of 100 grass blocks is a
-// handful of quads instead of 100; the triangles drop several-fold.
+// The mesher has two stages: one chunk traversal classifies all exposed
+// faces and their atlas tile IDs; direction/plane sweeps then greedily merge
+// cached faces by tile. Equal face textures can merge across block IDs.
 //
-// Face existence is the SAME rule the per-face mesher used: a face
-// emits when the neighbor across it is non-solid; greedy only changes
-// HOW faces group, never WHICH exist. Geometry is RENDER space
+// Face existence preserves the neighbor rule: solid blocks hide solid
+// neighbors; water emits only its top against non-water/non-solid cells.
+// Geometry is RENDER space
 // (world.hpp's frame note), winding CCW by the right-hand (u x v) . n
 // test, normals per face direction - all unchanged.
 //
