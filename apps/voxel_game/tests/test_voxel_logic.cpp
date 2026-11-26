@@ -1326,6 +1326,9 @@ TEST_CASE("meshing: CPU chunk geometry has valid indices and finite attributes")
 }
 
 TEST_CASE("meshing: exposed faces are classified once and greedily grouped by texture") {
+  voxel::World uninitialized;
+  CHECK(uninitialized.build_chunk_meshes(0, 0).empty());
+
   voxel::World world;
   world.generate(0xFACE71E1u);
 
