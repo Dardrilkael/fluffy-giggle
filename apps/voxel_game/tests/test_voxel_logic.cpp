@@ -24,6 +24,7 @@
 #include "bench.hpp"
 #include "perf.hpp"
 #include "menu.hpp"
+#include "player.hpp"
 #include "texture_atlas.hpp"
 #include "world.hpp"
 
@@ -412,6 +413,41 @@ TEST_CASE("frame: the camera reads the rotated world the right way round") {
   const Vec3 south = eye + Vec3{0.0f, 0.0f, -10.0f};
   const Vec3 w_s = south - eye;
   CHECK(ws::math::dot(w_s, fwd) < -9.0f);
+}
+
+TEST_CASE("player: swept grid controller lands, stays supported, and jumps") {
+  voxel::World world = make_world();
+  const auto grid = world.collision_grid();
+  constexpr int x = 64;
+  constexpr int z = 64;
+  const int top = world.surface_height(x, z);
+  REQUIRE(top >= 0);
+
+  voxel::Player player;
+  REQUIRE(player.spawn(ws::math::Vec3{
+      static_cast<float>(x) + 0.5f,
+      static_cast<float>(top) + 3.0f,
+      static_cast<float>(z) + 0.5f}));
+
+  const voxel::Player::MoveInput idle{};
+  for (int i = 0; i < 120; ++i) {
+    player.tick(idle, 1.0f / 60.0f, grid);
+  }
+  CHECK(player.grounded());
+  CHECK(player.position().y >= static_cast<float>(top) + 1.0f +
+                                  0.9f - 0.01f);
+  CHECK_FALSE(grid.overlaps(player.bounds()));
+
+  const float rest_y = player.position().y;
+  voxel::Player::MoveInput jump{};
+  jump.jump = true;
+  player.tick(jump, 1.0f / 60.0f, grid);
+  for (int i = 0; i < 18; ++i) {
+    player.tick(idle, 1.0f / 60.0f, grid);
+  }
+  CHECK(player.position().y > rest_y + 1.2f);
+  CHECK(player.eye_position().y ==
+        doctest::Approx(player.position().y + 0.82f));
 }
 
 TEST_CASE("voxel grid: raycast shares the DDA traversal used by interaction") {
