@@ -13,8 +13,8 @@ namespace voxel {
 struct PlayerTuning {
   float half_width = 0.3f;
   float half_height = 0.9f;
-  float gravity = -32.0f;
-  float jump_speed = 9.8f;
+  float gravity = -24.0f;
+  float jump_speed = 7.75f;
   float walk_speed = 6.0f;
   float sprint_speed = 10.5f;
   float max_fall = 55.0f;
