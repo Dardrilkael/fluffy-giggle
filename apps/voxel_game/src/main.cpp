@@ -318,6 +318,8 @@ class VoxelApp final : public ws::ui::App {
     last_time_ = now;
     const float frame_dt = std::clamp(dt, 0.0f, 0.05f);
     const auto frame_t0 = std::chrono::steady_clock::now();
+    const Vec3 mesh_priority_origin = player_.eye_position();
+    voxel_renderer_.set_priority_origin(mesh_priority_origin.x, mesh_priority_origin.z);
     voxel_renderer_.process_completed(2);
     voxel::perf::FrameTimings timings{};
     mesh_rebuild_ms_ = 0.0f;  // mesh and collision chunk rebuilds feed this
