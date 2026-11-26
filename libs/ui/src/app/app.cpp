@@ -901,9 +901,14 @@ struct App::Impl {
                     renderer2d_.frame_drop();
                     rebuild_swapchain = true;  // the loop top recreates
                 } else {
-                    swapchain_.begin_render_pass(frame, kClearColor);
                     VkCommandBuffer cmd =
                         static_cast<VkCommandBuffer>(frame.command_buffer);
+                    // The directional shadow map is a render pass of its
+                    // own, so it records BEFORE the main pass begins (the
+                    // command buffer is already open from acquire). A frame
+                    // whose light casts no shadows records nothing here.
+                    renderer2d_.record_shadow_pass(cmd, frame.frame_index);
+                    swapchain_.begin_render_pass(frame, kClearColor);
 
                     // 2D world first, widgets on top. This slot's fence was
                     // waited inside acquire, so the batch's vertex upload

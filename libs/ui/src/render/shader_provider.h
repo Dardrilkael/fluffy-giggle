@@ -82,5 +82,9 @@ inline ShaderWords mesh_frag_words(bool bindless) {
     }
     return {kMeshFragSpv, sizeof(kMeshFragSpv) / sizeof(kMeshFragSpv[0])};
 }
+// The shadow-map pass's vertex stage (depth-only; no fragment stage).
+inline ShaderWords shadow_vert_words() {
+    return {kShadowVertSpv, sizeof(kShadowVertSpv) / sizeof(kShadowVertSpv[0])};
+}
 
 }  // namespace ws::ui::r2d::spirv

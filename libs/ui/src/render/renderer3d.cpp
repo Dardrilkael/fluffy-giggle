@@ -24,6 +24,7 @@
 #include <ws/core/log.hpp>
 
 #include "render/renderer2d.h"
+#include "render/renderer3d_math.h"
 
 namespace {
 
@@ -35,6 +36,8 @@ constexpr int kErrBadIndex = 6002;   // index >= vertex count
 constexpr int kErrUnknownMesh = 6003;  // destroy: not a live mesh
 constexpr int kErrBadDir = 6004;     // set_light: zero direction
 constexpr int kErrGpuUpload = 6005;  // create_mesh: the GPU buffer failed
+// (6006 too_many_lights, 6007 bad_light, 6008 outside_frame live with
+// Renderer2D::add_point_light.)
 
 // Handle packing - the Texture contract verbatim (renderer2d.h's
 // kSlotMask/kGenShift/kGenMask): 20-bit slot, 12-bit generation.
@@ -128,6 +131,15 @@ ws::core::Result<r3d::Mesh> Renderer2D::create_mesh(const r3d::MeshData& data) {
     entry.indices = data.indices;
     // A trailing partial triangle never rides: the count rounds down.
     entry.indices.resize(entry.indices.size() / 3 * 3);
+    // The local bounding sphere (the shadow fit's input), once, here.
+    {
+        const r3d::detail::BoundSphere bound =
+            r3d::detail::bound_of(entry.vertices.data(), entry.vertices.size());
+        for (int i = 0; i < 3; ++i) {
+            entry.bound_center[i] = bound.center[i];
+        }
+        entry.bound_radius = bound.radius;
+    }
     // The GPU copy (Phase 2), when a device is up. A mesh with no whole
     // triangle draws nothing and needs no buffer. A failed upload fails the
     // create whole - the slot goes back to the freelist with a bumped
@@ -189,6 +201,14 @@ void Renderer2D::record_mesh(const r3d::MeshMaterial& material,
         cmd.clip[i] = clip[i];
     }
     cmd.tint = material.tint;
+    cmd.specular = material.specular;
+    cmd.shininess = material.shininess;
+    cmd.casts_shadow = material.casts_shadow;
+    cmd.receives_shadow = material.receives_shadow;
+    for (int i = 0; i < 3; ++i) {
+        cmd.bound_center[i] = entry.bound_center[i];
+    }
+    cmd.bound_radius = entry.bound_radius;
     // record()'s texture rule, verbatim: a stale or unknown handle renders
     // white (warned once per frame) and never reaches a descriptor write.
     // Only while a registry exists - headless, synthetic ids pass through
@@ -570,6 +590,15 @@ ws::core::Status set_light(const Light3D& light) {
     return make_error(
         kErrNoApp, "r3d::set_light - no app is running (the light is "
                    "renderer state; headless there is none to set)");
+}
+
+ws::core::Status add_point_light(const PointLight3D& light) {
+    if (r2d::Renderer2D* active = r2d::active_renderer()) {
+        return active->add_point_light(light);
+    }
+    return make_error(
+        kErrNoApp, "r3d::add_point_light - no app is running (the light is "
+                   "frame state; headless there is no frame to add it to)");
 }
 
 ws::core::Result<Mesh> create_mesh(const MeshData& data) {

@@ -48,6 +48,7 @@ void Renderer2D::frame_begin(float fb_width, float fb_height) {
     commands_.clear();  // capacity kept - the frame reuses the arena
     mesh_commands_.clear();  // the mesh path's sibling arena, same rule
     mesh_chunk_marks_.clear();
+    point_lights_.clear();  // lights are frame-scoped, like the draws
     // The epochs restart at 1, so the snapshots go with them. Capacity
     // kept, like every per-frame arena here.
     frame_cameras_.clear();
@@ -225,6 +226,7 @@ void Renderer2D::frame_drop() {
     commands_.clear();
     mesh_commands_.clear();  // a mesh draw never outlives its frame either
     mesh_chunk_marks_.clear();
+    point_lights_.clear();
     frame_cameras_.clear();
     batch_.begin_frame();
     last_stats_ = Stats{};  // an abandoned frame renders nothing
@@ -635,6 +637,36 @@ ws::core::Status Renderer2D::set_light(const r3d::Light3D& light) {
             "direction to light along)");
     }
     light_ = light;  // normalized at shade time (Phase 2), stored as given
+    return {};
+}
+
+ws::core::Status Renderer2D::add_point_light(const r3d::PointLight3D& light) {
+    // A frame-scoped submission: outside a frame it would be forgotten
+    // before anything drew with it, so that is an error, not a silent drop.
+    if (!frame_active_) {
+        return ws::core::fail(
+            6008, "ui",
+            "r3d::add_point_light - called outside a frame (point lights "
+            "are per-frame: add them from on_update())");
+    }
+    const auto finite = [](float v) { return std::isfinite(v); };
+    const bool ok = light.radius > 0.0f && finite(light.radius) &&
+                    finite(light.position[0]) && finite(light.position[1]) &&
+                    finite(light.position[2]) && finite(light.color[0]) &&
+                    finite(light.color[1]) && finite(light.color[2]);
+    if (!ok) {
+        return ws::core::fail(
+            6007, "ui",
+            "r3d::add_point_light - the radius must be positive and every "
+            "number finite");
+    }
+    if (point_lights_.size() >= static_cast<std::size_t>(r3d::kMaxPointLights)) {
+        return ws::core::fail(
+            6006, "ui",
+            "r3d::add_point_light - the frame already carries the maximum "
+            "number of point lights (r3d::kMaxPointLights)");
+    }
+    point_lights_.push_back(light);
     return {};
 }
 
