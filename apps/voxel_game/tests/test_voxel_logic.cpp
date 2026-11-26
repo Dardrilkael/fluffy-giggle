@@ -27,6 +27,7 @@
 #include "perf.hpp"
 #include "menu.hpp"
 #include "hotbar.hpp"
+#include "settings_menu.hpp"
 #include "player.hpp"
 #include "texture_atlas.hpp"
 #include "world.hpp"
@@ -754,6 +755,30 @@ TEST_CASE("hotbar: nine slots are centered, ordered, and hit-tested") {
   CHECK(voxel::hotbar::selected(
             fw, fh, slots[0].bounds.x + slots[0].bounds.w,
             slots[0].bounds.y) == -1);
+}
+
+TEST_CASE("settings: sliders are centered, ordered and map clicks to bounded values") {
+  constexpr float fw = 1280.0f, fh = 720.0f;
+  const auto sliders = voxel::settings_menu::layout(fw, fh);
+  for (int i = 0; i < voxel::settings_menu::kSliderCount; ++i) {
+    const auto& slider = sliders[static_cast<std::size_t>(i)];
+    CHECK(slider.index == i);
+    CHECK(slider.bounds.w == voxel::settings_menu::kSliderWidth);
+    CHECK(voxel::settings_menu::selected(
+              fw, fh, slider.bounds.x + slider.bounds.w * 0.5f,
+              slider.bounds.y + slider.bounds.h * 0.5f) == i);
+    CHECK(voxel::settings_menu::value_from_x(slider, slider.bounds.x) ==
+          doctest::Approx(slider.minimum));
+    CHECK(voxel::settings_menu::value_from_x(slider,
+              slider.bounds.x + slider.bounds.w) == doctest::Approx(slider.maximum));
+    CHECK(voxel::settings_menu::value_from_x(slider,
+              slider.bounds.x - 100.0f) == doctest::Approx(slider.minimum));
+  }
+  CHECK(voxel::settings_menu::selected(fw, fh, 0.0f, 0.0f) == -1);
+  const voxel::settings_menu::Settings defaults{};
+  CHECK(defaults.mouse_sensitivity == doctest::Approx(0.0025f));
+  CHECK(defaults.fov_degrees == doctest::Approx(70.0f));
+  CHECK(defaults.render_distance == doctest::Approx(260.0f));
 }
 
 TEST_CASE("bench: a default-constructed driver is idle, not running") {
