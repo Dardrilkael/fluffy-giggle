@@ -2,12 +2,11 @@
 // DDA raycast. See world.hpp for the design (the two coordinate
 // frames, the per-(chunk, type) mesh set, the neighbor culling rule).
 //
-// Terrain: value-noise fbm (two octaves of smoothstep-interpolated
-// hashed lattice values - deterministic per seed, no third party).
-// The column spell: sand near water level, grass above, 3 dirt under
-// the top, stone beneath; scattered 4-high wood trunks on grass
-// columns a hash dice fires on; water fills every cell at or below
-// its level the terrain does not.
+// Terrain: deterministic multi-field FBM climate and height generation.
+// Temperature/moisture select desert, plains and forest; ridged height
+// fields create mountain regions; warped low-frequency noise carves
+// rivers. 3D coherent density carves caves and clustered 3D noise places
+// ore veins. All fields are seed-stable and continuous across chunks.
 
 #include "texture_atlas.hpp"
 #include "world.hpp"
