@@ -128,13 +128,13 @@ TEST_CASE("raycast: a straight-down ray hits the surface block below it") {
   const float down[3] = {0.0f, -1.0f, 0.0f};
   const auto hit = world.raycast(origin, down, 20.0f);
   REQUIRE(hit.hit);
-  CHECK(hit.cell[0] == x);
-  CHECK(hit.cell[1] == surface);
-  CHECK(hit.cell[2] == z);
+  CHECK(hit.cell.x == x);
+  CHECK(hit.cell.y == surface);
+  CHECK(hit.cell.z == z);
   // Entered through the top: the normal points +y.
-  CHECK(hit.normal[0] == 0);
-  CHECK(hit.normal[1] == 1);
-  CHECK(hit.normal[2] == 0);
+  CHECK(hit.normal.x == 0);
+  CHECK(hit.normal.y == 1);
+  CHECK(hit.normal.z == 0);
   // The distance: the ray enters the hit cell at its top boundary
   // (y = surface + 1), having fallen from origin y = surface + 5.5 -
   // a 4.5 fall. (The walk reports the boundary crossing, not the
@@ -155,9 +155,9 @@ TEST_CASE("raycast: the place cell is hit + normal, one up") {
   REQUIRE(hit.hit);
   // The placement the game would make: the cell above the hit, along
   // the normal.
-  CHECK(hit.cell[1] + hit.normal[1] == surface + 1);
+  CHECK(hit.cell.y + hit.normal.y == surface + 1);
   // That cell is air (the place rule checks it).
-  CHECK(world.block_at(hit.cell[0], surface + 1, hit.cell[2]) ==
+  CHECK(world.block_at(hit.cell.x, surface + 1, hit.cell.z) ==
         voxel::Block::air);
 }
 
@@ -202,12 +202,12 @@ TEST_CASE("raycast: an eye-height ray into a wall's face reports the face") {
   const float south[3] = {0.0f, 0.0f, 1.0f};
   const auto hit = world.raycast(origin, south, 10.0f);
   REQUIRE(hit.hit);
-  CHECK(hit.cell[2] == 50);
-  CHECK(hit.normal[2] == -1);
-  CHECK(hit.normal[0] == 0);
-  CHECK(hit.normal[1] == 0);
+  CHECK(hit.cell.z == 50);
+  CHECK(hit.normal.z == -1);
+  CHECK(hit.normal.x == 0);
+  CHECK(hit.normal.y == 0);
   // Placement: the empty cell north of the wall.
-  CHECK(world.block_at(hit.cell[0], hit.cell[1], hit.cell[2] - 1) ==
+  CHECK(world.block_at(hit.cell.x, hit.cell.y, hit.cell.z - 1) ==
         voxel::Block::air);
 }
 
