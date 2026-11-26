@@ -101,7 +101,7 @@ struct CameraSnapshot {
 // agree, so the constant lives here rather than in two files.
 // The shadow map's side, in texels (square). 2048 is crisp for a UI-scale
 // scene and costs 16 MB per frame slot at 32-bit depth.
-inline constexpr std::uint32_t kShadowMapSize = 2048;
+inline constexpr std::uint32_t kDefaultShadowMapSize = 2048;
 inline constexpr std::uint32_t kMaxFramesInFlight = 2;
 
 // Texture id packing: id = (generation << kGenShift) | slot. The slot is
@@ -662,6 +662,8 @@ private:
     // --- Vulkan state (null/empty until init()) ---
     VkDevice device_ = VK_NULL_HANDLE;
     VkPhysicalDevice physical_device_ = VK_NULL_HANDLE;
+    // Fixed for the renderer lifetime; shadow images/framebuffers are allocated once.
+    std::uint32_t shadow_map_size_ = kDefaultShadowMapSize;
     // The device layer: buffers, images and shader modules come from its
     // methods, and the VMA allocator behind them stays inside gfx.
     const gfx::Gpu* gpu_ = nullptr;
