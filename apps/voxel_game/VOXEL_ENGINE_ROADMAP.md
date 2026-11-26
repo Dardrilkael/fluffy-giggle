@@ -52,8 +52,8 @@ only as a deliberate API migration, never by duplicating the implementation.
 - [ ] Verify CPU/GPU suites on CI and target PC.
 - [ ] Compare meshing time and edit-time frame spikes against baseline.
 - [ ] Reuse output buffer capacity across rebuilds.
-- [ ] Classify exposed faces once per chunk traversal instead of rescanning
-  for every material/tile.
+- [x] Classify all exposed faces and tile IDs in one chunk traversal, then
+  build greedy masks by tile without rereading voxel neighbors.
 - [x] Cache chunk bounds/frustum visibility once per chunk per frame.
 
 **Exit:** same world geometry, CPU meshing without an active renderer, and no
