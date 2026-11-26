@@ -124,6 +124,26 @@ constexpr int kKeyF1 = 290;
     default: return false;
   }
 }
+[[nodiscard]] int item_tile(voxel::Item item) {
+  // Inventory icons use the exact same generated PNGs as world geometry.
+  // Sticks and ingots are crafted materials, so they keep a clean tint icon.
+  switch (item) {
+    case voxel::Item::grass: return 0;
+    case voxel::Item::dirt: return 1;
+    case voxel::Item::stone: return 3;
+    case voxel::Item::wood: return 4;
+    case voxel::Item::sand: return 6;
+    case voxel::Item::cobblestone: return 8;
+    case voxel::Item::planks: return 9;
+    case voxel::Item::bricks: return 10;
+    case voxel::Item::glass: return 11;
+    case voxel::Item::leaves: return 12;
+    case voxel::Item::coal: return 13;
+    case voxel::Item::iron_ore: return 14;
+    default: return -1;
+  }
+}
+
 [[nodiscard]] voxel::Item block_drop(voxel::Block block) {
   switch (block) {
     case voxel::Block::grass: return voxel::Item::grass;
@@ -198,11 +218,9 @@ class VoxelApp final : public ws::ui::App {
     // break/place pass never sees it.
     (void)d.dispatch<ws::input::MouseButtonPressedEvent>(
         [this](const ws::input::MouseButtonPressedEvent& ev) {
-          if (paused_) {
+          if (paused_ || inventory_open_ || crafting_open_) {
             clicked_ = ev.button == 0;
-            if (clicked_) {
-              return true;  // consumed: the menu ate the click
-            }
+            if (clicked_) return true;  // modal UI owns this click
           }
           return false;
         });
@@ -352,9 +370,24 @@ class VoxelApp final : public ws::ui::App {
       return;
     }
 
-    if (input.key_pressed[kKeyE]) inventory_open_ = !inventory_open_;
-    if (input.key_pressed[kKeyC]) crafting_open_ = !crafting_open_;
+    if (input.key_pressed[kKeyE]) {
+      inventory_open_ = !inventory_open_;
+      if (inventory_open_) crafting_open_ = false;
+      set_cursor_mode((inventory_open_ || crafting_open_)
+                          ? ws::ui::CursorMode::normal
+                          : ws::ui::CursorMode::hidden);
+      clicked_ = false;
+    }
+    if (input.key_pressed[kKeyC]) {
+      crafting_open_ = !crafting_open_;
+      if (crafting_open_) inventory_open_ = false;
+      set_cursor_mode((inventory_open_ || crafting_open_)
+                          ? ws::ui::CursorMode::normal
+                          : ws::ui::CursorMode::hidden);
+      clicked_ = false;
+    }
     if (inventory_open_ || crafting_open_) {
+      inventory_action(frame);
       // The panels are modal: do not move or edit the world while open.
       r2d::begin(); r2d::set_layer(0);
       r2d::draw_quad(0, 0, frame.width, frame.height, r2d::rgba(135,196,250));
@@ -570,30 +603,173 @@ class VoxelApp final : public ws::ui::App {
         font_, r2d::rgba(160, 164, 174));
   }
 
-  void draw_inventory_panels(const r2d::FrameSize& frame) {
-    if (font_.empty()) return;
-    const float x = frame.width * 0.5f - 250.0f, y = frame.height * 0.5f - 190.0f;
-    r2d::draw_quad(x, y, 500, 380, r2d::rgba(22,25,32,238));
+  void draw_item_icon(voxel::Item item, float x, float y, float size) {
+    const int tile = item_tile(item);
+    if (tile >= 0 && tile < voxel::atlas::kTileCount) {
+      r2d::draw_quad(x, y, size, size, r2d::rgba(255,255,255),
+                     tile_textures_[static_cast<std::size_t>(tile)]);
+    } else {
+      // Crafted non-block items have no matching world texture.
+      r2d::draw_rounded_quad(x, y, size, size, 5.0f, item_tint(item));
+      if (item == voxel::Item::sticks) {
+        r2d::draw_line(x + size*0.25f, y + size*0.78f,
+                       x + size*0.76f, y + size*0.20f, 4.0f,
+                       r2d::rgba(226,184,119));
+        r2d::draw_line(x + size*0.40f, y + size*0.85f,
+                       x + size*0.90f, y + size*0.28f, 3.0f,
+                       r2d::rgba(150,105,62));
+      } else {
+        r2d::draw_rounded_quad(x + size*0.12f, y + size*0.34f,
+                               size*0.76f, size*0.34f, 4.0f,
+                               r2d::rgba(235,239,245));
+      }
+    }
+  }
+
+  void inventory_action(const r2d::FrameSize& frame) {
+    if (!clicked_) return;
+    clicked_ = false;
     if (inventory_open_) {
-      (void)r2d::draw_text(x+18,y+16,"INVENTORY  (E to close)",font_,r2d::rgba(245,245,250));
-      for (int i=0;i<27;++i) {
-        const int col=i%9,row=i/9; const float sx=x+18+col*52, sy=y+54+row*58;
-        r2d::draw_quad(sx,sy,46,50,r2d::rgba(55,60,70));
-        const auto& st=inventory_.slot(static_cast<std::size_t>(i));
-        if (!st.empty()) {
-          r2d::draw_quad(sx+7,sy+7,20,20,item_tint(st.item));
-          char txt[24]; std::snprintf(txt,sizeof(txt),"%s x%u",item_name(st.item),st.count);
-          (void)r2d::draw_text(sx+3,sy+31,txt,font_,r2d::rgba(230,232,238));
+      const float x = frame.width * 0.5f - 350.0f;
+      const float y = frame.height * 0.5f - 190.0f;
+      const float gx = x + 28.0f, gy = y + 100.0f;
+      for (int i = 0; i < static_cast<int>(voxel::kInventorySize); ++i) {
+        const int col = i % 9, row = i / 9;
+        const float sx = gx + col * 54.0f, sy = gy + row * 56.0f;
+        if (mouse_x_ < sx || mouse_x_ > sx + 48.0f ||
+            mouse_y_ < sy || mouse_y_ > sy + 48.0f) continue;
+        if (i < kHotbarSlots) {
+          hotbar_ = i;
+        } else {
+          inventory_.swap_slots(static_cast<std::size_t>(hotbar_),
+                                static_cast<std::size_t>(i));
+        }
+        return;
+      }
+    } else if (crafting_open_) {
+      const float x = frame.width * 0.5f - 270.0f;
+      const float y = frame.height * 0.5f - 205.0f;
+      for (std::size_t i = 0; i < voxel::kRecipes.size(); ++i) {
+        const float sy = y + 104.0f + static_cast<float>(i) * 48.0f;
+        if (mouse_x_ >= x + 24.0f && mouse_x_ <= x + 516.0f &&
+            mouse_y_ >= sy && mouse_y_ <= sy + 42.0f) {
+          (void)voxel::craft(inventory_, voxel::kRecipes[i]);
+          return;
         }
       }
     }
-    if (crafting_open_) {
-      (void)r2d::draw_text(x+18,y+250,"CRAFTING  (F1-F6 craft, C to close)",font_,r2d::rgba(245,245,250));
-      for (std::size_t i=0;i<voxel::kRecipes.size();++i) {
-        const auto& recipe=voxel::kRecipes[i]; char txt[96];
-        std::snprintf(txt,sizeof(txt),"F%u  %s x%u  [%s]",static_cast<unsigned>(i+1),item_name(recipe.output),recipe.output_count,voxel::can_craft(inventory_,recipe)?"ready":"missing materials");
-        (void)r2d::draw_text(x+22,y+278+static_cast<float>(i)*16,txt,font_,voxel::can_craft(inventory_,recipe)?r2d::rgba(150,230,160):r2d::rgba(155,160,170));
+  }
+
+  void draw_inventory_panels(const r2d::FrameSize& frame) {
+    if (font_.empty()) return;
+    const bool inventory_view = inventory_open_;
+    const float panel_w = inventory_view ? 700.0f : 540.0f;
+    const float panel_h = inventory_view ? 370.0f : 430.0f;
+    const float x = (frame.width - panel_w) * 0.5f;
+    const float y = (frame.height - panel_h) * 0.5f;
+
+    // Soft dimmer + layered panel, matching the resource pack's earthy palette.
+    r2d::draw_quad(0, 0, frame.width, frame.height, r2d::rgba(7,10,15,150));
+    r2d::draw_rounded_quad(x, y + 5, panel_w, panel_h, 12,
+                           r2d::rgba(0,0,0,105));
+    r2d::draw_rounded_quad(x, y, panel_w, panel_h, 12,
+                           r2d::rgba(25,29,35,248));
+    r2d::draw_rounded_quad(x + 2, y + 2, panel_w - 4, 48, 10,
+                           r2d::rgba(42,49,57,255));
+    r2d::draw_quad(x + 16, y + 49, panel_w - 32, 1,
+                   r2d::rgba(112,139,91,210));
+
+    if (inventory_view) {
+      (void)r2d::draw_text(x + 22, y + 15, "INVENTORY",
+                           font_, r2d::rgba(247,244,232));
+      (void)r2d::draw_text(x + panel_w - 178, y + 17,
+                           "E  CLOSE", font_, r2d::rgba(177,187,174));
+
+      (void)r2d::draw_text(x + 28, y + 72, "ITEMS",
+                           font_, r2d::rgba(177,187,174));
+      const float gx = x + 28.0f, gy = y + 100.0f;
+      for (int i = 0; i < static_cast<int>(voxel::kInventorySize); ++i) {
+        const int col = i % 9, row = i / 9;
+        const float sx = gx + col * 54.0f, sy = gy + row * 56.0f;
+        const bool selected = i == hotbar_;
+        const bool hovered = mouse_x_ >= sx && mouse_x_ <= sx + 48.0f &&
+                             mouse_y_ >= sy && mouse_y_ <= sy + 48.0f;
+        const auto& stack = inventory_.slot(static_cast<std::size_t>(i));
+        r2d::draw_rounded_quad(sx, sy, 48, 48, 6,
+            selected ? r2d::rgba(102,132,76,255)
+                     : hovered ? r2d::rgba(83,94,82,255)
+                               : r2d::rgba(47,54,60,255));
+        r2d::draw_rounded_quad(sx + 2, sy + 2, 44, 44, 5,
+            selected ? r2d::rgba(31,43,34,255)
+                     : r2d::rgba(31,36,42,255));
+        if (!stack.empty()) {
+          draw_item_icon(stack.item, sx + 8, sy + 7, 31);
+          char amount[8];
+          std::snprintf(amount, sizeof(amount), "%u", stack.count);
+          (void)r2d::draw_text(sx + 30, sy + 33, amount, font_,
+                               r2d::rgba(255,255,255));
+        }
+        if (i < kHotbarSlots) {
+          char key[2] = {static_cast<char>('1' + i), '\0'};
+          (void)r2d::draw_text(sx + 4, sy + 3, key, font_,
+                               r2d::rgba(190,198,184));
+        }
       }
+
+      // Selected-item inspector.
+      const float ix = x + 525.0f, iy = y + 76.0f;
+      r2d::draw_rounded_quad(ix, iy, 150, 220, 8,
+                             r2d::rgba(35,41,46,255));
+      (void)r2d::draw_text(ix + 14, iy + 14, "SELECTED",
+                           font_, r2d::rgba(177,187,174));
+      const auto& selected = inventory_.slot(static_cast<std::size_t>(hotbar_));
+      if (!selected.empty()) {
+        draw_item_icon(selected.item, ix + 48, iy + 48, 54);
+        (void)r2d::draw_text(ix + 14, iy + 116, item_name(selected.item),
+                             font_, r2d::rgba(246,244,232));
+        char count[32];
+        std::snprintf(count, sizeof(count), "Quantity: %u", selected.count);
+        (void)r2d::draw_text(ix + 14, iy + 143, count, font_,
+                             r2d::rgba(184,194,179));
+      } else {
+        (void)r2d::draw_text(ix + 14, iy + 58, "Empty slot",
+                             font_, r2d::rgba(155,163,165));
+      }
+      (void)r2d::draw_text(x + 28, y + panel_h - 34,
+          "Click a hotbar slot to select  |  Click another item to swap it into the hotbar",
+          font_, r2d::rgba(164,174,164));
+    } else {
+      (void)r2d::draw_text(x + 22, y + 15, "CRAFTING",
+                           font_, r2d::rgba(247,244,232));
+      (void)r2d::draw_text(x + panel_w - 172, y + 17,
+                           "C  CLOSE", font_, r2d::rgba(177,187,174));
+      (void)r2d::draw_text(x + 24, y + 72, "RECIPES",
+                           font_, r2d::rgba(177,187,174));
+      for (std::size_t i = 0; i < voxel::kRecipes.size(); ++i) {
+        const auto& recipe = voxel::kRecipes[i];
+        const bool ready = voxel::can_craft(inventory_, recipe);
+        const float sy = y + 100.0f + static_cast<float>(i) * 48.0f;
+        r2d::draw_rounded_quad(x + 20, sy, 500, 42, 6,
+            ready ? r2d::rgba(48,65,48,255) : r2d::rgba(39,44,49,255));
+        draw_item_icon(recipe.output, x + 30, sy + 6, 30);
+        char output[48];
+        std::snprintf(output, sizeof(output), "%s  x%u",
+                      item_name(recipe.output), recipe.output_count);
+        (void)r2d::draw_text(x + 72, sy + 7, output, font_,
+                             r2d::rgba(242,241,229));
+        char key[16];
+        std::snprintf(key, sizeof(key), "F%u", static_cast<unsigned>(i + 1));
+        (void)r2d::draw_text(x + 452, sy + 7, key, font_,
+                             ready ? r2d::rgba(174,222,145)
+                                   : r2d::rgba(132,140,143));
+        (void)r2d::draw_text(x + 72, sy + 24,
+            ready ? "Ready to craft" : "Missing ingredients",
+            font_, ready ? r2d::rgba(165,211,143)
+                         : r2d::rgba(145,151,153));
+      }
+      (void)r2d::draw_text(x + 24, y + panel_h - 30,
+          "Click a recipe or press F1-F6  |  C to close",
+          font_, r2d::rgba(164,174,164));
     }
   }
 
