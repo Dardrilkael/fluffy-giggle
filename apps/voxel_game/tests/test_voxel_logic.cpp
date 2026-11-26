@@ -1327,7 +1327,7 @@ TEST_CASE("meshing: CPU chunk geometry has valid indices and finite attributes")
 
 TEST_CASE("meshing: exposed faces are classified once and greedily grouped by texture") {
   voxel::World world;
-  world.generate(0xFACE71LEu);
+  world.generate(0xFACE71E1u);
 
   constexpr int cx = 4;
   constexpr int cz = 4;
@@ -1365,10 +1365,10 @@ TEST_CASE("meshing: exposed faces are classified once and greedily grouped by te
   clear_chunk();
   CHECK(world.set_block(x, y, z, voxel::Block::water));
   const auto water = world.build_chunk_meshes(cx, cz);
-  REQUIRE(water.size() == 1);
+  REQUIRE(water.size() == 1u);
   CHECK(water[0].tile == 7);
-  CHECK(water[0].geometry.vertices.size() == 4);
-  CHECK(water[0].geometry.indices.size() == 6);
+  CHECK(water[0].geometry.vertices.size() == 4u);
+  CHECK(water[0].geometry.indices.size() == 6u);
 }
 
 TEST_CASE("voxel acoustics: six room boundaries become sorted early reflections") {
