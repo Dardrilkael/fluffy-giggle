@@ -3,6 +3,7 @@
 
 #include <ws/image/image.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -139,6 +140,12 @@ int generate_command(int argc, char** argv) {
 
     const std::size_t width = parse_size(argv[2], "width");
     const std::size_t depth = parse_size(argv[3], "depth");
+    constexpr std::size_t max_voxels = 64u * 1024u * 1024u;
+    if (width > std::numeric_limits<std::size_t>::max() / depth ||
+        width * depth > max_voxels / 64u) {
+        throw std::runtime_error(
+            "requested terrain volume exceeds the 64-million-voxel POC limit");
+    }
     const std::uint32_t seed = parse_seed(argv[4]);
 
     rgba_terrain::TerrainSettings settings;
@@ -194,10 +201,13 @@ int generate_command(int argc, char** argv) {
         rgba_terrain::ChannelRole::MaterialId,
         rgba_terrain::ChannelRole::BiomeWaterFlags,
     }};
+    // Decode the just-written PNG again: voxelization consumes the persisted
+    // data map, not a separate in-memory terrain representation.
+    const auto decoded_image = rgba_terrain::load_rgba_image(argv[5]);
     const auto volume = rgba_terrain::generate_voxel_volume(
-        image, layout, settings);
+        decoded_image, layout, settings);
     write_voxel_file(volume, argv[7]);
-    print_map_report(image, volume);
+    print_map_report(decoded_image, volume);
     std::cout << "Wrote data PNG: " << argv[5] << "\n"
               << "Wrote metadata: " << argv[6] << "\n"
               << "Wrote voxels: " << argv[7] << "\n";
