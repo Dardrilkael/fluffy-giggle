@@ -27,6 +27,16 @@ if(TARGET test_voxel_logic)
   target_link_libraries(test_voxel_logic PRIVATE Threads::Threads)
 endif()
 
+ws_add_test(voxel_terrain_import
+  SOURCES src/world.cpp src/terrain_import.cpp tests/test_terrain_import.cpp
+  LINK ws::ui
+  DEPENDS ws::physics ws::gameplay ws::rgba_terrain_core)
+if(TARGET test_voxel_terrain_import)
+  target_include_directories(test_voxel_terrain_import PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_SOURCE_DIR}/libs/physics/include")
+endif()
+
 # The frame harness: the app's own frame rendered headless on a real
 # Vulkan device (lavapipe is enough) with the pixels READ BACK - the
 # terrain/horizon/displacement pins behind the two field reports.
