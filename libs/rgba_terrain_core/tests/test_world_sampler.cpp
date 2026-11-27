@@ -328,6 +328,7 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
     };
     REQUIRE(erosion_diagnostics.drainage_direction.width == 96);
     REQUIRE(erosion_diagnostics.drainage_direction.height == 96);
+    std::vector<bool> routing_ocean_mask(routing_cell_count, false);
     std::size_t land_routing_cells = 0;
     std::size_t ocean_routing_cells = 0;
     for (std::size_t z = 0; z < routing_height; ++z) {
@@ -336,7 +337,10 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
                 x * routing_cell_scale + routing_cell_scale / 2;
             const std::size_t world_z =
                 z * routing_cell_scale + routing_cell_scale / 2;
-            if (is_ocean_routing_cell(world_x, world_z)) {
+            const std::size_t cell_index = z * routing_width + x;
+            routing_ocean_mask[cell_index] =
+                is_ocean_routing_cell(world_x, world_z);
+            if (routing_ocean_mask[cell_index]) {
                 ++ocean_routing_cells;
             } else {
                 ++land_routing_cells;
@@ -354,7 +358,9 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
                 start_x * routing_cell_scale + routing_cell_scale / 2;
             const std::size_t start_world_z =
                 start_z * routing_cell_scale + routing_cell_scale / 2;
-            if (is_ocean_routing_cell(start_world_x, start_world_z)) {
+            const std::size_t start_cell =
+                start_z * routing_width + start_x;
+            if (routing_ocean_mask[start_cell]) {
                 continue;
             }
 
@@ -371,8 +377,9 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
                     erosion_diagnostics.drainage_direction.at(world_x, world_z);
                 if (direction_pixel.r == 0u && direction_pixel.g == 0u &&
                     direction_pixel.b == 0u) {
-                    reached_ocean =
-                        is_ocean_routing_cell(world_x, world_z);
+                    const std::size_t terminal_cell =
+                        current_z * routing_width + current_x;
+                    reached_ocean = routing_ocean_mask[terminal_cell];
                     const bool reached_boundary =
                         current_x == 0 || current_z == 0 ||
                         current_x + 1u == routing_width ||
