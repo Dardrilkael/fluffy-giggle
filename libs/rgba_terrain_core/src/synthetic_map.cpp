@@ -5,6 +5,7 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace ws::rgba_terrain_core {
 
@@ -44,16 +45,10 @@ RgbaImage generate_synthetic_map(std::size_t width, std::size_t depth,
     plan.scales.sub_biome_scale = 11.52;
     plan.scales.habitat_scale = 3.84;
     plan.hydrology.routing_cell_scale = 8.0;
-    plan.sea_level_fraction =
+    plan.sea_level_fraction = std::clamp(
         (static_cast<double>(settings.sea_level) - settings.min_height) /
-        (static_cast<double>(settings.max_height) - settings.min_height);
-    // The v1 settings API permits a sea level at either endpoint. WorldPlan
-    // requires an interior fraction, so reject only the impossible mapping.
-    if (!(plan.sea_level_fraction > 0.0 &&
-          plan.sea_level_fraction < 1.0)) {
-        throw std::invalid_argument(
-            "synthetic map sea level must lie strictly between min and max height");
-    }
+            (static_cast<double>(settings.max_height) - settings.min_height),
+        0.001, 0.999);
 
     const double sea_normalized = plan.sea_level_fraction;
     const WorldSampler sampler(std::move(plan));
