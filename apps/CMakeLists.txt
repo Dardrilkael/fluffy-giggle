@@ -156,3 +156,8 @@ if(ws_want_glyph_probe)
   # live sliders for gamma/boost overrides. No assets: system font only.
   add_subdirectory(glyph_probe)
 endif()
+
+# terrain_gen_experiments - standalone AI terrain parameter POC (no ws deps)
+if(WS_BUILD_APPS)
+  add_subdirectory(terrain_gen_experiments)
+endif()

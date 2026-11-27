@@ -5,6 +5,7 @@
 
 #include "ai_terrain/region_simulation.hpp"
 #include "ai_terrain/terrain_analyzer.hpp"
+#include "ai_terrain/fuzzy_controller.hpp"
 #include "ai_terrain/test_terrain.hpp"
 
 namespace {
