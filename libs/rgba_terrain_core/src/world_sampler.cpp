@@ -1602,7 +1602,10 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
             const TerrainField terrain = evaluate_terrain(
                 plan, world_x, world_z, bias);
             elevation[i] = terrain.normalized_elevation;
-            mountain_strength[i] = terrain.mountain_strength;
+            const double regional_uplift_strength =
+                smoothstep(0.025, 0.12, std::max(0.0, bias));
+            mountain_strength[i] = clamp01(
+                std::max(terrain.mountain_strength, regional_uplift_strength));
             ocean[i] = terrain.is_ocean(plan.sea_level_fraction);
             const ClimateField climate = evaluate_climate(
                 plan, world_x, world_z, regions, terrain);
@@ -2347,14 +2350,14 @@ RgbaImage WorldSampler::generate_rgba_region(
                 const double mountain_system_radius = std::max(
                     plan_.hydrology.routing_cell_scale,
                     plan_.scales.province_scale * 0.24);
-                const double mountain_proximity =
+                const double mountain_distance_normalized =
                     hydrology_grid.valid &&
                     std::isfinite(hydro.mountain_peak_distance_m)
-                        ? std::exp(-hydro.mountain_peak_distance_m /
-                                   mountain_system_radius)
-                        : 0.0;
+                        ? clamp01(hydro.mountain_peak_distance_m /
+                                  (mountain_system_radius * 3.0))
+                        : 1.0;
                 hydrology_diagnostics->mountain_peak_distance.pixels[index] =
-                    diagnostic_pixel(mountain_proximity);
+                    diagnostic_pixel(mountain_distance_normalized);
 
                 std::size_t routing_index = 0;
                 if (hydrology_grid.valid) {
