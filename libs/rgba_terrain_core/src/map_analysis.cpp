@@ -97,7 +97,7 @@ TerrainMapAnalysis analyze_map(const RgbaImage& image,
                 (column.feature_flags & 0x10u) != 0 ? 1u : 0u;
             result.river_columns +=
                 (column.feature_flags & 0x20u) != 0 ? 1u : 0u;
-            result.reserved_flag_columns +=
+            result.lake_columns +=
                 (column.feature_flags & 0x40u) != 0 ? 1u : 0u;
 
             if (x > 0) {
