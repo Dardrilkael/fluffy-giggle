@@ -52,11 +52,19 @@ Invoke-NativeStep "ctest" @(
     "-R", "^(image($|[.])|rgba_terrain_tests$)"
 )
 
-$Executable = Join-Path $BuildDir "bin"
+$ExecutableName = "rgba_terrain_poc"
 if ($IsWindows -or $env:OS -eq "Windows_NT") {
-    $Executable = Join-Path $Executable "rgba_terrain_poc.exe"
-} else {
-    $Executable = Join-Path $Executable "rgba_terrain_poc"
+    $ExecutableName += ".exe"
+}
+$ExecutableCandidates = @(
+    (Join-Path $BuildDir "bin\$Configuration\$ExecutableName"),
+    (Join-Path $BuildDir "bin\$ExecutableName")
+)
+$Executable = $ExecutableCandidates |
+    Where-Object { Test-Path $_ } |
+    Select-Object -First 1
+if (-not $Executable) {
+    $Executable = $ExecutableCandidates[0]
 }
 
 Write-Host ""
