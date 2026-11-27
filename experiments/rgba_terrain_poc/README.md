@@ -43,9 +43,9 @@ The generated PNG uses every channel:
 
 Height is stored as a normalized unsigned 16-bit value and mapped to the
 world-height range in the sidecar. The generated map currently uses height
-0..56 in a 64-voxel-high volume. PNG is written losslessly and then decoded
-again before voxel generation, so the voxel stage consumes the persisted
-channel values.
+0..56 in a 64-voxel-high volume. PNG and metadata are written to disk and then both are reloaded before
+voxel generation. This exercises the image decoder and sidecar parser, so the
+voxel stage consumes the persisted channel values and settings.
 
 The metadata role `biome_water_flags` decodes alpha into the biome ID and
 feature flags. It cannot be combined with separate `biome_id` or
