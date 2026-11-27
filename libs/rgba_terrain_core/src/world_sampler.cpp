@@ -409,7 +409,7 @@ double evaluate_runoff(const ClimateField& climate) {
         smoothstep(-1.0, 2.0, climate.temperature_c);
     const double melt_fraction =
         (1.0 - rain_fraction) *
-        smoothstep(-6.0, 5.0, climate.temperature_c) * 0.70;
+        smoothstep(0.0, 6.0, climate.temperature_c) * 0.70;
     return climate.precipitation *
            clamp01(rain_fraction + melt_fraction);
 }
