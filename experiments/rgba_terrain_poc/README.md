@@ -12,18 +12,21 @@ From the repository root, build with:
 
 Then run:
 
-    rgba_terrain_poc generate 256 256 0xC0FFEE terrain.png terrain.rgba-terrain terrain.rgba-voxels
+    rgba_terrain_poc generate-world 256 256 0xC0FFEE terrain.png terrain.rgba-terrain terrain.rgba-voxels
 
 The command produces three files:
 - `terrain.png`: a machine-authored RGBA8 data map, not a colorized preview
 - `terrain.rgba-terrain`: explicit channel and voxel-generation metadata
 - `terrain.rgba-voxels`: the resulting dense 3D voxel volume
 
-The map is deterministic for a given size and seed. Its current synthetic fields
-include broad continental variation, hills, ridged mountain regions, simple
-temperature/moisture biome classification, and a meandering river corridor.
-The river is a deliberately simple synthetic mask and height cut, not a
-hydrological drainage simulation.
+The `generate-world` command uses the plan-based WorldSampler: multi-scale
+continents, regional terrain influences, coupled temperature/moisture,
+precipitation, D8 drainage, bounded watershed accumulation, river carving and
+local lake candidates. It is deterministic for a given size and seed.
+
+The older `generate` command remains available as a legacy synthetic-map
+baseline; it does not exercise the plan-based environmental or hydrology
+simulation. Use `generate-world` when testing the new generator.
 
 ## Load the map in the voxel game
 
@@ -54,7 +57,7 @@ The generated PNG uses every channel:
 | A bit 3 | Forest flag |
 | A bit 4 | Mountain flag |
 | A bit 5 | River flag |
-| A bit 6 | Reserved |
+| A bit 6 | Lake flag |
 | A bit 7 | Water flag |
 
 Height is stored as a normalized unsigned 16-bit value and mapped to the
@@ -101,7 +104,7 @@ error, 3 = valid voxel file but reconstruction mismatch.
 Inspection reports the encoded elevation range, mean and standard deviation,
 number of distinct heights, horizontal/vertical neighbor-step statistics,
 surface material and biome distributions, and coverage of water/forest/
-mountain/river flags. Elevation and neighbor differences are calculated from
+mountain/river/lake flags. Elevation and neighbor differences are calculated from
 the original 8-bit or 16-bit channel values, before conversion to voxel heights.
 This is useful for checking whether the image still contains fine spatial
 variation rather than only a small set of quantized height levels.
@@ -146,6 +149,7 @@ functions are unchanged.
 ## Current limitations
 
 This is a controlled synthetic map generator, not the planned AI terrain
-generator. Caves, ores, vegetation, erosion, drainage simulation, chunk
-conversion, and meshing are not implemented in this stage. See `../../libs/rgba_terrain_core/ROADMAP.md` for the current milestone, skipped
+generator. Caves, ores, detailed vegetation, erosion, globally complete watershed
+accumulation, priority-flood basin filling, chunk conversion, and meshing are
+not implemented in this stage. See `../../libs/rgba_terrain_core/ROADMAP.md` for the current milestone, skipped
 steps and planned voxel-game integration.
