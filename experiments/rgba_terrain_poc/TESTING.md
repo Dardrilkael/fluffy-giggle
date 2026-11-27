@@ -20,7 +20,7 @@ By default, generated world files are written to:
 - `terrain.png` — authoritative RGBA8 data map.
 - `terrain.rgba-terrain` — channel and voxel settings.
 - `terrain.rgba-voxels` — optional validation artifact.
-- `terrain_diagnostics\` — separate elevation, slope, biome, material, water,
+- `terrain_diagnostics/` — separate elevation, slope, biome, material, water,
   forest, mountain, river and lake preview PNGs.
 - `terrain_temperature.png`, `terrain_humidity.png`,
   `terrain_precipitation.png`, `terrain_orographic_lift.png`,
