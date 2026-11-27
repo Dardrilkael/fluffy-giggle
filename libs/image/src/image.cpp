@@ -152,6 +152,15 @@ ws::core::Result<Image> load_memory(std::span<const std::uint8_t> encoded,
 }
 
 ws::core::Result<Image> load_rgba8_file(std::string_view path) {
+    if (path.empty()) {
+        return error(ErrorCode::invalid_argument, "image path is empty");
+    }
+    const std::string null_terminated_path(path);
+    if (stbi_is_16_bit(null_terminated_path.c_str()) != 0) {
+        return error(ErrorCode::unsupported_bit_depth,
+                     "RGBA data maps must use 8-bit channels; pack 16-bit "
+                     "height across two 8-bit channels instead");
+    }
     auto loaded = load_file(path, LoadOptions{Channels::rgba});
     if (!loaded) {
         return ws::core::unexpected<ws::core::Error>(loaded.error());
@@ -161,6 +170,20 @@ ws::core::Result<Image> load_rgba8_file(std::string_view path) {
 
 ws::core::Result<Image> load_rgba8_memory(
     std::span<const std::uint8_t> encoded) {
+    if (encoded.empty()) {
+        return error(ErrorCode::invalid_argument, "encoded image data is empty");
+    }
+    if (encoded.size() >
+        static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return error(ErrorCode::invalid_argument,
+                     "encoded image data exceeds stb_image's size limit");
+    }
+    if (stbi_is_16_bit_from_memory(encoded.data(),
+                                   static_cast<int>(encoded.size())) != 0) {
+        return error(ErrorCode::unsupported_bit_depth,
+                     "RGBA data maps must use 8-bit channels; pack 16-bit "
+                     "height across two 8-bit channels instead");
+    }
     auto loaded = load_memory(encoded, LoadOptions{Channels::rgba});
     if (!loaded) {
         return ws::core::unexpected<ws::core::Error>(loaded.error());
