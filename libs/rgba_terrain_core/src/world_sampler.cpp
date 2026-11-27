@@ -401,6 +401,19 @@ ClimateField evaluate_climate(
     return result;
 }
 
+// Static annual runoff estimate. Warm precipitation contributes as rain;
+// precipitation retained under freezing conditions contributes only as
+// temperature-dependent snowmelt. No runoff is synthesized from basin area.
+double evaluate_runoff(const ClimateField& climate) {
+    const double rain_fraction =
+        smoothstep(-1.0, 2.0, climate.temperature_c);
+    const double melt_fraction =
+        (1.0 - rain_fraction) *
+        smoothstep(-6.0, 5.0, climate.temperature_c) * 0.70;
+    return climate.precipitation *
+           clamp01(rain_fraction + melt_fraction);
+}
+
 struct HydrologyField {
     DrainageDirection direction = DrainageDirection::Sink;
     double accumulation = 0.0;
@@ -676,12 +689,12 @@ std::size_t drainage_downstream_index(
 
 DrainageMetrics accumulate_drainage(
     const DrainageRouting& routing,
-    const std::vector<double>& precipitation,
+    const std::vector<double>& runoff,
     const std::vector<bool>& ocean,
     std::size_t width, std::size_t height,
     double stream_threshold) {
     DrainageMetrics metrics;
-    const std::size_t count = precipitation.size();
+    const std::size_t count = runoff.size();
     if (width == 0 || height == 0 ||
         width > std::numeric_limits<std::size_t>::max() / height ||
         count != width * height || ocean.size() != count ||
@@ -697,7 +710,7 @@ DrainageMetrics accumulate_drainage(
     for (std::size_t i = 0; i < count; ++i) {
         // Rainfall is the only runoff source. Basin area alone never creates
         // discharge: a dry contributing cell adds correspondingly little.
-        metrics.accumulation[i] = ocean[i] ? 0.0 : precipitation[i];
+        metrics.accumulation[i] = ocean[i] ? 0.0 : runoff[i];
     }
 
     // Flow accumulation and Strahler order use the same upstream-first DAG.
@@ -1344,7 +1357,7 @@ HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
 // sediment only along the shared drainage graph. Routing is rebuilt after
 // every iteration because incision changes the surface.
 void erode_terrain(std::vector<double>& elevation,
-                   const std::vector<double>& precipitation,
+                   const std::vector<double>& runoff,
                    const std::vector<bool>& ocean,
                    std::size_t width, std::size_t height,
                    double sea_level, double stream_threshold) {
@@ -1352,7 +1365,7 @@ void erode_terrain(std::vector<double>& elevation,
     if (count == 0 || width == 0 || height == 0 ||
         width > std::numeric_limits<std::size_t>::max() / height ||
         count != width * height ||
-        precipitation.size() != count || ocean.size() != count) {
+        runoff.size() != count || ocean.size() != count) {
         return;
     }
     const double land_floor = std::min(
@@ -1365,7 +1378,7 @@ void erode_terrain(std::vector<double>& elevation,
         const DrainageRouting routing =
             build_drainage_routing(elevation, ocean, width, height);
         const DrainageMetrics metrics = accumulate_drainage(
-            routing, precipitation, ocean, width, height, stream_threshold);
+            routing, runoff, ocean, width, height, stream_threshold);
         if (routing.direction.size() != count ||
             routing.upstream_order.size() != count ||
             metrics.accumulation.size() != count) {
@@ -1570,7 +1583,7 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     if (count > maximum_routing_cells) return grid;
 
     std::vector<double> elevation(count);
-    std::vector<double> precipitation(count);
+    std::vector<double> runoff(count);
     std::vector<double> mountain_strength(count);
     std::vector<bool> ocean(count, false);
     const auto index = [&grid](std::size_t x, std::size_t z) {
@@ -1593,7 +1606,7 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
             ocean[i] = terrain.is_ocean(plan.sea_level_fraction);
             const ClimateField climate = evaluate_climate(
                 plan, world_x, world_z, regions, terrain);
-            precipitation[i] = climate.precipitation;
+            runoff[i] = climate.precipitation;
         }
     }
 
@@ -1613,7 +1626,7 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
             build_drainage_routing(
                 original_elevation, ocean, grid.width, grid.height);
         const DrainageMetrics original_metrics = accumulate_drainage(
-            original_routing, precipitation, ocean,
+            original_routing, runoff, ocean,
             grid.width, grid.height, threshold);
         if (original_routing.direction.size() != count ||
             original_routing.watershed_ids.size() != count ||
@@ -1639,7 +1652,7 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
                 cell.lake_depth_m >= plan.hydrology.lake_minimum_depth_m &&
                 cell.accumulation >=
                     plan.hydrology.lake_minimum_accumulation &&
-                precipitation[i] >=
+                runoff[i] >=
                     plan.hydrology.lake_minimum_precipitation;
             cell.lake_surface_elevation =
                 original_routing.filled_elevation[i];
@@ -1657,7 +1670,7 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     grid.thermal_offsets.assign(count, 0.0);
     if (plan.hydrology.erosion_enabled) {
         erode_terrain(
-            elevation, precipitation, ocean, grid.width, grid.height,
+            elevation, runoff, ocean, grid.width, grid.height,
             plan.sea_level_fraction, threshold);
         for (std::size_t i = 0; i < count; ++i) {
             grid.hydraulic_offsets[i] =
@@ -1679,7 +1692,7 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     for (std::size_t i = 0; i < count; ++i) {
         ocean[i] = elevation[i] <= plan.sea_level_fraction;
         if (ocean[i]) {
-            precipitation[i] = 0.0;
+            runoff[i] = 0.0;
             continue;
         }
         if (!plan.hydrology.erosion_enabled) continue;
@@ -1696,14 +1709,14 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
         TerrainField eroded_terrain = evaluate_terrain(
             plan, world_x, world_z, bias);
         eroded_terrain.normalized_elevation = elevation[i];
-        precipitation[i] = evaluate_climate(
+        runoff[i] = evaluate_climate(
             plan, world_x, world_z, regions, eroded_terrain).precipitation;
     }
 
     const DrainageRouting routing =
         build_drainage_routing(elevation, ocean, grid.width, grid.height);
     const DrainageMetrics metrics = accumulate_drainage(
-        routing, precipitation, ocean, grid.width, grid.height, threshold);
+        routing, runoff, ocean, grid.width, grid.height, threshold);
     if (routing.direction.size() != count ||
         routing.watershed_ids.size() != count ||
         metrics.accumulation.size() != count) {
@@ -1729,7 +1742,7 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
             cell.lake_depth_m >= plan.hydrology.lake_minimum_depth_m &&
             cell.accumulation >=
                 plan.hydrology.lake_minimum_accumulation &&
-            precipitation[i] >=
+            runoff[i] >=
                 plan.hydrology.lake_minimum_precipitation;
         cell.lake_surface_elevation = routing.filled_elevation[i];
         grid.maximum_lake_depth_m = std::max(
