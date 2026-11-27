@@ -11,6 +11,7 @@ namespace rgba_terrain {
 struct TerrainMapAnalysis {
     std::size_t width = 0;
     std::size_t depth = 0;
+    std::uint32_t height_encoding_max = 65535;
     std::uint32_t min_height = 0;
     std::uint32_t max_height = 0;
     std::size_t distinct_heights = 0;
