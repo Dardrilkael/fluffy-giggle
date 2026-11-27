@@ -63,11 +63,11 @@ TEST_CASE("terrain import: maps generic IDs and preserves X/Z and column metadat
   CHECK(world.block_at(20, 5, 20) == voxel::Block::water);
   CHECK(world.block_at(20, 4, 20) == voxel::Block::air);
 
-  CHECK(world.column_metadata(15, 20).biome == voxel::Biome::forest);
+  CHECK(world.column_metadata(15, 20).biome == voxel::Biome::tropical_rainforest);
   CHECK(world.column_metadata(15, 20).feature_flags == 0x08);
-  CHECK(world.column_metadata(16, 20).biome == voxel::Biome::desert);
+  CHECK(world.column_metadata(16, 20).biome == voxel::Biome::tropical_seasonal_forest);
   CHECK(world.column_metadata(16, 20).feature_flags == 0x10);
-  CHECK(world.column_metadata(17, 20).biome == voxel::Biome::mountain);
+  CHECK(world.column_metadata(17, 20).biome == voxel::Biome::temperate_deciduous_forest);
   CHECK(world.column_metadata(17, 20).feature_flags == 0x20);
   CHECK(imported->column_count == 256u * 256u);
   CHECK(imported->voxel_count == 256u * 256u * 64u);
@@ -80,11 +80,16 @@ TEST_CASE("terrain import: maps generic IDs and preserves X/Z and column metadat
 
 TEST_CASE("terrain import: collapses detailed ecological biomes into game visual families") {
   auto volume = make_empty_game_volume();
-  constexpr std::array<voxel::Biome, 8> expected{
-      voxel::Biome::plains, voxel::Biome::forest,
-      voxel::Biome::forest, voxel::Biome::forest,
-      voxel::Biome::desert, voxel::Biome::mountain,
-      voxel::Biome::forest, voxel::Biome::mountain};
+  constexpr std::array<voxel::Biome, 21> expected{
+      voxel::Biome::plains, voxel::Biome::tropical_rainforest,
+      voxel::Biome::tropical_seasonal_forest, voxel::Biome::temperate_deciduous_forest,
+      voxel::Biome::temperate_grassland, voxel::Biome::hot_desert,
+      voxel::Biome::boreal_forest, voxel::Biome::tundra, voxel::Biome::savanna,
+      voxel::Biome::alpine_meadow, voxel::Biome::alpine_rock, voxel::Biome::wetlands,
+      voxel::Biome::mangrove, voxel::Biome::mediterranean_woodland,
+      voxel::Biome::shrubland, voxel::Biome::cold_steppe, voxel::Biome::badlands,
+      voxel::Biome::snowy_mountain, voxel::Biome::rocky_plateau,
+      voxel::Biome::temperate_rainforest, voxel::Biome::salt_marsh};
   for (std::size_t x = 0; x < expected.size(); ++x) {
     for (std::size_t y = 0; y < volume.height; ++y) {
       volume.at(x, y, 0).biome_id = static_cast<std::uint8_t>(x);
@@ -162,4 +167,27 @@ TEST_CASE("terrain import: rejects biome IDs outside the game vocabulary") {
   CHECK_FALSE(imported.has_value());
   CHECK(imported.error().code == static_cast<std::int32_t>(
       voxel::TerrainImportError::unsupported_biome_id));
+}
+
+
+TEST_CASE("terrain import maps all v2 surface materials to game blocks") {
+  using ws::rgba_terrain_core::VoxelKind;
+  auto volume = make_empty_game_volume();
+  constexpr std::array<voxel::Block, 15> expected{
+      voxel::Block::grass, voxel::Block::dirt, voxel::Block::stone,
+      voxel::Block::sand, voxel::Block::stone, voxel::Block::gravel,
+      voxel::Block::clay, voxel::Block::snow, voxel::Block::ice,
+      voxel::Block::sandstone, voxel::Block::mud, voxel::Block::mossy_stone,
+      voxel::Block::red_sand, voxel::Block::basalt, voxel::Block::peat};
+  for (std::size_t i = 0; i < expected.size(); ++i) {
+    for (std::size_t y = 0; y < volume.height; ++y)
+      volume.at(i, y, 0).biome_id = 4;
+    volume.at(i, 2, 0).material_id = static_cast<std::uint8_t>(i + 1);
+    volume.at(i, 2, 0).kind = VoxelKind::Solid;
+    volume.at(i, 2, 0).density = 255;
+  }
+  voxel::World world;
+  REQUIRE(voxel::import_terrain_volume(world, volume).has_value());
+  for (std::size_t i = 0; i < expected.size(); ++i)
+    CHECK(world.block_at(static_cast<int>(i), 2, 0) == expected[i]);
 }

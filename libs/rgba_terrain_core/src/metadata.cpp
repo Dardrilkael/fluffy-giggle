@@ -22,6 +22,7 @@ ChannelRole parse_role(const std::string& s) {
   if(s=="water_mask") return ChannelRole::WaterMask;
   if(s=="density") return ChannelRole::Density;
   if(s=="biome_water_flags") return ChannelRole::BiomeWaterFlags;
+  if(s=="material_feature_flags") return ChannelRole::MaterialFeatureFlags;
   throw std::runtime_error("unknown channel role: "+s);
 }
 }
@@ -53,6 +54,11 @@ TerrainMetadata load_metadata(const std::string& path) {
     catch(...) { throw std::runtime_error("invalid number for "+key); }
     if(used!=v.size()) throw std::runtime_error("invalid number for "+key);
   };
+  const auto version_it = values.find("format_version");
+  if (version_it != values.end() && version_it->second != "1" &&
+      version_it->second != "2") {
+    throw std::runtime_error("unsupported RGBA terrain format_version");
+  }
   TerrainMetadata result;
   result.layout.channels={parse_role(required("channel.r")),parse_role(required("channel.g")),
                           parse_role(required("channel.b")),parse_role(required("channel.a"))};
@@ -85,7 +91,7 @@ TerrainMetadata load_metadata(const std::string& path) {
   result.layout.validate();
   for(const auto& [key,value]:values) {
     (void)value;
-    if(key!="channel.r" && key!="channel.g" && key!="channel.b" && key!="channel.a" &&
+    if(key!="format_version" && key!="channel.r" && key!="channel.g" && key!="channel.b" && key!="channel.a" &&
        key!="min_height" && key!="max_height" && key!="volume_height" &&
        key!="sea_level" && key!="subsurface_depth" && key!="water_threshold" &&
        key!="default_material" && key!="subsurface_material" &&

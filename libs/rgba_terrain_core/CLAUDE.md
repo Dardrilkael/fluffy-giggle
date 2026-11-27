@@ -23,7 +23,7 @@ Reusable CPU-side terrain data-map and voxel reconstruction library.
 - Chunk/region output samples global coordinates; independently generated neighboring regions must stitch exactly.
 - Diagnostic previews are independent disposable RGBA8 images; never use them as terrain inputs. Climate preview layers are emitted from the same deterministic samples and do not change the authoritative RGBA data map.
 - Hydrology uses an absolute world-coordinate D8 grid, fixed-window flow accumulation and local spill-level basin detection; never cache chunk-local flow state or make output depend on generation order.
-- Alpha feature bits 0x08/0x10/0x20/0x40 represent forest/mountain/river/lake; 0x80 marks water presence. Inland river/lake water is reconstructed immediately above its encoded channel/basin bed.
+- v2 maps store the full biome byte in A and pack four feature flags with a four-bit material ID in B; v1 maps remain readable. Ocean water is inferred from biome 0; inland water is inferred from river/lake flags.
 - Avoid per-voxel heap allocations.
 
 ## Validation

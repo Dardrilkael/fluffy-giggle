@@ -343,17 +343,22 @@ TerrainDiagnosticImages make_diagnostic_images(
     const double height_span = static_cast<double>(
         std::max<std::uint32_t>(1u, max_height - min_height));
 
-    constexpr std::array<Rgba8, 8> biome_palette{
-        Rgba8{28, 78, 130, 255}, Rgba8{133, 181, 100, 255},
-        Rgba8{42, 112, 65, 255}, Rgba8{222, 185, 94, 255},
-        Rgba8{135, 132, 126, 255}, Rgba8{83, 151, 143, 255},
-        Rgba8{190, 207, 214, 255}, Rgba8{195, 170, 91, 255},
+    constexpr std::array<Rgba8, 21> biome_palette{
+        Rgba8{28,78,130,255}, Rgba8{20,100,50,255}, Rgba8{74,140,60,255},
+        Rgba8{82,154,87,255}, Rgba8{174,177,83,255}, Rgba8{225,189,95,255},
+        Rgba8{55,114,69,255}, Rgba8{175,195,186,255}, Rgba8{199,172,83,255},
+        Rgba8{143,175,132,255}, Rgba8{136,132,126,255}, Rgba8{81,133,106,255},
+        Rgba8{39,104,87,255}, Rgba8{151,160,86,255}, Rgba8{162,150,92,255},
+        Rgba8{160,166,155,255}, Rgba8{191,117,67,255}, Rgba8{220,225,232,255},
+        Rgba8{158,130,103,255}, Rgba8{47,111,84,255}, Rgba8{160,185,167,255},
     };
-    constexpr std::array<Rgba8, 8> material_palette{
-        Rgba8{20, 20, 20, 255}, Rgba8{122, 155, 83, 255},
-        Rgba8{105, 78, 55, 255}, Rgba8{75, 64, 54, 255},
-        Rgba8{42, 105, 178, 255}, Rgba8{130, 130, 130, 255},
-        Rgba8{40, 145, 210, 255}, Rgba8{195, 185, 155, 255},
+    constexpr std::array<Rgba8, 16> material_palette{
+        Rgba8{20,20,20,255}, Rgba8{122,155,83,255}, Rgba8{105,78,55,255},
+        Rgba8{75,64,54,255}, Rgba8{195,185,155,255}, Rgba8{130,130,130,255},
+        Rgba8{145,135,125,255}, Rgba8{155,125,95,255}, Rgba8{235,240,245,255},
+        Rgba8{145,190,205,255}, Rgba8{190,150,95,255}, Rgba8{85,76,65,255},
+        Rgba8{90,120,78,255}, Rgba8{190,105,65,255}, Rgba8{65,66,72,255},
+        Rgba8{105,85,64,255},
     };
 
     for (std::size_t z = 0; z < image.height; ++z) {

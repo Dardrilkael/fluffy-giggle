@@ -48,11 +48,7 @@ River columns reconstruct water immediately above the channel bed.
 
 ## RGBA and voxel compatibility
 
-The four-channel PNG layout remains unchanged:
-- R/G: 16-bit elevation.
-- B: material ID.
-- A bits 0..2: biome; bits 3..6: feature flags (forest, mountain, river, lake);
-  bit 7: water presence.
+The four-channel PNG layout remains unchanged. The plan-based generator writes v2: R/G are 16-bit elevation, B stores a four-bit material plus four feature flags, and A stores the full biome byte. Legacy v1 maps remain readable.
 
 Lake columns encode their shared spill elevation; river columns encode their
 carved channel bed. Both reconstruct one water voxel above the encoded surface.

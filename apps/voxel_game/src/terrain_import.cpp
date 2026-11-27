@@ -32,20 +32,11 @@ using ws::rgba_terrain_core::VoxelVolume;
 }
 
 [[nodiscard]] bool map_biome(std::uint8_t biome, Biome& result) noexcept {
-  // The reusable terrain core currently defines eight ecological biome IDs,
-  // while the game renderer exposes four broad visual biome families.
-  // Collapse detailed climate variants only at this game-owned import seam.
-  switch (biome) {
-    case 0: result = Biome::plains; return true;   // ocean/coastal fallback
-    case 1: result = Biome::forest; return true;
-    case 2: result = Biome::forest; return true;
-    case 3: result = Biome::forest; return true;
-    case 4: result = Biome::desert; return true;
-    case 5: result = Biome::mountain; return true;
-    case 6: result = Biome::forest; return true;
-    case 7: result = Biome::mountain; return true;
-    default: return false;
-  }
+  // Preserve the detailed biome identity in the game metadata. The
+  // original four broad values remain stable for old v1 maps.
+  if (biome > static_cast<std::uint8_t>(Biome::salt_marsh)) return false;
+  result = static_cast<Biome>(biome);
+  return true;
 }
 
 [[nodiscard]] bool map_voxel(const Voxel& voxel, Block& block) noexcept {

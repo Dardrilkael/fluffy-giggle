@@ -68,7 +68,7 @@ struct TerrainMapAnalysis {
     ConnectedRegionStats mountain_regions{};
     ConnectedRegionStats river_regions{};
     ConnectedRegionStats lake_regions{};
-    std::array<ConnectedRegionStats, 8> biome_regions{};
+    std::array<ConnectedRegionStats, 256> biome_regions{};
 };
 
 struct TerrainDiagnosticImages {

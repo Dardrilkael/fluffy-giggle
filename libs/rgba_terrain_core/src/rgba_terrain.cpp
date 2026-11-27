@@ -167,9 +167,16 @@ TerrainColumns generate_columns(const RgbaImage& image,
     const int water = find_role(layout, ChannelRole::WaterMask);
     const int density = find_role(layout, ChannelRole::Density);
     const int packed_flags = find_role(layout, ChannelRole::BiomeWaterFlags);
+    const int material_features = find_role(layout, ChannelRole::MaterialFeatureFlags);
     if (packed_flags >= 0 && (biome >= 0 || water >= 0)) {
         throw std::invalid_argument(
             "biome_water_flags cannot be combined with separate biome_id or water_mask channels");
+    }
+    if (material_features >= 0 &&
+        (material >= 0 || packed_flags >= 0 || biome < 0 || water >= 0)) {
+        throw std::invalid_argument(
+            "material_feature_flags requires biome_id and cannot be combined "
+            "with separate material, legacy packed flags, or water channels");
     }
 
     TerrainColumns result{image.width, image.height, {}};
@@ -193,21 +200,35 @@ TerrainColumns generate_columns(const RgbaImage& image,
             const auto height = static_cast<std::uint32_t>(
                 std::floor(world_height + 0.5));
 
+            const std::uint8_t combined = material_features >= 0
+                ? value_at(pixel, material_features)
+                : std::uint8_t{0};
+            const std::uint8_t biome_id = material_features >= 0
+                ? value_at(pixel, biome)
+                : (packed_flags >= 0
+                    ? static_cast<std::uint8_t>(
+                          value_at(pixel, packed_flags) & 0x07u)
+                    : (biome >= 0 ? value_at(pixel, biome)
+                                  : settings.default_biome));
+            const std::uint8_t feature_flags = material_features >= 0
+                ? static_cast<std::uint8_t>(((combined >> 4u) & 0x0Fu) << 3u)
+                : (packed_flags >= 0
+                    ? static_cast<std::uint8_t>(
+                          value_at(pixel, packed_flags) & 0xF8u)
+                    : std::uint8_t{0});
+            const std::uint8_t water_mask = material_features >= 0
+                ? (biome_id == 0 ? std::uint8_t{255} : std::uint8_t{0})
+                : (water >= 0 ? value_at(pixel, water) : std::uint8_t{0});
+            const std::uint8_t material_id = material_features >= 0
+                ? static_cast<std::uint8_t>(combined & 0x0Fu)
+                : (material >= 0 ? value_at(pixel, material)
+                                 : settings.default_material);
+
             result.columns.push_back(VoxelColumn{
-                x,
-                z,
-                height,
-                material >= 0 ? value_at(pixel, material)
-                              : settings.default_material,
-                packed_flags >= 0
-                    ? static_cast<std::uint8_t>(value_at(pixel, packed_flags) & 0x07u)
-                    : (biome >= 0 ? value_at(pixel, biome) : settings.default_biome),
-                water >= 0 ? value_at(pixel, water) : std::uint8_t{0},
+                x, z, height, material_id, biome_id, water_mask,
                 density >= 0 ? value_at(pixel, density)
                              : settings.solid_density,
-                packed_flags >= 0
-                    ? static_cast<std::uint8_t>(value_at(pixel, packed_flags) & 0xF8u)
-                    : std::uint8_t{0},
+                feature_flags,
             });
         }
     }

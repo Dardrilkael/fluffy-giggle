@@ -13,7 +13,6 @@ namespace ws::rgba_terrain_core {
 namespace {
 
 constexpr std::uint8_t mountain_flag = 0x10u;
-constexpr std::uint8_t water_flag = 0x80u;
 
 std::uint64_t mix_bits(std::uint64_t value) {
     value += 0x9e3779b97f4a7c15ull;
@@ -903,19 +902,17 @@ RgbaImage WorldSampler::generate_rgba_region(
                     std::max(0.0, surface_elevation - channel_cut) *
                     65535.0), 0l, 65535l));
 
-            std::uint8_t flags = static_cast<std::uint8_t>(
-                sample_at.biome_id & 0x07u);
-            flags |= static_cast<std::uint8_t>(
-                sample_at.feature_flags & 0x78u);
-            if (sample_at.is_ocean || sample_at.is_river || sample_at.is_lake) {
-                flags |= water_flag;
-            }
-
+            // v2: full biome ID in A; B low nibble material, high
+            // nibble forest/mountain/river/lake feature bits.
+            const std::uint8_t feature_nibble = static_cast<std::uint8_t>(
+                (sample_at.feature_flags & 0x78u) >> 3u);
+            const std::uint8_t material_features = static_cast<std::uint8_t>(
+                (sample_at.material_id & 0x0Fu) | (feature_nibble << 4u));
             Rgba8& pixel = image.pixels[z * width + x];
             pixel.r = static_cast<std::uint8_t>(packed_height >> 8u);
             pixel.g = static_cast<std::uint8_t>(packed_height & 0xffu);
-            pixel.b = sample_at.material_id;
-            pixel.a = flags;
+            pixel.b = material_features;
+            pixel.a = sample_at.biome_id;
         }
     }
 

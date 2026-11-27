@@ -91,20 +91,25 @@ void print_map_report(const ws::rgba_terrain_core::RgbaImage& image,
     std::size_t mountain_pixels = 0;
     std::size_t river_pixels = 0;
     std::size_t lake_pixels = 0;
-    for (const auto& p : image.pixels) {
-        const std::uint32_t height =
-            (static_cast<std::uint32_t>(p.r) << 8u) | p.g;
-        min_height = std::min(min_height, height);
-        max_height = std::max(max_height, height);
-        water_pixels += (p.a & 0x80u) != 0 ? 1u : 0u;
-        forest_pixels += (p.a & 0x08u) != 0 ? 1u : 0u;
-        mountain_pixels += (p.a & 0x10u) != 0 ? 1u : 0u;
-        river_pixels += (p.a & 0x20u) != 0 ? 1u : 0u;
-        lake_pixels += (p.a & 0x40u) != 0 ? 1u : 0u;
+    for (std::size_t z = 0; z < image.height; ++z) {
+        for (std::size_t x = 0; x < image.width; ++x) {
+            const auto& p = image.at(x, z);
+            const std::uint32_t height =
+                (static_cast<std::uint32_t>(p.r) << 8u) | p.g;
+            min_height = std::min(min_height, height);
+            max_height = std::max(max_height, height);
+            const auto& column = volume.at(x, 0, z);
+            const std::uint8_t flags = column.feature_flags;
+            water_pixels += column.biome_id == 0 || (flags & 0x60u) != 0 ? 1u : 0u;
+            forest_pixels += (flags & 0x08u) != 0 ? 1u : 0u;
+            mountain_pixels += (flags & 0x10u) != 0 ? 1u : 0u;
+            river_pixels += (flags & 0x20u) != 0 ? 1u : 0u;
+            lake_pixels += (flags & 0x40u) != 0 ? 1u : 0u;
+        }
     }
     ws::core::info("rgba_terrain: data map {}x{}", image.width, image.height);
     ws::core::info("rgba_terrain: packed 16-bit height range {}..{}", min_height, max_height);
-    ws::core::info("rgba_terrain: channels B=material ID, A=biome + feature flags");
+    ws::core::info("rgba_terrain: channels B=material(4 bits)+features(4 bits), A=biome ID(8 bits)");
     ws::core::info("rgba_terrain: feature columns water={}, forest={}, mountain={}, river={}, lake={}",
                    water_pixels, forest_pixels, mountain_pixels, river_pixels,
                    lake_pixels);
@@ -408,9 +413,10 @@ int generate_world_command(int argc, char** argv) {
     if (!written) throw std::runtime_error("PNG write failed: " + written.error().message);
 
     const std::string metadata =
-        "# RGBA terrain data map v1\n"
+        "# RGBA terrain data map v2\n"
+        "format_version=2\n"
         "channel.r=height16_msb\nchannel.g=height16_lsb\n"
-        "channel.b=material_id\nchannel.a=biome_water_flags\n"
+        "channel.b=material_feature_flags\nchannel.a=biome_id\n"
         "min_height=0\nmax_height=56\nvolume_height=64\nsea_level=12\n"
         "subsurface_depth=4\nwater_threshold=128\ndefault_material=1\n"
         "subsurface_material=2\ndeep_material=3\nwater_material=6\n"

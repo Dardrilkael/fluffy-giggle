@@ -62,7 +62,7 @@ struct EcosystemDefinition {
 };
 
 struct BiomeDefinition {
-    // The current RGBA alpha packing reserves three bits for biome IDs (0..7).
+    // RGBA terrain v2 stores the full biome ID byte in alpha (0..255).
     std::uint8_t id = 0;
     std::uint8_t ecosystem_id = 0;
     double temperature_optimum_c = 15.0;
@@ -72,6 +72,7 @@ struct BiomeDefinition {
     double elevation_optimum = 0.5;
     double elevation_tolerance = 0.5;
     double weight = 1.0;
+    // Surface material ID occupies the low nibble of the v2 B channel (0..15).
     std::uint8_t material_id = 1;
 
     // Feature bits use the packed-alpha convention: forest=0x08,

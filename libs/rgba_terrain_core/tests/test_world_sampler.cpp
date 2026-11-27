@@ -326,3 +326,31 @@ TEST_CASE("world region emits deterministic climate diagnostic preview layers") 
         }
     }
 }
+
+
+TEST_CASE("world plan exposes detailed biome definitions and v2 material packing") {
+    const auto plan = make_default_world_plan(256, 256, 0xB10BEu);
+    CHECK(plan.biomes.size() == 21);
+    CHECK(plan.biomes.front().id == 0);
+    CHECK(plan.biomes.back().id == 20);
+    CHECK_NOTHROW(plan.validate());
+
+    const WorldSampler sampler(plan);
+    TerrainSettings settings;
+    settings.min_height = 0.0f;
+    settings.max_height = 56.0f;
+    settings.volume_height = 64;
+    settings.sea_level = 12;
+    const auto image = sampler.generate_rgba_region(0, 0, 32, 32, settings);
+    ChannelLayout layout;
+    layout.channels = {
+        ChannelRole::Height16Msb, ChannelRole::Height16Lsb,
+        ChannelRole::MaterialFeatureFlags, ChannelRole::BiomeId};
+    const auto columns = generate_columns(image, layout, settings);
+    REQUIRE(columns.columns.size() == 32u * 32u);
+    for (const auto& column : columns.columns) {
+        CHECK(column.biome_id <= 20);
+        CHECK(column.material_id <= 15);
+        CHECK((column.feature_flags & 0x87u) == 0);
+    }
+}

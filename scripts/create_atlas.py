@@ -72,6 +72,16 @@ BLOCKS = [
     ("leaves", ["oak_leaves", "leaves", "grass_block_side"], ["oak_leaves", "leaves", "grass_block_side"], ["oak_leaves", "leaves", "grass_block_side"], True),
     ("coal_ore", ["coal_ore", "stone"],             ["coal_ore", "stone"],            ["coal_ore", "stone"],            True),
     ("iron_ore", ["iron_ore", "stone"],             ["iron_ore", "stone"],            ["iron_ore", "stone"],            True),
+    ("gravel", ["gravel","stone"], ["gravel","stone"], ["gravel","stone"], True),
+    ("clay", ["clay","mud","dirt"], ["clay","mud","dirt"], ["clay","mud","dirt"], True),
+    ("snow", ["snow","snow_block","white_wool"], ["snow","snow_block","white_wool"], ["snow","snow_block","white_wool"], True),
+    ("ice", ["ice","packed_ice","blue_ice"], ["ice","packed_ice","blue_ice"], ["ice","packed_ice","blue_ice"], True),
+    ("sandstone", ["sandstone","sand"], ["sandstone","sand"], ["sandstone","sand"], True),
+    ("mud", ["mud","clay","dirt"], ["mud","clay","dirt"], ["mud","clay","dirt"], True),
+    ("mossy_stone", ["mossy_cobblestone","mossy_stone","cobblestone","stone"], ["mossy_cobblestone","mossy_stone","cobblestone","stone"], ["mossy_cobblestone","mossy_stone","cobblestone","stone"], True),
+    ("red_sand", ["red_sand","sand"], ["red_sand","sand"], ["red_sand","sand"], True),
+    ("basalt", ["basalt","blackstone","stone"], ["basalt","blackstone","stone"], ["basalt","blackstone","stone"], True),
+    ("peat", ["peat","mud","dirt"], ["peat","mud","dirt"], ["peat","mud","dirt"], True),
 ]
 
 def resolve(assets, candidates):

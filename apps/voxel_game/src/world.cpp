@@ -47,6 +47,16 @@ const std::uint32_t kTints[static_cast<std::size_t>(Block::count_)] = {
     pack_rgba(174, 76, 61, 255), pack_rgba(160, 210, 220, 190),
     pack_rgba(65, 125, 55, 255), pack_rgba(45, 45, 48, 255),
     pack_rgba(170, 125, 95, 255),
+    pack_rgba(130, 125, 118, 255), // gravel
+    pack_rgba(150, 120, 92, 255),  // clay
+    pack_rgba(235, 240, 245, 255), // snow
+    pack_rgba(145, 190, 205, 255), // ice
+    pack_rgba(190, 150, 95, 255),  // sandstone
+    pack_rgba(85, 76, 65, 255),    // mud
+    pack_rgba(90, 120, 78, 255),   // mossy stone
+    pack_rgba(190, 105, 65, 255),  // red sand
+    pack_rgba(65, 66, 72, 255),    // basalt
+    pack_rgba(105, 85, 64, 255),  // peat
 };
 
 // --- deterministic terrain fields ------------------------------------------------
