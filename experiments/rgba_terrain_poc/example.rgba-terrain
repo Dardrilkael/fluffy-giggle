@@ -5,3 +5,15 @@ channel.b=material_id
 channel.a=water_mask
 min_height=0
 max_height=256
+
+# Output volume and surface layering
+volume_height=320
+sea_level=12
+subsurface_depth=4
+water_threshold=128
+default_material=1
+subsurface_material=2
+deep_material=3
+water_material=6
+default_biome=0
+solid_density=255
