@@ -28,6 +28,14 @@ The command writes a lossless RGBA8 data PNG, its metadata sidecar, and a
 dense RGAVOX02 voxel file. The PNG is reloaded through the strict shared image
 library before voxelization, checking the actual persisted map path.
 
+## Validate a voxel file
+
+    rgba_terrain_poc validate terrain.png terrain.rgba-terrain terrain.rgba-voxels
+
+A successful validation means the stored volume matches a fresh reconstruction
+from the exact PNG and metadata, including kind, material, biome, density and
+feature flags for every voxel.
+
 ## Inspect the generated map
 
     rgba_terrain_poc inspect terrain.png terrain.rgba-terrain
