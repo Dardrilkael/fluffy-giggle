@@ -56,6 +56,7 @@ TerrainMapAnalysis analyze_map(const RgbaImage& image,
     TerrainMapAnalysis result;
     result.width = terrain.width;
     result.depth = terrain.depth;
+    result.height_encoding_max = height8 >= 0 ? 255u : 65535u;
 
     std::vector<std::uint32_t> distinct_heights;
     distinct_heights.reserve(terrain.columns.size());
