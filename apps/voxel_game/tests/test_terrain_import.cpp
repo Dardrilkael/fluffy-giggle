@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 
 #include <ws/rgba_terrain_core/rgba_terrain.hpp>
 
@@ -75,6 +76,26 @@ TEST_CASE("terrain import: maps generic IDs and preserves X/Z and column metadat
   CHECK(imported->block_counts[static_cast<std::size_t>(voxel::Block::stone)] == 2);
   CHECK(imported->block_counts[static_cast<std::size_t>(voxel::Block::sand)] == 1);
   CHECK(imported->block_counts[static_cast<std::size_t>(voxel::Block::water)] == 1);
+}
+
+TEST_CASE("terrain import: collapses detailed ecological biomes into game visual families") {
+  auto volume = make_empty_game_volume();
+  constexpr std::array<voxel::Biome, 8> expected{
+      voxel::Biome::plains, voxel::Biome::forest,
+      voxel::Biome::forest, voxel::Biome::forest,
+      voxel::Biome::desert, voxel::Biome::mountain,
+      voxel::Biome::forest, voxel::Biome::mountain};
+  for (std::size_t x = 0; x < expected.size(); ++x) {
+    for (std::size_t y = 0; y < volume.height; ++y) {
+      volume.at(x, y, 0).biome_id = static_cast<std::uint8_t>(x);
+    }
+  }
+  voxel::World world;
+  const auto imported = voxel::import_terrain_volume(world, volume);
+  REQUIRE(imported.has_value());
+  for (std::size_t x = 0; x < expected.size(); ++x) {
+    CHECK(world.column_metadata(static_cast<int>(x), 0).biome == expected[x]);
+  }
 }
 
 TEST_CASE("terrain import: rejects unsupported material without modifying world") {
