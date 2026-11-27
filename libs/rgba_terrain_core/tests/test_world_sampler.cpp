@@ -354,9 +354,9 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
     std::size_t boundary_terminated_routes = 0;
     for (std::size_t start_z = 0; start_z < routing_height; ++start_z) {
         for (std::size_t start_x = 0; start_x < routing_width; ++start_x) {
-            const std::size_t start_world_x =
+            [[maybe_unused]] const std::size_t start_world_x =
                 start_x * routing_cell_scale + routing_cell_scale / 2;
-            const std::size_t start_world_z =
+            [[maybe_unused]] const std::size_t start_world_z =
                 start_z * routing_cell_scale + routing_cell_scale / 2;
             const std::size_t start_cell =
                 start_z * routing_width + start_x;
