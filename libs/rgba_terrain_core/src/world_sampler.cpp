@@ -1564,8 +1564,8 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     if (count > maximum_routing_cells) return grid;
 
     std::vector<double> elevation(count);
-    std::vector<double> accumulation(count);
     std::vector<double> precipitation(count);
+    std::vector<double> mountain_strength(count);
     std::vector<bool> ocean(count, false);
     const auto index = [&grid](std::size_t x, std::size_t z) {
         return z * grid.width + x;
@@ -1583,11 +1583,11 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
             const TerrainField terrain = evaluate_terrain(
                 plan, world_x, world_z, bias);
             elevation[i] = terrain.normalized_elevation;
+            mountain_strength[i] = terrain.mountain_strength;
             ocean[i] = terrain.is_ocean(plan.sea_level_fraction);
             const ClimateField climate = evaluate_climate(
                 plan, world_x, world_z, regions, terrain);
             precipitation[i] = climate.precipitation;
-            accumulation[i] = ocean[i] ? 0.0 : precipitation[i];
         }
     }
 
@@ -1597,121 +1597,170 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     for (std::size_t i = 0; i < count; ++i) {
         grid.original_ocean[i] = ocean[i] ? 1u : 0u;
     }
-
     const double threshold = plan.hydrology.river_accumulation_threshold;
 
+    // Baseline hydrology is built from the same shared graph and Strahler
+    // accumulation as the eroded world. It remains available for exact
+    // pre-erosion coast classification in the RGBA pixel pipeline.
     {
-        // The baseline hydrology uses the same priority-flood/D8 graph as
-        // erosion and final post-erosion hydrology. Keep these cells for exact
-        // baseline ocean classification at output-pixel resolution.
         const DrainageRouting original_routing =
-            build_drainage_routing(original_elevation, ocean, grid.width, grid.height);
+            build_drainage_routing(
+                original_elevation, ocean, grid.width, grid.height);
+        const DrainageMetrics original_metrics = accumulate_drainage(
+            original_routing, precipitation, ocean,
+            grid.width, grid.height, threshold);
         if (original_routing.direction.size() != count ||
-            original_routing.upstream_order.size() != count) {
+            original_routing.watershed_ids.size() != count ||
+            original_metrics.accumulation.size() != count) {
             return grid;
-        }
-        std::vector<double> original_accumulation = accumulation;
-        for (const std::size_t i : original_routing.upstream_order) {
-            const std::size_t downstream = drainage_downstream_index(
-                i, original_routing.direction[i], grid.width, grid.height);
-            if (downstream != count) {
-                original_accumulation[downstream] += original_accumulation[i];
-            }
         }
 
         grid.original_cells.resize(count);
         for (std::size_t i = 0; i < count; ++i) {
             HydrologyField& cell = grid.original_cells[i];
             cell.direction = original_routing.direction[i];
-            cell.accumulation = original_accumulation[i];
+            cell.accumulation = original_metrics.accumulation[i];
             cell.river_strength = clamp01(
-                (original_accumulation[i] - threshold) / (threshold * 2.5));
+                (cell.accumulation - threshold) / (threshold * 2.5));
+            cell.watershed_id = original_routing.watershed_ids[i];
+            cell.stream_order = original_metrics.stream_order[i];
+            cell.river_class = classify_river(cell.stream_order);
             cell.lake_depth_m = std::max(
-                0.0, original_routing.filled_elevation[i] - original_elevation[i]) *
+                0.0, original_routing.filled_elevation[i] -
+                         original_elevation[i]) *
                 plan.climate.maximum_elevation_m;
             cell.lake = !ocean[i] &&
                 cell.lake_depth_m >= plan.hydrology.lake_minimum_depth_m &&
-                original_accumulation[i] >=
+                cell.accumulation >=
                     plan.hydrology.lake_minimum_accumulation &&
-                precipitation[i] >= plan.hydrology.lake_minimum_precipitation;
-            cell.lake_surface_elevation = original_routing.filled_elevation[i];
-            cell.river = !cell.lake &&
-                original_routing.direction[i] != DrainageDirection::Sink &&
-                original_accumulation[i] >= threshold;
+                precipitation[i] >=
+                    plan.hydrology.lake_minimum_precipitation;
+            cell.lake_surface_elevation =
+                original_routing.filled_elevation[i];
+            cell.river = !cell.lake && cell.stream_order > 0u;
+            if (cell.lake) {
+                cell.stream_order = 0u;
+                cell.river_class = RiverClass::None;
+                cell.river = false;
+            }
+        }
+    }
+
+    grid.hydraulic_offsets.assign(count, 0.0);
+    grid.thermal_offsets.assign(count, 0.0);
+    if (plan.hydrology.erosion_enabled) {
+        erode_terrain(
+            elevation, precipitation, ocean, grid.width, grid.height,
+            plan.sea_level_fraction, threshold);
+        for (std::size_t i = 0; i < count; ++i) {
+            grid.hydraulic_offsets[i] =
+                elevation[i] - original_elevation[i];
         }
 
+        const std::vector<double> after_hydraulic = elevation;
+        apply_thermal_erosion(
+            elevation, ocean, grid.width, grid.height,
+            plan.sea_level_fraction);
+        for (std::size_t i = 0; i < count; ++i) {
+            grid.thermal_offsets[i] =
+                elevation[i] - after_hydraulic[i];
+        }
     }
 
-    if (plan.hydrology.erosion_enabled) {
-        erode_terrain(elevation, precipitation, ocean, grid.width, grid.height,
-                      plan.sea_level_fraction);
-    }
-
-    grid.elevation_offsets.resize(count, 0.0);
+    // Re-evaluate precipitation over the hydraulically + thermally modified
+    // surface before constructing the final river hierarchy.
     for (std::size_t i = 0; i < count; ++i) {
-        grid.elevation_offsets[i] = elevation[i] - original_elevation[i];
-        grid.maximum_erosion_offset = std::max(
-            grid.maximum_erosion_offset,
-            std::abs(grid.elevation_offsets[i]));
         ocean[i] = elevation[i] <= plan.sea_level_fraction;
         if (ocean[i]) {
             precipitation[i] = 0.0;
-        } else if (plan.hydrology.erosion_enabled) {
-            const std::size_t x = i % grid.width;
-            const std::size_t z = i / grid.width;
-            const double world_x = (static_cast<double>(x) + 0.5) * scale;
-            const double world_z = (static_cast<double>(z) + 0.5) * scale;
-            const auto regions = evaluate_regions(plan, world_x, world_z);
-            const double blend = std::min(1.0, regions.weight_sum);
-            const double bias = regions.weight_sum > 0.0
-                ? regions.elevation_sum / regions.weight_sum * blend
-                : 0.0;
-            TerrainField eroded_terrain = evaluate_terrain(
-                plan, world_x, world_z, bias);
-            eroded_terrain.normalized_elevation = elevation[i];
-            precipitation[i] = evaluate_climate(
-                plan, world_x, world_z, regions, eroded_terrain).precipitation;
+            continue;
         }
-        accumulation[i] = ocean[i] ? 0.0 : precipitation[i];
+        if (!plan.hydrology.erosion_enabled) continue;
+
+        const std::size_t x = i % grid.width;
+        const std::size_t z = i / grid.width;
+        const double world_x = (static_cast<double>(x) + 0.5) * scale;
+        const double world_z = (static_cast<double>(z) + 0.5) * scale;
+        const auto regions = evaluate_regions(plan, world_x, world_z);
+        const double blend = std::min(1.0, regions.weight_sum);
+        const double bias = regions.weight_sum > 0.0
+            ? regions.elevation_sum / regions.weight_sum * blend
+            : 0.0;
+        TerrainField eroded_terrain = evaluate_terrain(
+            plan, world_x, world_z, bias);
+        eroded_terrain.normalized_elevation = elevation[i];
+        precipitation[i] = evaluate_climate(
+            plan, world_x, world_z, regions, eroded_terrain).precipitation;
     }
 
     const DrainageRouting routing =
         build_drainage_routing(elevation, ocean, grid.width, grid.height);
+    const DrainageMetrics metrics = accumulate_drainage(
+        routing, precipitation, ocean, grid.width, grid.height, threshold);
     if (routing.direction.size() != count ||
-        routing.upstream_order.size() != count) {
+        routing.watershed_ids.size() != count ||
+        metrics.accumulation.size() != count) {
         return grid;
-    }
-    for (const std::size_t i : routing.upstream_order) {
-        const std::size_t downstream = drainage_downstream_index(
-            i, routing.direction[i], grid.width, grid.height);
-        if (downstream != count) {
-            accumulation[downstream] += accumulation[i];
-        }
     }
 
     grid.cells.resize(count);
     for (std::size_t i = 0; i < count; ++i) {
         HydrologyField& cell = grid.cells[i];
         cell.direction = routing.direction[i];
-        cell.accumulation = accumulation[i];
+        cell.accumulation = metrics.accumulation[i];
+        cell.watershed_id = routing.watershed_ids[i];
+        cell.stream_order = metrics.stream_order[i];
+        cell.river_class = classify_river(cell.stream_order);
         grid.maximum_accumulation = std::max(
-            grid.maximum_accumulation, accumulation[i]);
+            grid.maximum_accumulation, cell.accumulation);
         cell.river_strength = clamp01(
-            (accumulation[i] - threshold) / (threshold * 2.5));
+            (cell.accumulation - threshold) / (threshold * 2.5));
         cell.lake_depth_m = std::max(
             0.0, routing.filled_elevation[i] - elevation[i]) *
             plan.climate.maximum_elevation_m;
         cell.lake = !ocean[i] &&
             cell.lake_depth_m >= plan.hydrology.lake_minimum_depth_m &&
-            accumulation[i] >= plan.hydrology.lake_minimum_accumulation &&
-            precipitation[i] >= plan.hydrology.lake_minimum_precipitation;
+            cell.accumulation >=
+                plan.hydrology.lake_minimum_accumulation &&
+            precipitation[i] >=
+                plan.hydrology.lake_minimum_precipitation;
         cell.lake_surface_elevation = routing.filled_elevation[i];
         grid.maximum_lake_depth_m = std::max(
             grid.maximum_lake_depth_m, cell.lake_depth_m);
-        cell.river = !cell.lake &&
-            routing.direction[i] != DrainageDirection::Sink &&
-            accumulation[i] >= threshold;
+        cell.river = !cell.lake && cell.stream_order > 0u;
+        if (cell.lake) {
+            cell.stream_order = 0u;
+            cell.river_class = RiverClass::None;
+            cell.river = false;
+        }
     }
+
+    // Apply geomorphic landforms around the actual stream hierarchy. The
+    // drainage graph is intentionally retained as the control network:
+    // carving follows its channels rather than creating independent rivers.
+    apply_fluvial_terrain_shaping(
+        elevation, ocean, mountain_strength, grid.cells,
+        grid.width, grid.height, plan, grid.fluvial_offsets);
+
+    grid.elevation_offsets.resize(count, 0.0);
+    for (std::size_t i = 0; i < count; ++i) {
+        const double hydraulic_thermal =
+            grid.hydraulic_offsets[i] + grid.thermal_offsets[i];
+        grid.maximum_erosion_offset = std::max(
+            grid.maximum_erosion_offset, std::abs(hydraulic_thermal));
+        grid.maximum_hydraulic_offset = std::max(
+            grid.maximum_hydraulic_offset,
+            std::abs(grid.hydraulic_offsets[i]));
+        grid.maximum_thermal_offset = std::max(
+            grid.maximum_thermal_offset,
+            std::abs(grid.thermal_offsets[i]));
+        grid.maximum_fluvial_offset = std::max(
+            grid.maximum_fluvial_offset,
+            std::abs(grid.fluvial_offsets[i]));
+        grid.elevation_offsets[i] =
+            hydraulic_thermal + grid.fluvial_offsets[i];
+    }
+
     grid.valid = true;
     return grid;
 }
