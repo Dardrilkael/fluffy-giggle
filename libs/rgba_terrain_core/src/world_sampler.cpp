@@ -435,6 +435,201 @@ double terrain_at_grid(const WorldPlan& plan, std::int64_t gx,
     return evaluate_terrain(plan, x, z, bias).normalized_elevation;
 }
 
+// One deterministic priority-flood drainage graph is shared by hydraulic
+// erosion and final hydrology. Every non-outlet edge points to a strictly
+// earlier (filled elevation, visit order) key, so the graph is acyclic even
+// when steepest-downhill edges and depression-spill parent edges meet.
+struct DrainageRouting {
+    std::vector<double> filled_elevation;
+    std::vector<std::size_t> parent;
+    std::vector<std::size_t> visit_order;
+    std::vector<std::size_t> upstream_order;
+    std::vector<DrainageDirection> direction;
+};
+
+DrainageRouting build_drainage_routing(
+    const std::vector<double>& elevation,
+    const std::vector<bool>& ocean,
+    std::size_t width, std::size_t height) {
+    DrainageRouting routing;
+    if (width == 0 || height == 0 ||
+        width > std::numeric_limits<std::size_t>::max() / height ||
+        elevation.size() != width * height ||
+        ocean.size() != elevation.size()) {
+        return routing;
+    }
+
+    const std::size_t count = elevation.size();
+    routing.filled_elevation.resize(count);
+    routing.parent.assign(count, count);
+    routing.visit_order.assign(count, count);
+    routing.direction.assign(count, DrainageDirection::Sink);
+
+    const auto index = [width](std::size_t x, std::size_t z) {
+        return z * width + x;
+    };
+    const auto is_boundary = [width, height](std::size_t i) {
+        const std::size_t x = i % width;
+        const std::size_t z = i / width;
+        return x == 0 || z == 0 || x + 1u == width || z + 1u == height;
+    };
+    const bool has_ocean_outlets = std::any_of(
+        ocean.begin(), ocean.end(), [](bool value) { return value; });
+    const auto is_outlet = [&](std::size_t i) {
+        // Prefer actual ocean outlets. The finite-world boundary is only a
+        // fallback for completely landlocked worlds with no ocean cells.
+        return ocean[i] || (!has_ocean_outlets && is_boundary(i));
+    };
+
+    using FloodNode = std::pair<double, std::size_t>;
+    std::priority_queue<FloodNode, std::vector<FloodNode>,
+                        std::greater<FloodNode>> frontier;
+    std::vector<bool> visited(count, false);
+    std::size_t sequence = 0;
+
+    // Seed outlets in linear-index order. The priority queue then resolves
+    // equal flood levels by index, making the entire construction reproducible.
+    for (std::size_t i = 0; i < count; ++i) {
+        if (!is_outlet(i)) {
+            continue;
+        }
+        visited[i] = true;
+        routing.filled_elevation[i] = elevation[i];
+        routing.visit_order[i] = sequence++;
+        frontier.emplace(routing.filled_elevation[i], i);
+    }
+
+    while (!frontier.empty()) {
+        const auto [level, current] = frontier.top();
+        frontier.pop();
+        const std::size_t x = current % width;
+        const std::size_t z = current / width;
+        for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
+            const auto nx = static_cast<std::int64_t>(x) + drainage_dx[d];
+            const auto nz = static_cast<std::int64_t>(z) + drainage_dz[d];
+            if (nx < 0 || nz < 0 ||
+                nx >= static_cast<std::int64_t>(width) ||
+                nz >= static_cast<std::int64_t>(height)) {
+                continue;
+            }
+            const std::size_t next = index(
+                static_cast<std::size_t>(nx),
+                static_cast<std::size_t>(nz));
+            if (visited[next]) {
+                continue;
+            }
+            visited[next] = true;
+            routing.parent[next] = current;
+            routing.filled_elevation[next] = std::max(elevation[next], level);
+            routing.visit_order[next] = sequence++;
+            frontier.emplace(routing.filled_elevation[next], next);
+        }
+    }
+
+    for (std::size_t i = 0; i < count; ++i) {
+        if (is_outlet(i)) {
+            continue;
+        }
+
+        const std::size_t x = i % width;
+        const std::size_t z = i / width;
+        double best_drop = 0.0;
+        DrainageDirection best_direction = DrainageDirection::Sink;
+
+        for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
+            const auto nx = static_cast<std::int64_t>(x) + drainage_dx[d];
+            const auto nz = static_cast<std::int64_t>(z) + drainage_dz[d];
+            if (nx < 0 || nz < 0 ||
+                nx >= static_cast<std::int64_t>(width) ||
+                nz >= static_cast<std::int64_t>(height)) {
+                continue;
+            }
+            const std::size_t next = index(
+                static_cast<std::size_t>(nx),
+                static_cast<std::size_t>(nz));
+
+            // A downhill candidate is accepted only when it is earlier in
+            // the flood ordering. This prevents it from pointing back into a
+            // later cell whose flat/depression route may point uphill here.
+            const bool precedes =
+                routing.filled_elevation[next] <
+                    routing.filled_elevation[i] ||
+                (routing.filled_elevation[next] ==
+                     routing.filled_elevation[i] &&
+                 routing.visit_order[next] < routing.visit_order[i]);
+            if (!precedes) {
+                continue;
+            }
+
+            const double distance = (d % 2u == 1u)
+                ? 1.41421356237 : 1.0;
+            const double drop = (elevation[i] - elevation[next]) / distance;
+            if (drop > best_drop) {
+                best_drop = drop;
+                best_direction = static_cast<DrainageDirection>(d);
+            }
+        }
+
+        if (best_direction == DrainageDirection::Sink &&
+            routing.parent[i] != count) {
+            const std::size_t parent = routing.parent[i];
+            const auto dx = static_cast<std::int64_t>(parent % width) -
+                            static_cast<std::int64_t>(x);
+            const auto dz = static_cast<std::int64_t>(parent / width) -
+                            static_cast<std::int64_t>(z);
+            for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
+                if (drainage_dx[d] == dx && drainage_dz[d] == dz) {
+                    best_direction = static_cast<DrainageDirection>(d);
+                    break;
+                }
+            }
+        }
+        routing.direction[i] = best_direction;
+    }
+
+    // Reverse topological order: every source is processed before its
+    // downstream neighbor for both flow accumulation and sediment transport.
+    routing.upstream_order.resize(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        routing.upstream_order[i] = i;
+    }
+    std::sort(
+        routing.upstream_order.begin(), routing.upstream_order.end(),
+        [&](std::size_t lhs, std::size_t rhs) {
+            if (routing.filled_elevation[lhs] !=
+                routing.filled_elevation[rhs]) {
+                return routing.filled_elevation[lhs] >
+                       routing.filled_elevation[rhs];
+            }
+            if (routing.visit_order[lhs] != routing.visit_order[rhs]) {
+                return routing.visit_order[lhs] > routing.visit_order[rhs];
+            }
+            return lhs > rhs;
+        });
+    return routing;
+}
+
+std::size_t drainage_downstream_index(
+    std::size_t source, DrainageDirection direction,
+    std::size_t width, std::size_t height) {
+    const std::size_t count = width * height;
+    const auto d = static_cast<std::uint8_t>(direction);
+    if (d >= drainage_dx.size() || width == 0 || height == 0) {
+        return count;
+    }
+    const auto x = static_cast<std::int64_t>(source % width) +
+                   drainage_dx[d];
+    const auto z = static_cast<std::int64_t>(source / width) +
+                   drainage_dz[d];
+    if (x < 0 || z < 0 ||
+        x >= static_cast<std::int64_t>(width) ||
+        z >= static_cast<std::int64_t>(height)) {
+        return count;
+    }
+    return static_cast<std::size_t>(z) * width +
+           static_cast<std::size_t>(x);
+}
+
 HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
                                   double normalized_elevation,
                                   [[maybe_unused]] double precipitation) {
@@ -700,6 +895,9 @@ HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
 // Evolve a deterministic finite-world elevation field before final D8
 // routing. All passes read one immutable elevation snapshot and write to a
 // separate buffer, so results do not depend on traversal or chunk order.
+// Evolve a deterministic finite-world elevation field before final D8
+// routing. Each hydraulic iteration rebuilds the shared drainage graph from
+// the current elevation snapshot, so incision never follows stale channels.
 void erode_terrain(std::vector<double>& elevation,
                    const std::vector<double>& precipitation,
                    const std::vector<bool>& ocean,
@@ -708,7 +906,8 @@ void erode_terrain(std::vector<double>& elevation,
     const std::size_t count = elevation.size();
     if (count == 0 || width == 0 || height == 0 ||
         width > std::numeric_limits<std::size_t>::max() / height ||
-        count != width * height) {
+        count != width * height ||
+        precipitation.size() != count || ocean.size() != count) {
         return;
     }
     const auto index = [width](std::size_t x, std::size_t z) {
@@ -720,80 +919,56 @@ void erode_terrain(std::vector<double>& elevation,
     std::vector<double> accumulation(count);
     std::vector<double> sediment(count);
     std::vector<double> delta(count);
-    std::vector<std::size_t> order(count);
-    std::vector<DrainageDirection> direction(count, DrainageDirection::Sink);
 
     constexpr int hydraulic_iterations = 4;
     constexpr int thermal_iterations = 2;
     constexpr double talus_threshold = 0.014;
     constexpr double thermal_rate = 0.10;
     for (int iteration = 0; iteration < hydraulic_iterations; ++iteration) {
+        // Elevation changes after every hydraulic + thermal pass. Rebuild
+        // priority flood, D8 directions and topological order before routing
+        // the next pass.
+        const DrainageRouting routing =
+            build_drainage_routing(elevation, ocean, width, height);
+        if (routing.direction.size() != count ||
+            routing.upstream_order.size() != count) {
+            return;
+        }
+
         std::fill(accumulation.begin(), accumulation.end(), 0.0);
         std::fill(sediment.begin(), sediment.end(), 0.0);
-        std::fill(direction.begin(), direction.end(), DrainageDirection::Sink);
         for (std::size_t i = 0; i < count; ++i) {
             accumulation[i] = ocean[i] ? 0.0 : precipitation[i];
-            order[i] = i;
-            if (ocean[i]) continue;
-            const std::size_t x = i % width;
-            const std::size_t z = i / width;
-            double best_slope = 0.0;
-            for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
-                const auto nx = static_cast<std::int64_t>(x) + drainage_dx[d];
-                const auto nz = static_cast<std::int64_t>(z) + drainage_dz[d];
-                if (nx < 0 || nz < 0 ||
-                    nx >= static_cast<std::int64_t>(width) ||
-                    nz >= static_cast<std::int64_t>(height)) continue;
-                const std::size_t neighbor = index(
-                    static_cast<std::size_t>(nx), static_cast<std::size_t>(nz));
-                if (ocean[neighbor]) continue;
-                const double distance = (d % 2 == 1) ? 1.41421356237 : 1.0;
-                const double slope =
-                    (elevation[i] - elevation[neighbor]) / distance;
-                if (slope > best_slope) {
-                    best_slope = slope;
-                    direction[i] = static_cast<DrainageDirection>(d);
-                }
-            }
         }
-        std::sort(order.begin(), order.end(),
-            [&](std::size_t lhs, std::size_t rhs) {
-                if (elevation[lhs] != elevation[rhs])
-                    return elevation[lhs] > elevation[rhs];
-                return lhs < rhs;
-            });
-        for (const std::size_t i : order) {
-            const auto d = direction[i];
-            if (d == DrainageDirection::Sink) continue;
-            const std::size_t di = static_cast<std::size_t>(d);
-            const auto nx = static_cast<std::int64_t>(i % width) + drainage_dx[di];
-            const auto nz = static_cast<std::int64_t>(i / width) + drainage_dz[di];
-            if (nx < 0 || nz < 0 ||
-                nx >= static_cast<std::int64_t>(width) ||
-                nz >= static_cast<std::int64_t>(height)) continue;
-            accumulation[index(static_cast<std::size_t>(nx),
-                               static_cast<std::size_t>(nz))] += accumulation[i];
+        for (const std::size_t i : routing.upstream_order) {
+            const std::size_t downstream = drainage_downstream_index(
+                i, routing.direction[i], width, height);
+            if (downstream != count) {
+                accumulation[downstream] += accumulation[i];
+            }
         }
 
         next_elevation = elevation;
-        for (const std::size_t i : order) {
-            if (ocean[i]) continue;
-            const auto d = direction[i];
-            if (d == DrainageDirection::Sink) {
-                next_elevation[i] = std::clamp(
-                    elevation[i] + sediment[i],
-                    land_floor, 1.0);
+        for (const std::size_t i : routing.upstream_order) {
+            if (ocean[i]) {
                 continue;
             }
-            const std::size_t di = static_cast<std::size_t>(d);
-            const auto nx = static_cast<std::int64_t>(i % width) + drainage_dx[di];
-            const auto nz = static_cast<std::int64_t>(i / width) + drainage_dz[di];
-            if (nx < 0 || nz < 0 ||
-                nx >= static_cast<std::int64_t>(width) ||
-                nz >= static_cast<std::int64_t>(height)) continue;
-            const std::size_t downstream = index(
-                static_cast<std::size_t>(nx), static_cast<std::size_t>(nz));
-            const double distance = (di % 2 == 1) ? 1.41421356237 : 1.0;
+            const std::size_t downstream = drainage_downstream_index(
+                i, routing.direction[i], width, height);
+            if (downstream == count) {
+                // A land outlet in an ocean-free finite world retains the
+                // sediment delivered to it. Ocean outlets are skipped above,
+                // so sediment reaching the sea is exported rather than
+                // deposited onto protected ocean cells.
+                next_elevation[i] = std::clamp(
+                    elevation[i] + sediment[i], land_floor, 1.0);
+                continue;
+            }
+
+            const std::size_t direction_index =
+                static_cast<std::size_t>(routing.direction[i]);
+            const double distance = (direction_index % 2u == 1u)
+                ? 1.41421356237 : 1.0;
             const double slope = std::max(
                 0.0, (elevation[i] - elevation[downstream]) / distance);
             const double stream_power =
@@ -803,8 +978,7 @@ void erode_terrain(std::vector<double>& elevation,
                 0.0018, 0.000055 * stream_power);
             const double carried_sediment = sediment[i] + incision * 0.70;
 
-            // Transport most sediment downstream; deposit more where the
-            // channel flattens, forming small deterministic valley fans.
+            // Transport sediment along the same acyclic route as runoff.
             const double deposition_fraction =
                 0.12 + 0.58 * (1.0 - smoothstep(0.006, 0.035, slope));
             const double deposited = carried_sediment * deposition_fraction;
@@ -939,13 +1113,9 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     if (count > maximum_routing_cells) return grid;
 
     std::vector<double> elevation(count);
-    std::vector<double> filled(count);
     std::vector<double> accumulation(count);
     std::vector<double> precipitation(count);
     std::vector<bool> ocean(count, false);
-    std::vector<std::size_t> parent(count, count);
-    std::vector<std::size_t> visit_order(count, count);
-    std::vector<DrainageDirection> direction(count, DrainageDirection::Sink);
     const auto index = [&grid](std::size_t x, std::size_t z) {
         return z * grid.width + x;
     };
@@ -957,7 +1127,8 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
             const auto regions = evaluate_regions(plan, world_x, world_z);
             const double blend = std::min(1.0, regions.weight_sum);
             const double bias = regions.weight_sum > 0.0
-                ? regions.elevation_sum / regions.weight_sum * blend : 0.0;
+                ? regions.elevation_sum / regions.weight_sum * blend
+                : 0.0;
             const TerrainField terrain = evaluate_terrain(
                 plan, world_x, world_z, bias);
             elevation[i] = terrain.normalized_elevation;
@@ -965,172 +1136,63 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
             const ClimateField climate = evaluate_climate(
                 plan, world_x, world_z, regions, terrain);
             precipitation[i] = climate.precipitation;
-            // Each routing cell contributes its actual climate-derived rainfall.
-            // Ocean cells terminate drainage instead of adding river runoff.
             accumulation[i] = ocean[i] ? 0.0 : precipitation[i];
         }
     }
 
     const std::vector<double> original_elevation = elevation;
-    // Store pre-erosion elevation for pixel-level ocean classification.
-    // This allows bilinear interpolation of elevation at output pixel resolution
-    // and comparison with sea_level_fraction, matching the baseline terrain's
-    // per-pixel ocean check.
     grid.original_elevation = original_elevation;
-    // Store pre-erosion ocean classification (original analytical terrain mask).
-    // Kept for backwards compatibility.
     grid.original_ocean.resize(count);
     for (std::size_t i = 0; i < count; ++i) {
-        grid.original_ocean[i] = ocean[i] ? 1 : 0;
+        grid.original_ocean[i] = ocean[i] ? 1u : 0u;
     }
 
-    // River threshold is used for both pre- and post-erosion hydrology.
     const double threshold = plan.hydrology.river_accumulation_threshold;
 
-    // Compute and store pre-erosion hydrology cells (rivers, lakes, etc.)
-    // for ocean classification that matches the baseline terrain's
-    // grid-resolution hydrology (which includes river channel cuts).
-    // This mirrors the post-erosion computation below but uses pre-erosion data.
-    std::vector<DrainageDirection> original_direction(count, DrainageDirection::Sink);
+    // The baseline hydrology uses the same priority-flood/D8 graph as
+    // erosion and final post-erosion hydrology. Keep these cells for exact
+    // baseline ocean classification at output-pixel resolution.
+    const DrainageRouting original_routing =
+        build_drainage_routing(original_elevation, ocean, grid.width, grid.height);
+    if (original_routing.direction.size() != count ||
+        original_routing.upstream_order.size() != count) {
+        return grid;
+    }
     std::vector<double> original_accumulation = accumulation;
-    std::vector<double> original_filled(count);
-    std::vector<std::size_t> original_parent(count, count);
-    std::vector<std::size_t> original_visit_order(count, count);
-    std::size_t original_sequence = 0;
-    // We'll reuse the priority-flood approach for consistency
-    using FloodNode = std::pair<double, std::size_t>;
-    std::priority_queue<FloodNode, std::vector<FloodNode>,
-                        std::greater<FloodNode>> original_frontier;
-    std::vector<bool> original_visited(count, false);
-    const auto original_seed_boundary = [&](std::size_t x, std::size_t z) {
-        const std::size_t i = index(x, z);
-        if (original_visit_order[i] != count) return;
-        original_visit_order[i] = original_sequence++;
-        original_filled[i] = original_elevation[i];
-        original_frontier.emplace(original_filled[i], i);
-    };
-    for (std::size_t x = 0; x < grid.width; ++x) {
-        original_seed_boundary(x, 0);
-        original_seed_boundary(x, grid.height - 1);
-    }
-    for (std::size_t z = 0; z < grid.height; ++z) {
-        original_seed_boundary(0, z);
-        original_seed_boundary(grid.width - 1, z);
-    }
-    // Mark boundary as visited
-    for (std::size_t x = 0; x < grid.width; ++x) {
-        original_visited[index(x, 0)] = true;
-        original_visited[index(x, grid.height - 1)] = true;
-    }
-    for (std::size_t z = 0; z < grid.height; ++z) {
-        original_visited[index(0, z)] = true;
-        original_visited[index(grid.width - 1, z)] = true;
-    }
-    while (!original_frontier.empty()) {
-        const auto [level, current] = original_frontier.top();
-        original_frontier.pop();
-        const std::size_t x = current % grid.width;
-        const std::size_t z = current / grid.width;
-        for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
-            const auto nx_signed = static_cast<std::int64_t>(x) + drainage_dx[d];
-            const auto nz_signed = static_cast<std::int64_t>(z) + drainage_dz[d];
-            if (nx_signed < 0 || nz_signed < 0 ||
-                nx_signed >= static_cast<std::int64_t>(grid.width) ||
-                nz_signed >= static_cast<std::int64_t>(grid.height)) continue;
-            const std::size_t next = index(
-                static_cast<std::size_t>(nx_signed),
-                static_cast<std::size_t>(nz_signed));
-            if (original_visited[next]) continue;
-            original_visited[next] = true;
-            original_parent[next] = current;
-            original_filled[next] = std::max(original_elevation[next], level);
-            original_visit_order[next] = original_sequence++;
-            original_frontier.emplace(original_filled[next], next);
+    for (const std::size_t i : original_routing.upstream_order) {
+        const std::size_t downstream = drainage_downstream_index(
+            i, original_routing.direction[i], grid.width, grid.height);
+        if (downstream != count) {
+            original_accumulation[downstream] += original_accumulation[i];
         }
     }
 
-    // D8 routing on pre-erosion elevation
-    for (std::size_t z = 0; z < grid.height; ++z) {
-        for (std::size_t x = 0; x < grid.width; ++x) {
-            const std::size_t i = index(x, z);
-            if (ocean[i]) {
-                original_direction[i] = DrainageDirection::Sink;
-                continue;
-            }
-            double best_drop = 0.0;
-            for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
-                const auto nx = static_cast<std::int64_t>(x) + drainage_dx[d];
-                const auto nz = static_cast<std::int64_t>(z) + drainage_dz[d];
-                if (nx < 0 || nz < 0 ||
-                    nx >= static_cast<std::int64_t>(grid.width) ||
-                    nz >= static_cast<std::int64_t>(grid.height)) continue;
-                const std::size_t next = index(
-                    static_cast<std::size_t>(nx), static_cast<std::size_t>(nz));
-                const double distance = (d % 2 == 1) ? 1.41421356237 : 1.0;
-                const double drop = (original_elevation[i] - original_elevation[next]) / distance;
-                if (drop > best_drop) {
-                    best_drop = drop;
-                    original_direction[i] = static_cast<DrainageDirection>(d);
-                }
-            }
-            if (best_drop <= 0.0 && original_parent[i] != count) {
-                const auto px = static_cast<std::int64_t>(original_parent[i] % grid.width);
-                const auto pz = static_cast<std::int64_t>(original_parent[i] / grid.width);
-                const auto dx = px - static_cast<std::int64_t>(x);
-                const auto dz = pz - static_cast<std::int64_t>(z);
-                for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
-                    if (drainage_dx[d] == dx && drainage_dz[d] == dz) {
-                        original_direction[i] = static_cast<DrainageDirection>(d);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    // Accumulation on pre-erosion elevation
-    std::vector<std::size_t> original_order(count);
-    for (std::size_t i = 0; i < count; ++i) original_order[i] = i;
-    std::sort(original_order.begin(), original_order.end(), [&](std::size_t a, std::size_t b) {
-        if (original_filled[a] != original_filled[b]) return original_filled[a] > original_filled[b];
-        return original_visit_order[a] > original_visit_order[b];
-    });
-    for (const std::size_t i : original_order) {
-        const auto d = original_direction[i];
-        if (d == DrainageDirection::Sink) continue;
-        const std::size_t di = static_cast<std::size_t>(d);
-        const auto x = static_cast<std::int64_t>(i % grid.width) + drainage_dx[di];
-        const auto z = static_cast<std::int64_t>(i / grid.width) + drainage_dz[di];
-        if (x < 0 || z < 0 ||
-            x >= static_cast<std::int64_t>(grid.width) ||
-            z >= static_cast<std::int64_t>(grid.height)) continue;
-        original_accumulation[index(static_cast<std::size_t>(x),
-                           static_cast<std::size_t>(z))] += original_accumulation[i];
-    }
-
-    // Build pre-erosion hydrology cells
     grid.original_cells.resize(count);
     for (std::size_t i = 0; i < count; ++i) {
         HydrologyField& cell = grid.original_cells[i];
-        cell.direction = original_direction[i];
+        cell.direction = original_routing.direction[i];
         cell.accumulation = original_accumulation[i];
         cell.river_strength = clamp01(
             (original_accumulation[i] - threshold) / (threshold * 2.5));
-        cell.lake_depth_m = std::max(0.0, original_filled[i] - original_elevation[i]) *
-                            plan.climate.maximum_elevation_m;
+        cell.lake_depth_m = std::max(
+            0.0, original_routing.filled_elevation[i] - original_elevation[i]) *
+            plan.climate.maximum_elevation_m;
         cell.lake = !ocean[i] &&
             cell.lake_depth_m >= plan.hydrology.lake_minimum_depth_m &&
-            original_accumulation[i] >= plan.hydrology.lake_minimum_accumulation &&
+            original_accumulation[i] >=
+                plan.hydrology.lake_minimum_accumulation &&
             precipitation[i] >= plan.hydrology.lake_minimum_precipitation;
-        cell.lake_surface_elevation = original_filled[i];
-        cell.river = !cell.lake && original_direction[i] != DrainageDirection::Sink &&
-                     original_accumulation[i] >= threshold;
+        cell.lake_surface_elevation = original_routing.filled_elevation[i];
+        cell.river = !cell.lake &&
+            original_routing.direction[i] != DrainageDirection::Sink &&
+            original_accumulation[i] >= threshold;
     }
 
     if (plan.hydrology.erosion_enabled) {
         erode_terrain(elevation, precipitation, ocean, grid.width, grid.height,
                       plan.sea_level_fraction);
     }
+
     grid.elevation_offsets.resize(count, 0.0);
     for (std::size_t i = 0; i < count; ++i) {
         grid.elevation_offsets[i] = elevation[i] - original_elevation[i];
@@ -1148,7 +1210,8 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
             const auto regions = evaluate_regions(plan, world_x, world_z);
             const double blend = std::min(1.0, regions.weight_sum);
             const double bias = regions.weight_sum > 0.0
-                ? regions.elevation_sum / regions.weight_sum * blend : 0.0;
+                ? regions.elevation_sum / regions.weight_sum * blend
+                : 0.0;
             TerrainField eroded_terrain = evaluate_terrain(
                 plan, world_x, world_z, bias);
             eroded_terrain.normalized_elevation = elevation[i];
@@ -1158,130 +1221,42 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
         accumulation[i] = ocean[i] ? 0.0 : precipitation[i];
     }
 
-    using FloodNode = std::pair<double, std::size_t>;
-    std::priority_queue<FloodNode, std::vector<FloodNode>,
-                        std::greater<FloodNode>> frontier;
-    std::vector<bool> visited(count, false);
-    std::size_t sequence = 0;
-    const auto seed_boundary = [&](std::size_t x, std::size_t z) {
-        const std::size_t i = index(x, z);
-        if (visited[i]) return;
-        visited[i] = true;
-        filled[i] = elevation[i];
-        visit_order[i] = sequence++;
-        frontier.emplace(filled[i], i);
-    };
-    for (std::size_t x = 0; x < grid.width; ++x) {
-        seed_boundary(x, 0);
-        seed_boundary(x, grid.height - 1);
+    const DrainageRouting routing =
+        build_drainage_routing(elevation, ocean, grid.width, grid.height);
+    if (routing.direction.size() != count ||
+        routing.upstream_order.size() != count) {
+        return grid;
     }
-    for (std::size_t z = 0; z < grid.height; ++z) {
-        seed_boundary(0, z);
-        seed_boundary(grid.width - 1, z);
-    }
-
-    while (!frontier.empty()) {
-        const auto [level, current] = frontier.top();
-        frontier.pop();
-        const std::size_t x = current % grid.width;
-        const std::size_t z = current / grid.width;
-        for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
-            const auto nx_signed = static_cast<std::int64_t>(x) + drainage_dx[d];
-            const auto nz_signed = static_cast<std::int64_t>(z) + drainage_dz[d];
-            if (nx_signed < 0 || nz_signed < 0 ||
-                nx_signed >= static_cast<std::int64_t>(grid.width) ||
-                nz_signed >= static_cast<std::int64_t>(grid.height)) continue;
-            const std::size_t next = index(
-                static_cast<std::size_t>(nx_signed),
-                static_cast<std::size_t>(nz_signed));
-            if (visited[next]) continue;
-            visited[next] = true;
-            parent[next] = current;
-            filled[next] = std::max(elevation[next], level);
-            visit_order[next] = sequence++;
-            frontier.emplace(filled[next], next);
+    for (const std::size_t i : routing.upstream_order) {
+        const std::size_t downstream = drainage_downstream_index(
+            i, routing.direction[i], grid.width, grid.height);
+        if (downstream != count) {
+            accumulation[downstream] += accumulation[i];
         }
-    }
-
-    for (std::size_t z = 0; z < grid.height; ++z) {
-        for (std::size_t x = 0; x < grid.width; ++x) {
-            const std::size_t i = index(x, z);
-            if (ocean[i]) {
-                direction[i] = DrainageDirection::Sink;
-                continue;
-            }
-            double best_drop = 0.0;
-            for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
-                const auto nx = static_cast<std::int64_t>(x) + drainage_dx[d];
-                const auto nz = static_cast<std::int64_t>(z) + drainage_dz[d];
-                if (nx < 0 || nz < 0 ||
-                    nx >= static_cast<std::int64_t>(grid.width) ||
-                    nz >= static_cast<std::int64_t>(grid.height)) continue;
-                const std::size_t next = index(
-                    static_cast<std::size_t>(nx), static_cast<std::size_t>(nz));
-                const double distance = (d % 2 == 1) ? 1.41421356237 : 1.0;
-                const double drop = (elevation[i] - elevation[next]) / distance;
-                if (drop > best_drop) {
-                    best_drop = drop;
-                    direction[i] = static_cast<DrainageDirection>(d);
-                }
-            }
-            // In flats/depressions, follow the priority-flood parent. Parent
-            // links always point to an earlier visited cell, so cannot cycle.
-            if (best_drop <= 0.0 && parent[i] != count) {
-                const auto px = static_cast<std::int64_t>(parent[i] % grid.width);
-                const auto pz = static_cast<std::int64_t>(parent[i] / grid.width);
-                const auto dx = px - static_cast<std::int64_t>(x);
-                const auto dz = pz - static_cast<std::int64_t>(z);
-                for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
-                    if (drainage_dx[d] == dx && drainage_dz[d] == dz) {
-                        direction[i] = static_cast<DrainageDirection>(d);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    std::vector<std::size_t> order(count);
-    for (std::size_t i = 0; i < count; ++i) order[i] = i;
-    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
-        if (filled[a] != filled[b]) return filled[a] > filled[b];
-        return visit_order[a] > visit_order[b];
-    });
-    for (const std::size_t i : order) {
-        const auto d = direction[i];
-        if (d == DrainageDirection::Sink) continue;
-        const std::size_t di = static_cast<std::size_t>(d);
-        const auto x = static_cast<std::int64_t>(i % grid.width) + drainage_dx[di];
-        const auto z = static_cast<std::int64_t>(i / grid.width) + drainage_dz[di];
-        if (x < 0 || z < 0 ||
-            x >= static_cast<std::int64_t>(grid.width) ||
-            z >= static_cast<std::int64_t>(grid.height)) continue;
-        accumulation[index(static_cast<std::size_t>(x),
-                           static_cast<std::size_t>(z))] += accumulation[i];
     }
 
     grid.cells.resize(count);
     for (std::size_t i = 0; i < count; ++i) {
         HydrologyField& cell = grid.cells[i];
-        cell.direction = direction[i];
+        cell.direction = routing.direction[i];
         cell.accumulation = accumulation[i];
         grid.maximum_accumulation = std::max(
             grid.maximum_accumulation, accumulation[i]);
         cell.river_strength = clamp01(
             (accumulation[i] - threshold) / (threshold * 2.5));
-        cell.lake_depth_m = std::max(0.0, filled[i] - elevation[i]) *
-                            plan.climate.maximum_elevation_m;
+        cell.lake_depth_m = std::max(
+            0.0, routing.filled_elevation[i] - elevation[i]) *
+            plan.climate.maximum_elevation_m;
         cell.lake = !ocean[i] &&
             cell.lake_depth_m >= plan.hydrology.lake_minimum_depth_m &&
             accumulation[i] >= plan.hydrology.lake_minimum_accumulation &&
             precipitation[i] >= plan.hydrology.lake_minimum_precipitation;
-        cell.lake_surface_elevation = filled[i];
+        cell.lake_surface_elevation = routing.filled_elevation[i];
         grid.maximum_lake_depth_m = std::max(
             grid.maximum_lake_depth_m, cell.lake_depth_m);
-        cell.river = !cell.lake && direction[i] != DrainageDirection::Sink &&
-                     accumulation[i] >= threshold;
+        cell.river = !cell.lake &&
+            routing.direction[i] != DrainageDirection::Sink &&
+            accumulation[i] >= threshold;
     }
     grid.valid = true;
     return grid;
