@@ -121,7 +121,7 @@ foreach(dep vulkan_headers volk vma imgui implot)
   FetchContent_MakeAvailable(${dep})
 endforeach()
 endif()  # ws_wants_ui declares
-# stb_image and stb_truetype share one pinned upstream header checkout.
+# stb_image, stb_image_write, and stb_truetype share one pinned upstream header checkout.
 # stb has no release tags - pin a master commit. GIT_SHALLOW stays OFF:
 # GitHub blocks shallow-fetching arbitrary commit SHAs, and the full repo
 # clone is small enough for this shared dependency.
