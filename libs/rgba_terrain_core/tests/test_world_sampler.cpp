@@ -524,10 +524,10 @@ TEST_CASE("world region emits deterministic hydrology diagnostic preview layers"
         CHECK(with_diagnostics.pixels[i].a == without_diagnostics.pixels[i].a);
     }
 
-    const std::array<const RgbaImage*, 5> layers{
+    const std::array<const RgbaImage*, 6> layers{
         &diagnostics.flow_accumulation, &diagnostics.river_strength,
         &diagnostics.drainage_direction, &diagnostics.lake_depth,
-        &diagnostics.lake_basins};
+        &diagnostics.lake_basins, &diagnostics.erosion_delta};
     for (const auto* layer : layers) {
         CHECK(layer->width == 24);
         CHECK(layer->height == 20);
@@ -543,16 +543,18 @@ TEST_CASE("world region emits deterministic hydrology diagnostic preview layers"
         16, 16, 12, 20, settings, nullptr, &left_diagnostics);
     (void)sampler.generate_rgba_region(
         28, 16, 12, 20, settings, nullptr, &right_diagnostics);
-    const std::array<const RgbaImage*, 5> left_layers{
+    const std::array<const RgbaImage*, 6> left_layers{
         &left_diagnostics.flow_accumulation,
         &left_diagnostics.river_strength,
         &left_diagnostics.drainage_direction,
-        &left_diagnostics.lake_depth, &left_diagnostics.lake_basins};
-    const std::array<const RgbaImage*, 5> right_layers{
+        &left_diagnostics.lake_depth, &left_diagnostics.lake_basins,
+        &left_diagnostics.erosion_delta};
+    const std::array<const RgbaImage*, 6> right_layers{
         &right_diagnostics.flow_accumulation,
         &right_diagnostics.river_strength,
         &right_diagnostics.drainage_direction,
-        &right_diagnostics.lake_depth, &right_diagnostics.lake_basins};
+        &right_diagnostics.lake_depth, &right_diagnostics.lake_basins,
+        &right_diagnostics.erosion_delta};
     for (std::size_t layer = 0; layer < layers.size(); ++layer) {
         for (std::size_t z = 0; z < 20; ++z) {
             for (std::size_t x = 0; x < 12; ++x) {
