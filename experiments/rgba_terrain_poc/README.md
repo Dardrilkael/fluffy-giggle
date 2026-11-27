@@ -65,6 +65,18 @@ density, and feature flags. Indexing is X-fastest, then Z, then Y:
 The binary file is little-endian `RGAVOX02`: 8-byte magic, uint32 width,
 depth, and height, then five bytes per voxel in the same X/Z/Y order.
 
+## Inspect a data map
+
+    rgba_terrain_poc inspect terrain.png terrain.rgba-terrain
+
+Inspection reports the encoded elevation range, mean and standard deviation,
+number of distinct heights, horizontal/vertical neighbor-step statistics,
+surface material and biome distributions, and coverage of water/forest/
+mountain/river flags. Elevation and neighbor differences are calculated from
+the original 8-bit or 16-bit channel values, before conversion to voxel heights.
+This is useful for checking whether the image still contains fine spatial
+variation rather than only a small set of quantized height levels.
+
 ## Convert an existing data map
 
     rgba_terrain_poc convert input.png input.rgba-terrain output.rgba-voxels
@@ -84,6 +96,5 @@ See HOW_TO_COMPILE.md for the manual CMake commands.
 
 This is a controlled synthetic map generator, not the planned AI terrain
 generator. Caves, ores, vegetation, erosion, drainage simulation, chunk
-conversion, and meshing are not implemented in this stage. The next useful
-validation is to inspect the generated data maps and test whether additional
-spatial fields can be packed without losing local structure.
+conversion, and meshing are not implemented in this stage. The inspection command is the first validation step; visual debugging views
+and more rigorous spatial-frequency/feature-connectivity metrics remain future work.
