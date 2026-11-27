@@ -118,6 +118,101 @@ double transition_from_scores(const ScoredId& best, const ScoredId& second) {
     return clamp01(1.0 - (best.score - second.score) / 2.5);
 }
 
+struct RegionalInfluences {
+    double weight_sum = 0.0;
+    double elevation_sum = 0.0;
+    double temperature_sum = 0.0;
+    double humidity_sum = 0.0;
+    std::array<double, 256> ecosystem_affinity{};
+};
+
+RegionalInfluences evaluate_regions(const WorldPlan& plan,
+                                    double x, double z) {
+    RegionalInfluences result;
+    for (const auto& region : plan.regions) {
+        const double dx = x - region.center_x;
+        const double dz = z - region.center_z;
+        const double cosine = std::cos(region.rotation_radians);
+        const double sine = std::sin(region.rotation_radians);
+        const double local_x = dx * cosine + dz * sine;
+        const double local_z = -dx * sine + dz * cosine;
+        const double nx = local_x / region.radius_x;
+        const double nz = local_z / region.radius_z;
+        const double distance = std::sqrt(nx * nx + nz * nz);
+        if (distance >= 1.0) {
+            continue;
+        }
+
+        const double weight = 1.0 - smoothstep(0.68, 1.0, distance);
+        result.weight_sum += weight;
+        result.elevation_sum += region.elevation_bias * weight;
+        result.temperature_sum += region.temperature_bias_c * weight;
+        result.humidity_sum += region.humidity_bias * weight;
+        if (region.ecosystem_affinity > 0.0) {
+            result.ecosystem_affinity[region.ecosystem_id] +=
+                region.ecosystem_affinity * weight;
+        }
+    }
+    return result;
+}
+
+struct TerrainField {
+    double normalized_elevation = 0.0;
+    double continentalness = 0.0;
+    double mountain_strength = 0.0;
+
+    [[nodiscard]] bool is_ocean(double sea_level) const noexcept {
+        return normalized_elevation <= sea_level;
+    }
+};
+
+// This is the shared terrain evaluator used both for the requested coordinate
+// and for the deterministic upwind atmospheric fetch. It deliberately has no
+// finite-world bounds check: air entering at a world edge still has a stable
+// surrounding terrain profile, while actual world samples remain bounds-safe.
+TerrainField evaluate_terrain(const WorldPlan& plan, double x, double z,
+                              double regional_elevation_bias) {
+    const double continent_scale = plan.scales.continent_scale;
+    const double province_scale = plan.scales.province_scale;
+
+    const double warp_x = fbm(x / (continent_scale * 0.72),
+                              z / (continent_scale * 0.72),
+                              plan.seed ^ 0x7F4A7C159E3779B9ull, 3);
+    const double warp_z = fbm(x / (continent_scale * 0.72) + 17.3,
+                              z / (continent_scale * 0.72) - 9.1,
+                              plan.seed ^ 0x94D049BB133111EBull, 3);
+    const double warped_x = x + warp_x * continent_scale * 0.075;
+    const double warped_z = z + warp_z * continent_scale * 0.075;
+
+    const double continentalness = fbm(
+        warped_x / continent_scale, warped_z / continent_scale,
+        plan.seed ^ 0x3141592653589793ull, 5);
+    const double province = fbm(
+        warped_x / province_scale, warped_z / province_scale,
+        plan.seed ^ 0xA341316CC8013EA4ull, 4);
+    const double hills = fbm(
+        warped_x / (province_scale * 0.21),
+        warped_z / (province_scale * 0.21),
+        plan.seed ^ 0x2718281828459045ull, 3);
+    const double ridge_source = fbm(
+        warped_x / (province_scale * 0.13),
+        warped_z / (province_scale * 0.13),
+        plan.seed ^ 0xAD90777D5A17E3B1ull, 3);
+    const double ridge = std::pow(std::max(0.0, 1.0 - std::abs(ridge_source)),
+                                  1.45);
+    const double mountain_region =
+        smoothstep(0.08, 0.62, province) *
+        smoothstep(-0.18, 0.48, continentalness);
+    const double mountain_strength = clamp01(mountain_region * ridge);
+
+    const double elevation = clamp01(
+        plan.sea_level_fraction + continentalness * 0.30 +
+        province * 0.06 + hills * 0.025 + mountain_strength * 0.25 +
+        regional_elevation_bias);
+
+    return {elevation, continentalness, mountain_strength};
+}
+
 void validate_terrain_settings(const TerrainSettings& settings) {
     if (!std::isfinite(settings.min_height) ||
         !std::isfinite(settings.max_height) ||
@@ -148,156 +243,145 @@ WorldSample WorldSampler::sample(std::int64_t world_x,
     const double continent_scale = plan_.scales.continent_scale;
     const double province_scale = plan_.scales.province_scale;
 
-    // Low-frequency warping creates irregular continental and provincial
-    // outlines while keeping the field tied to global world coordinates.
-    const double warp_x = fbm(x / (continent_scale * 0.72),
-                              z / (continent_scale * 0.72),
-                              plan_.seed ^ 0x7F4A7C159E3779B9ull, 3);
-    const double warp_z = fbm(x / (continent_scale * 0.72) + 17.3,
-                              z / (continent_scale * 0.72) - 9.1,
-                              plan_.seed ^ 0x94D049BB133111EBull, 3);
-    const double warped_x = x + warp_x * continent_scale * 0.075;
-    const double warped_z = z + warp_z * continent_scale * 0.075;
-
-    const double continentalness = fbm(
-        warped_x / continent_scale, warped_z / continent_scale,
-        plan_.seed ^ 0x3141592653589793ull, 5);
-    const double province = fbm(
-        warped_x / province_scale, warped_z / province_scale,
-        plan_.seed ^ 0xA341316CC8013EA4ull, 4);
-    const double hills = fbm(
-        warped_x / (province_scale * 0.21),
-        warped_z / (province_scale * 0.21),
-        plan_.seed ^ 0x2718281828459045ull, 3);
-    const double ridge_source = fbm(
-        warped_x / (province_scale * 0.13),
-        warped_z / (province_scale * 0.13),
-        plan_.seed ^ 0xAD90777D5A17E3B1ull, 3);
-    const double ridge = std::pow(std::max(0.0, 1.0 - std::abs(ridge_source)),
-                                  1.45);
-    const double mountain_region =
-        smoothstep(0.08, 0.62, province) *
-        smoothstep(-0.18, 0.48, continentalness);
-    const double mountain_strength = clamp01(mountain_region * ridge);
-
-    double elevation = clamp01(
-        plan_.sea_level_fraction + continentalness * 0.30 +
-        province * 0.06 + hills * 0.025 + mountain_strength * 0.25);
-
-    // Compact AI-authored regions apply soft elliptical influences. Overlaps
-    // blend instead of producing hard borders or discontinuities.
-    double region_weight_sum = 0.0;
-    double region_elevation_sum = 0.0;
-    double region_temperature_sum = 0.0;
-    double region_humidity_sum = 0.0;
-    std::array<double, 256> ecosystem_affinity{};
-    for (const auto& region : plan_.regions) {
-        const double dx = x - region.center_x;
-        const double dz = z - region.center_z;
-        const double cosine = std::cos(region.rotation_radians);
-        const double sine = std::sin(region.rotation_radians);
-        const double local_x = dx * cosine + dz * sine;
-        const double local_z = -dx * sine + dz * cosine;
-        const double nx = local_x / region.radius_x;
-        const double nz = local_z / region.radius_z;
-        const double distance = std::sqrt(nx * nx + nz * nz);
-        if (distance >= 1.0) {
-            continue;
-        }
-
-        const double weight = 1.0 - smoothstep(0.68, 1.0, distance);
-        region_weight_sum += weight;
-        region_elevation_sum += region.elevation_bias * weight;
-        region_temperature_sum += region.temperature_bias_c * weight;
-        region_humidity_sum += region.humidity_bias * weight;
-        if (region.ecosystem_affinity > 0.0) {
-            ecosystem_affinity[region.ecosystem_id] +=
-                region.ecosystem_affinity * weight;
-        }
-    }
-
-    if (region_weight_sum > 0.0) {
-        const double blend = std::min(1.0, region_weight_sum);
-        elevation = clamp01(
-            elevation + (region_elevation_sum / region_weight_sum) * blend);
-    }
+    const RegionalInfluences regions = evaluate_regions(plan_, x, z);
+    const double region_blend = std::min(1.0, regions.weight_sum);
+    const double regional_elevation_bias = regions.weight_sum > 0.0
+        ? (regions.elevation_sum / regions.weight_sum) * region_blend
+        : 0.0;
+    const TerrainField terrain = evaluate_terrain(
+        plan_, x, z, regional_elevation_bias);
 
     const double maximum_elevation_m = plan_.climate.maximum_elevation_m;
     const double above_sea_fraction = clamp01(
-        (elevation - plan_.sea_level_fraction) /
+        (terrain.normalized_elevation - plan_.sea_level_fraction) /
         (1.0 - plan_.sea_level_fraction));
     const double elevation_m = above_sea_fraction * maximum_elevation_m;
     const double latitude = plan_.depth <= 1
         ? 0.0
         : std::abs((z / static_cast<double>(plan_.depth - 1)) * 2.0 - 1.0);
+
     const double regional_temperature = fbm(
-        warped_x / (province_scale * 1.4),
-        warped_z / (province_scale * 1.4),
+        x / (province_scale * 1.4),
+        z / (province_scale * 1.4),
         plan_.seed ^ 0xB5297A4D68E31DA4ull, 3) *
         plan_.climate.regional_temperature_variation_c;
-    double temperature =
+    const double sea_level_temperature =
         plan_.climate.equator_temperature_c +
         (plan_.climate.pole_temperature_c -
-         plan_.climate.equator_temperature_c) * std::pow(latitude, 0.90) -
+         plan_.climate.equator_temperature_c) * std::pow(latitude, 0.90) +
+        regional_temperature +
+        (regions.weight_sum > 0.0
+             ? (regions.temperature_sum / regions.weight_sum) * region_blend
+             : 0.0);
+    const double temperature = sea_level_temperature -
         (elevation_m / 1000.0) *
-            plan_.climate.elevation_lapse_rate_c_per_km +
-        regional_temperature;
+            plan_.climate.elevation_lapse_rate_c_per_km;
 
-    const double coast = 1.0 - smoothstep(
-        0.015, 0.18, std::abs(elevation - plan_.sea_level_fraction));
-    const double moisture_noise = fbm(
-        warped_x / (province_scale * 0.82),
-        warped_z / (province_scale * 0.82),
-        plan_.seed ^ 0x68E31DA4C2B2AE35ull, 3) *
-        plan_.climate.regional_humidity_variation;
-
+    // Sample a short atmospheric fetch in the direction the wind arrives from.
+    // The profile is shared by every chunk because it uses absolute coordinates.
+    constexpr std::array<double, 3> fetch_fractions{0.22, 0.55, 1.15};
+    constexpr std::array<double, 3> ocean_weights{0.45, 0.35, 0.20};
     const double wind_length = std::hypot(
         plan_.climate.prevailing_wind_x,
         plan_.climate.prevailing_wind_z);
     const double wind_x = plan_.climate.prevailing_wind_x / wind_length;
     const double wind_z = plan_.climate.prevailing_wind_z / wind_length;
-    const double upwind_continentalness = fbm(
-        (warped_x - wind_x * province_scale) / continent_scale,
-        (warped_z - wind_z * province_scale) / continent_scale,
-        plan_.seed ^ 0x3141592653589793ull, 5);
-    const double windward_lift = clamp01(
-        (continentalness - upwind_continentalness) * 1.8 +
-        mountain_strength * 0.25);
+
+    std::array<TerrainField, fetch_fractions.size()> upwind{};
+    double ocean_moisture = 0.0;
+    double upwind_peak = terrain.normalized_elevation;
+    for (std::size_t i = 0; i < fetch_fractions.size(); ++i) {
+        const double distance = province_scale * fetch_fractions[i];
+        const double upwind_x = x - wind_x * distance;
+        const double upwind_z = z - wind_z * distance;
+        const RegionalInfluences upwind_regions =
+            evaluate_regions(plan_, upwind_x, upwind_z);
+        const double upwind_blend = std::min(1.0, upwind_regions.weight_sum);
+        const double upwind_elevation_bias =
+            upwind_regions.weight_sum > 0.0
+                ? (upwind_regions.elevation_sum /
+                   upwind_regions.weight_sum) * upwind_blend
+                : 0.0;
+        upwind[i] = evaluate_terrain(
+            plan_, upwind_x, upwind_z, upwind_elevation_bias);
+        upwind_peak = std::max(
+            upwind_peak, upwind[i].normalized_elevation);
+        if (upwind[i].is_ocean(plan_.sea_level_fraction)) {
+            ocean_moisture += ocean_weights[i];
+        }
+    }
+
+    const double windward_rise = std::max(
+        0.0, terrain.normalized_elevation -
+                 upwind.front().normalized_elevation);
+    const double orographic_lift = clamp01(
+        windward_rise * maximum_elevation_m / 1200.0 +
+        terrain.mountain_strength * 0.08);
     const double rain_shadow = clamp01(
-        (upwind_continentalness - continentalness) * 1.8);
+        (upwind_peak - terrain.normalized_elevation) *
+        maximum_elevation_m / 1800.0);
 
-    double humidity = clamp01(
-        plan_.climate.base_humidity +
-        coast * plan_.climate.coastal_humidity_boost +
-        moisture_noise -
-        rain_shadow * plan_.climate.rain_shadow_strength);
+    const double coast = 1.0 - smoothstep(
+        0.015, 0.18,
+        std::abs(terrain.normalized_elevation - plan_.sea_level_fraction));
+    const double moisture_noise = fbm(
+        x / (province_scale * 0.82),
+        z / (province_scale * 0.82),
+        plan_.seed ^ 0x68E31DA4C2B2AE35ull, 3) *
+        plan_.climate.regional_humidity_variation;
+
+    // Warm sea-level air evaporates more water; the upwind ocean fetch carries
+    // that vapor inland. Moisture is an availability index, not relative RH.
+    const double evaporation_factor = std::clamp(
+        0.55 + (sea_level_temperature + 10.0) / 80.0, 0.20, 1.10);
+    const double ocean_vapor =
+        plan_.climate.coastal_humidity_boost *
+        (0.35 * coast + 0.65 * ocean_moisture) *
+        evaporation_factor;
+    double moisture_supply = clamp01(
+        plan_.climate.base_humidity + moisture_noise + ocean_vapor -
+        rain_shadow * plan_.climate.rain_shadow_strength +
+        (regions.weight_sum > 0.0
+             ? (regions.humidity_sum / regions.weight_sum) * region_blend
+             : 0.0));
+
+    // Orographic ascent cools the incoming air. The lapse rate therefore
+    // participates in both the local temperature and condensation potential.
+    const double lift_cooling_c =
+        windward_rise * maximum_elevation_m *
+        plan_.climate.elevation_lapse_rate_c_per_km / 1000.0;
+    const double condensation_efficiency = std::clamp(
+        0.70 + lift_cooling_c / 28.0, 0.70, 1.15);
     double precipitation = clamp01(
-        humidity * (0.55 + windward_lift * 0.45) +
-        mountain_strength * 0.06);
+        moisture_supply * (0.42 + 0.58 * orographic_lift) *
+        condensation_efficiency +
+        terrain.mountain_strength * 0.025);
 
-    if (region_weight_sum > 0.0) {
-        const double blend = std::min(1.0, region_weight_sum);
-        temperature += (region_temperature_sum / region_weight_sum) * blend;
-        humidity = clamp01(
-            humidity + (region_humidity_sum / region_weight_sum) * blend);
-        precipitation = clamp01(
-            precipitation + (region_humidity_sum / region_weight_sum) *
-                                blend * 0.65);
+    // Rainfall removes part of the moisture available to the air mass. The
+    // upwind peak term separately carries that drying into the lee of ranges.
+    double humidity = clamp01(moisture_supply - precipitation * 0.12);
+    const bool is_ocean = terrain.is_ocean(plan_.sea_level_fraction);
+    if (is_ocean) {
+        humidity = std::max(humidity, 0.68);
+        precipitation = clamp01(precipitation + 0.04);
     }
 
     WorldSample result;
-    result.normalized_elevation = elevation;
+    result.normalized_elevation = terrain.normalized_elevation;
     result.elevation_m = elevation_m;
-    result.continentalness = continentalness;
+    result.continentalness = terrain.continentalness;
     result.temperature_c = temperature;
     result.humidity = humidity;
     result.precipitation = precipitation;
-    result.is_ocean = elevation <= plan_.sea_level_fraction;
-    result.is_mountain = !result.is_ocean && mountain_strength > 0.34;
+    result.orographic_lift = orographic_lift;
+    result.rain_shadow = rain_shadow;
+    result.ocean_moisture = ocean_moisture;
+    result.is_ocean = is_ocean;
+    result.is_mountain = !is_ocean && terrain.mountain_strength > 0.34;
     result.habitat_variation = clamp01(
         0.5 + 0.5 * fbm(
-            warped_x / plan_.scales.habitat_scale,
-            warped_z / plan_.scales.habitat_scale,
+            x / plan_.scales.habitat_scale,
+            z / plan_.scales.habitat_scale,
             plan_.seed ^ 0xC0FFEE11E7037ED1ull, 3));
 
     if (result.is_ocean) {
@@ -314,18 +398,18 @@ WorldSample WorldSampler::sample(std::int64_t world_x,
             continue;
         }
         const double distance = climate_distance(
-            temperature, humidity, elevation,
+            temperature, humidity, terrain.normalized_elevation,
             ecosystem.temperature_optimum_c,
             ecosystem.temperature_tolerance_c,
             ecosystem.humidity_optimum, ecosystem.humidity_tolerance,
             ecosystem.elevation_optimum, ecosystem.elevation_tolerance);
         const double spatial = fbm(
-            warped_x / plan_.scales.ecosystem_scale,
-            warped_z / plan_.scales.ecosystem_scale,
+            x / plan_.scales.ecosystem_scale,
+            z / plan_.scales.ecosystem_scale,
             plan_.seed ^ (0x9E3779B97F4A7C15ull *
                           (static_cast<std::uint64_t>(ecosystem.id) + 1u)), 2);
         const double affinity = std::min(
-            1.0, ecosystem_affinity[ecosystem.id]);
+            1.0, regions.ecosystem_affinity[ecosystem.id]);
         const double score = -distance + std::log(ecosystem.weight) +
             spatial * plan_.scales.ecosystem_spatial_bias + affinity * 2.0;
         insert_top_two({ecosystem.id, score},
@@ -342,7 +426,7 @@ WorldSample WorldSampler::sample(std::int64_t world_x,
             continue;
         }
         const double distance = climate_distance(
-            temperature, humidity, elevation,
+            temperature, humidity, terrain.normalized_elevation,
             biome.temperature_optimum_c, biome.temperature_tolerance_c,
             biome.humidity_optimum, biome.humidity_tolerance,
             biome.elevation_optimum, biome.elevation_tolerance);
@@ -350,12 +434,12 @@ WorldSample WorldSampler::sample(std::int64_t world_x,
             plan_.seed ^ (0xD6E8FEB86659FD93ull *
                           (static_cast<std::uint64_t>(biome.id) + 1u));
         const double patch_noise = fbm(
-            warped_x / plan_.scales.sub_biome_scale,
-            warped_z / plan_.scales.sub_biome_scale,
+            x / plan_.scales.sub_biome_scale,
+            z / plan_.scales.sub_biome_scale,
             biome_seed, 2);
         const double habitat_noise = fbm(
-            warped_x / plan_.scales.habitat_scale,
-            warped_z / plan_.scales.habitat_scale,
+            x / plan_.scales.habitat_scale,
+            z / plan_.scales.habitat_scale,
             biome_seed ^ 0xA5A3564E27F8862Bull, 2);
         const double score = -distance + std::log(biome.weight) +
             patch_noise * plan_.scales.sub_biome_spatial_bias +
