@@ -27,8 +27,24 @@ struct WorldHydrologyDiagnosticImages {
     RgbaImage drainage_direction;
     RgbaImage lake_depth;
     RgbaImage lake_basins;
+    RgbaImage stream_order;
+    RgbaImage watershed_basins;
+    RgbaImage river_influence;
+    RgbaImage mountain_peak_distance;
     // Red = incision, blue = deposition; intensity is normalized per world.
     RgbaImage erosion_delta;
+    // Separate process diagnostics: hydraulic, thermal and fluvial terrain change.
+    RgbaImage hydraulic_erosion_delta;
+    RgbaImage thermal_erosion_delta;
+    RgbaImage fluvial_terrain_delta;
+};
+
+// Hierarchical importance of a precipitation-fed river segment.
+enum class RiverClass : std::uint8_t {
+    None = 0,
+    Stream = 1,     // Strahler order 1-2
+    River = 2,      // Strahler order 3-4
+    MajorRiver = 3, // Strahler order 5+
 };
 
 // D8 direction on the hydrology routing grid. North is negative world Z.
@@ -63,6 +79,9 @@ struct WorldSample {
     DrainageDirection drainage_direction = DrainageDirection::Sink;
     double watershed_accumulation = 0.0;
     double river_strength = 0.0;
+    std::uint32_t watershed_id = 0;
+    std::uint8_t stream_order = 0;
+    RiverClass river_class = RiverClass::None;
     double lake_depth_m = 0.0;
     // Shared normalized spill elevation for cells classified inside a lake basin.
     double lake_surface_elevation = 0.0;
