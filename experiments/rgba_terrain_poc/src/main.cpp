@@ -167,8 +167,8 @@ int inspect_command(int argc, char** argv) {
                    analysis.mountain_columns, percentage(analysis.mountain_columns));
     ws::core::info("rgba_terrain: feature coverage river={} ({:.3f}%)",
                    analysis.river_columns, percentage(analysis.river_columns));
-    ws::core::info("rgba_terrain: reserved alpha bit={} ({:.3f}%)",
-                   analysis.reserved_flag_columns, percentage(analysis.reserved_flag_columns));
+    ws::core::info("rgba_terrain: feature coverage lake={} ({:.3f}%)",
+                   analysis.lake_columns, percentage(analysis.lake_columns));
     return 0;
 }
 
