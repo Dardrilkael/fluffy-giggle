@@ -1,6 +1,6 @@
-#include "rgba_terrain/metadata.hpp"
-#include "rgba_terrain/map_analysis.hpp"
-#include "rgba_terrain/rgba_terrain.hpp"
+#include <ws/rgba_terrain_core/metadata.hpp>
+#include <ws/rgba_terrain_core/map_analysis.hpp>
+#include <ws/rgba_terrain_core/rgba_terrain.hpp>
 
 #include <ws/image/image.hpp>
 #include <ws/core/log.hpp>
@@ -66,7 +66,7 @@ std::uint32_t parse_seed(const char* text) {
 }
 
 std::vector<std::uint8_t> flatten_rgba(
-    const rgba_terrain::RgbaImage& image) {
+    const ws::rgba_terrain_core::RgbaImage& image) {
     std::vector<std::uint8_t> bytes;
     bytes.reserve(image.pixels.size() * 4u);
     for (const auto& pixel : image.pixels) {
@@ -78,7 +78,7 @@ std::vector<std::uint8_t> flatten_rgba(
     return bytes;
 }
 
-void write_voxel_file(const rgba_terrain::VoxelVolume& volume,
+void write_voxel_file(const ws::rgba_terrain_core::VoxelVolume& volume,
                       const std::string& path) {
     std::ofstream out(path, std::ios::binary);
     if (!out) {
@@ -102,8 +102,8 @@ void write_voxel_file(const rgba_terrain::VoxelVolume& volume,
     }
 }
 
-void print_map_report(const rgba_terrain::RgbaImage& image,
-                      const rgba_terrain::VoxelVolume& volume) {
+void print_map_report(const ws::rgba_terrain_core::RgbaImage& image,
+                      const ws::rgba_terrain_core::VoxelVolume& volume) {
     std::uint32_t min_height = 65535;
     std::uint32_t max_height = 0;
     std::size_t water_pixels = 0;
@@ -155,9 +155,9 @@ int inspect_command(int argc, char** argv) {
         return 2;
     }
 
-    const auto metadata = rgba_terrain::load_metadata(argv[3]);
-    const auto image = rgba_terrain::load_rgba_image(argv[2]);
-    const auto analysis = rgba_terrain::analyze_map(
+    const auto metadata = ws::rgba_terrain_core::load_metadata(argv[3]);
+    const auto image = ws::rgba_terrain_core::load_rgba_image(argv[2]);
+    const auto analysis = ws::rgba_terrain_core::analyze_map(
         image, metadata.layout, metadata.settings);
     const double pixels = static_cast<double>(analysis.width) *
                           static_cast<double>(analysis.depth);
@@ -206,14 +206,14 @@ int generate_command(int argc, char** argv) {
     }
     const std::uint32_t seed = parse_seed(argv[4]);
 
-    rgba_terrain::TerrainSettings settings;
+    ws::rgba_terrain_core::TerrainSettings settings;
     settings.min_height = 0.0f;
     settings.max_height = 56.0f;
     settings.volume_height = 64;
     settings.sea_level = 12;
     settings.subsurface_depth = 4;
 
-    const auto image = rgba_terrain::generate_synthetic_map(
+    const auto image = ws::rgba_terrain_core::generate_synthetic_map(
         width, depth, seed, settings);
 
     const auto bytes = flatten_rgba(image);
@@ -255,9 +255,9 @@ int generate_command(int argc, char** argv) {
 
     // Read both artifacts back from disk. This exercises the metadata parser
     // and ensures voxelization consumes the exact persisted PNG channel data.
-    const auto decoded_metadata = rgba_terrain::load_metadata(argv[6]);
-    const auto decoded_image = rgba_terrain::load_rgba_image(argv[5]);
-    const auto volume = rgba_terrain::generate_voxel_volume(
+    const auto decoded_metadata = ws::rgba_terrain_core::load_metadata(argv[6]);
+    const auto decoded_image = ws::rgba_terrain_core::load_rgba_image(argv[5]);
+    const auto volume = ws::rgba_terrain_core::generate_voxel_volume(
         decoded_image, decoded_metadata.layout, decoded_metadata.settings);
     write_voxel_file(volume, argv[7]);
     print_map_report(decoded_image, volume);
@@ -272,9 +272,9 @@ int convert_command(int argc, char** argv) {
         ws::core::warn("rgba_terrain: usage: rgba_terrain_poc convert <input.png> <input.rgba-terrain> <output.rgba-voxels>");
         return 2;
     }
-    const auto metadata = rgba_terrain::load_metadata(argv[3]);
-    const auto image = rgba_terrain::load_rgba_image(argv[2]);
-    const auto volume = rgba_terrain::generate_voxel_volume(
+    const auto metadata = ws::rgba_terrain_core::load_metadata(argv[3]);
+    const auto image = ws::rgba_terrain_core::load_rgba_image(argv[2]);
+    const auto volume = ws::rgba_terrain_core::generate_voxel_volume(
         image, metadata.layout, metadata.settings);
     write_voxel_file(volume, argv[4]);
     print_map_report(image, volume);
