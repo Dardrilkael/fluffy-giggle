@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <queue>
 #include <stdexcept>
 #include <utility>
 
@@ -413,21 +414,17 @@ HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
         std::array<bool, watershed_cell_count> visited{};
         spill_cost.fill(std::numeric_limits<double>::infinity());
         spill_cost[sink_index] = cell_elevation[sink_index];
+        using SpillNode = std::pair<double, std::size_t>;
+        std::priority_queue<SpillNode, std::vector<SpillNode>,
+                            std::greater<SpillNode>> frontier;
+        frontier.emplace(spill_cost[sink_index], sink_index);
 
         bool found_spill = false;
-        for (int iteration = 0; iteration < watershed_cell_count; ++iteration) {
-            std::size_t current = watershed_cell_count;
-            double current_cost = std::numeric_limits<double>::infinity();
-            for (std::size_t candidate = 0;
-                 candidate < watershed_cell_count; ++candidate) {
-                if (!visited[candidate] &&
-                    spill_cost[candidate] < current_cost) {
-                    current = candidate;
-                    current_cost = spill_cost[candidate];
-                }
-            }
-            if (current == watershed_cell_count) {
-                break;
+        while (!frontier.empty()) {
+            const auto [current_cost, current] = frontier.top();
+            frontier.pop();
+            if (visited[current] || current_cost != spill_cost[current]) {
+                continue;
             }
             visited[current] = true;
 
@@ -457,6 +454,7 @@ HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
                     current_cost, cell_elevation[next]);
                 if (candidate_cost < spill_cost[next]) {
                     spill_cost[next] = candidate_cost;
+                    frontier.emplace(candidate_cost, next);
                 }
             }
         }
