@@ -3,7 +3,7 @@
 // THE DESIGN (CPU-only world data and geometry):
 //   - Blocks: compact IDs for air, terrain, vegetation and ores. Rendering
 //     policy and GPU mesh ownership live outside this data model.
-//   - Storage: 8x8 chunks of 16x64x16 blocks in one contiguous,
+//   - Storage: 16x16 chunks of 16x64x16 blocks in one contiguous,
 //     chunk-major allocation. Within each chunk x is fastest, then z,
 //     then y: x + z*16 + y*256. Chunk spans are direct contiguous views.
 //   - Meshing: CPU-only per-chunk/tile snapshots with greedy face merging.
