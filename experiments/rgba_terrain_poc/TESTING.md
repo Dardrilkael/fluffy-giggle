@@ -20,7 +20,15 @@ By default, generated world files are written to:
 - `terrain.png` — authoritative RGBA8 data map.
 - `terrain.rgba-terrain` — channel and voxel settings.
 - `terrain.rgba-voxels` — optional validation artifact.
+- `terrain_diagnostics\` — separate elevation, slope, biome, material, water,
+  forest, mountain, river and lake preview PNGs.
+- `terrain_temperature.png`, `terrain_humidity.png`,
+  `terrain_precipitation.png`, `terrain_orographic_lift.png`,
+  `terrain_rain_shadow.png`, and `terrain_ocean_moisture.png` — climate
+  previews generated during the same sampler pass as the terrain map.
 
+All preview PNGs are disposable visualization outputs. Only
+`terrain.png` plus its metadata sidecar are authoritative terrain inputs.
 The output directory can be changed per run with `-OutputDir`. For example:
 
 ~~~powershell
