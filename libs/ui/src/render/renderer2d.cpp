@@ -818,6 +818,11 @@ Texture Renderer2D::load_texture(const char* path) {
                        "GPU context is alive", path);
         return texture;
     }
+    if (path == nullptr || *path == '\0') {
+        ws::core::warn("ui: r2d::load_texture() received an empty path "
+                       "(using white)");
+        return texture;
+    }
     // Force 4 B/px for the R8G8B8A8_UNORM texture registry.
     auto decoded = ws::image::load_file(
         path, ws::image::LoadOptions{ws::image::Channels::rgba});
