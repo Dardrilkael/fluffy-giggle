@@ -284,3 +284,44 @@ TEST_CASE("river and lake feature flags reconstruct inland surface water") {
     CHECK(volume.at(0, 22, 0).kind == VoxelKind::Air);
 }
 
+TEST_CASE("world region emits deterministic climate diagnostic preview layers") {
+    auto plan = make_default_world_plan(128, 128, 0xC11A7Eu);
+    plan.climate.equator_temperature_c = 28.0;
+    plan.climate.pole_temperature_c = -8.0;
+    const WorldSampler sampler(std::move(plan));
+
+    TerrainSettings settings;
+    settings.min_height = 0.0f;
+    settings.max_height = 56.0f;
+    settings.volume_height = 64;
+    settings.sea_level = 12;
+
+    WorldClimateDiagnosticImages diagnostics;
+    const auto with_diagnostics = sampler.generate_rgba_region(
+        40, 40, 3, 2, settings, &diagnostics);
+    const auto without_diagnostics = sampler.generate_rgba_region(
+        40, 40, 3, 2, settings);
+
+    CHECK(with_diagnostics.pixels.size() == without_diagnostics.pixels.size());
+    for (std::size_t i = 0; i < with_diagnostics.pixels.size(); ++i) {
+        CHECK(with_diagnostics.pixels[i].r == without_diagnostics.pixels[i].r);
+        CHECK(with_diagnostics.pixels[i].g == without_diagnostics.pixels[i].g);
+        CHECK(with_diagnostics.pixels[i].b == without_diagnostics.pixels[i].b);
+        CHECK(with_diagnostics.pixels[i].a == without_diagnostics.pixels[i].a);
+    }
+
+    const std::array<const RgbaImage*, 6> layers{
+        &diagnostics.temperature, &diagnostics.humidity,
+        &diagnostics.precipitation, &diagnostics.orographic_lift,
+        &diagnostics.rain_shadow, &diagnostics.ocean_moisture};
+    for (const auto* layer : layers) {
+        CHECK(layer->width == 3);
+        CHECK(layer->height == 2);
+        CHECK(layer->pixels.size() == 6);
+        for (const auto& pixel : layer->pixels) {
+            CHECK(pixel.r == pixel.g);
+            CHECK(pixel.g == pixel.b);
+            CHECK(pixel.a == 255);
+        }
+    }
+}
