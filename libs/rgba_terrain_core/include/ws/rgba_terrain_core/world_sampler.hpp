@@ -8,6 +8,19 @@
 
 namespace ws::rgba_terrain_core {
 
+// D8 direction on the hydrology routing grid. North is negative world Z.
+enum class DrainageDirection : std::uint8_t {
+    North = 0,
+    NorthEast = 1,
+    East = 2,
+    SouthEast = 3,
+    South = 4,
+    SouthWest = 5,
+    West = 6,
+    NorthWest = 7,
+    Sink = 255,
+};
+
 struct WorldSample {
     double normalized_elevation = 0.0;
     double elevation_m = 0.0;
@@ -22,6 +35,13 @@ struct WorldSample {
     double rain_shadow = 0.0;
     double ocean_moisture = 0.0;
 
+    // Hydrology diagnostics. Accumulation is a bounded, precipitation-weighted
+    // contributing-area estimate in source-cell equivalents.
+    DrainageDirection drainage_direction = DrainageDirection::Sink;
+    double watershed_accumulation = 0.0;
+    double river_strength = 0.0;
+    double lake_depth_m = 0.0;
+
     std::uint8_t ecosystem_id = 0;
     std::uint8_t biome_id = 0;
     std::uint8_t material_id = 1;
@@ -35,6 +55,8 @@ struct WorldSample {
 
     bool is_ocean = false;
     bool is_mountain = false;
+    bool is_river = false;
+    bool is_lake = false;
 
     friend bool operator==(const WorldSample&, const WorldSample&) = default;
 };
