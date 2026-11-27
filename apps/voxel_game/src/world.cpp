@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstddef>
 #include <utility>
+#include <vector>
 
 #include <ws/math/noise.hpp>
 
@@ -242,6 +243,20 @@ void emit_quad(CpuMeshData& out, int fi, int ox,
   out.indices.push_back(base + 0);
 }
 
+// Cut-out blocks reveal the opaque block behind them. Cull their own
+// interface against any solid neighbor, but keep an opaque block's face
+// when the neighbor is cut-out so that face remains visible through holes.
+[[nodiscard]] bool is_cutout(Block block) noexcept {
+  return block == Block::leaves || block == Block::glass ||
+         block == Block::ice;
+}
+
+[[nodiscard]] bool hides_face(Block owner, Block neighbor) noexcept {
+  if (!is_solid(neighbor)) return false;
+  if (is_cutout(owner)) return true;
+  return !is_cutout(neighbor);
+}
+
 // Cache the texture tile for every exposed face in one chunk traversal.
 // -1 means that the face is hidden. Tile identity is the render-material
 // boundary, so equal textures can merge even when the block IDs differ.
@@ -279,7 +294,7 @@ using FaceTileCache =
           // not emit against another water cell or a solid block.
           if (type == Block::water) {
             if (neighbor == Block::water || is_solid(neighbor)) continue;
-          } else if (is_solid(neighbor)) {
+          } else if (hides_face(type, neighbor)) {
             continue;
           }
 
@@ -446,6 +461,9 @@ ColumnMetadata World::column_metadata(int x, int z) const noexcept {
 void World::generate(std::uint32_t seed) {
   reset_empty();
 
+  struct TreeSite { int x; int z; int height; };
+  std::vector<TreeSite> tree_sites;
+
   // Generate chunk-by-chunk for contiguous writes. Every noise field
   // still uses WORLD coordinates, so adjacent chunks share continuous
   // terrain; all calculations for a column are independent of traversal order.
@@ -545,25 +563,35 @@ void World::generate(std::uint32_t seed) {
             chunk[static_cast<std::size_t>(block_index(lx, y, lz))] = Block::water;
           }
     
-          if (has_tree) {
-            for (int y = height + 1; y <= height + 4; ++y) {
-              chunk[static_cast<std::size_t>(block_index(lx, y, lz))] = Block::wood;
-            }
-            for (int dy = 3; dy <= 5; ++dy) {
-              const int radius = dy == 5 ? 1 : 2;
-              for (int dx = -radius; dx <= radius; ++dx) {
-                for (int dz = -radius; dz <= radius; ++dz) {
-                  const int ax = lx + dx;
-                  const int az = lz + dz;
-                  const int ay = height + dy;
-                  if (ax < 0 || ax >= kChunkSizeX || az < 0 ||
-                      az >= kChunkSizeZ || ay >= kChunkSizeY ||
-                      (dx == 0 && dz == 0 && dy <= 4)) continue;
-                  auto& leaf = chunk[static_cast<std::size_t>(block_index(ax, ay, az))];
-                  if (leaf == Block::air) leaf = Block::leaves;
-                }
-              }
-            }
+          if (has_tree) tree_sites.push_back(TreeSite{wx, wz, height});
+        }
+      }
+    }
+  }
+
+  // Trees are applied in world coordinates after every terrain column has
+  // been generated. Their trunks and crowns can therefore cross chunk seams.
+  // Trunks go first so a neighboring crown never overwrites a trunk.
+  for (const TreeSite& tree : tree_sites) {
+    for (int y = tree.height + 1; y <= tree.height + 4; ++y) {
+      if (y >= kChunkSizeY) continue;
+      if (block_at(tree.x, y, tree.z) == Block::air) {
+        (void)set_block(tree.x, y, tree.z, Block::wood);
+      }
+    }
+  }
+  for (const TreeSite& tree : tree_sites) {
+    for (int dy = 3; dy <= 5; ++dy) {
+      const int radius = dy == 5 ? 1 : 2;
+      const int y = tree.height + dy;
+      if (y >= kChunkSizeY) continue;
+      for (int dx = -radius; dx <= radius; ++dx) {
+        for (int dz = -radius; dz <= radius; ++dz) {
+          if (dx == 0 && dz == 0 && dy <= 4) continue;
+          const int x = tree.x + dx;
+          const int z = tree.z + dz;
+          if (block_at(x, y, z) == Block::air) {
+            (void)set_block(x, y, z, Block::leaves);
           }
         }
       }
