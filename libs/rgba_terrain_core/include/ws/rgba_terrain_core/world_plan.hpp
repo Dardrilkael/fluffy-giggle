@@ -42,7 +42,9 @@ struct WorldHydrologySettings {
     double routing_cell_scale = 1200.0;
 
     // Deterministic whole-world stream-power incision and thermal talus
-    // relaxation run on the routing grid before final drainage is computed.
+    // relaxation run on the routing grid before final drainage is computed
+    // by generate_rgba_region(). The elevation offsets are interpolated into
+    // output pixels, so independently requested regions use the same surface.
     // Disable only for comparisons, fixtures or deliberately un-eroded maps.
     bool erosion_enabled = true;
 
