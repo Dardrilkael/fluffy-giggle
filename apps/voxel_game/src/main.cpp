@@ -561,6 +561,14 @@ class VoxelApp final : public ws::ui::App {
       clicked_ = false;
     }
     if (inventory_open_ || crafting_open_) {
+      if (crafting_open_) {
+        for (int i = 0; i < static_cast<int>(voxel::kRecipes.size()); ++i) {
+          if (input.key_pressed[kKeyF1 + i]) {
+            (void)voxel::craft(
+                inventory_, voxel::kRecipes[static_cast<std::size_t>(i)]);
+          }
+        }
+      }
       inventory_action(frame);
       // The panels are modal: do not move or edit the world while open.
       r2d::begin(); r2d::set_layer(0);
@@ -617,11 +625,6 @@ class VoxelApp final : public ws::ui::App {
     const float target_direction[3] = {
         target_look.x, target_look.y, target_look.z};
     target_hit_ = world_.raycast(target_origin, target_direction, 7.0f);
-    if (crafting_open_) {
-      for (int i = 0; i < static_cast<int>(voxel::kRecipes.size()); ++i)
-        if (input.key_pressed[kKeyF1 + i])
-          (void)voxel::craft(inventory_, voxel::kRecipes[static_cast<std::size_t>(i)]);
-    }
     const bool wants_break =
         (input.mouse_pressed[0] && !bench_.running()) ||
         (bench_.running() && bench_.wants_edit() && bench_.edit_ready() &&
@@ -662,7 +665,7 @@ class VoxelApp final : public ws::ui::App {
         if (placeable && world_.block_at(px, py, pz) == voxel::Block::air &&
             !overlaps_player(px, py, pz)) {
           if (world_.set_block(px, py, pz, place)) {
-            (void)inventory_.remove(selected.item, 1);
+            (void)inventory_.remove_from_slot(static_cast<std::size_t>(hotbar_), 1);
             rebuild_around(px, pz);
             play_sound(kSoundPlace, 0.8f,
                        Vec3{px + 0.5f, py + 0.5f, pz + 0.5f});
@@ -1246,7 +1249,7 @@ class VoxelApp final : public ws::ui::App {
     (void)r2d::draw_text(12.0f, 12.0f, stats, font_, r2d::rgba(235, 235, 240));
     (void)r2d::draw_text(
         12.0f, 64.0f,
-        "LMB break - RMB place - 1-5 select - WASD move - space jump - "
+        "LMB break - RMB place - 1-9 select - WASD move - space jump - "
         "shift sprint - E inventory - C crafting - P settings - F1-F6 craft - esc menu",
         font_, r2d::rgba(160, 164, 174));
   }
