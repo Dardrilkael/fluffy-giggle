@@ -21,12 +21,24 @@ using ws::rgba_terrain_core::VoxelVolume;
 
 [[nodiscard]] bool map_solid_material(std::uint8_t material,
                                       Block& block) noexcept {
+  // RGBA terrain v2 surface-material vocabulary. ID 5 remains a
+  // legacy stone alias; IDs 6..15 were added with the expanded biome plan.
   switch (material) {
     case 1: block = Block::grass; return true;
     case 2: block = Block::dirt; return true;
     case 3: block = Block::stone; return true;
     case 4: block = Block::sand; return true;
     case 5: block = Block::stone; return true;
+    case 6: block = Block::gravel; return true;
+    case 7: block = Block::clay; return true;
+    case 8: block = Block::snow; return true;
+    case 9: block = Block::ice; return true;
+    case 10: block = Block::sandstone; return true;
+    case 11: block = Block::mud; return true;
+    case 12: block = Block::mossy_stone; return true;
+    case 13: block = Block::red_sand; return true;
+    case 14: block = Block::basalt; return true;
+    case 15: block = Block::peat; return true;
     default: return false;
   }
 }
