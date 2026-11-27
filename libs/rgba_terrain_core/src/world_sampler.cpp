@@ -713,6 +713,8 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     std::vector<double> elevation(count);
     std::vector<double> filled(count);
     std::vector<double> accumulation(count);
+    std::vector<double> precipitation(count);
+    std::vector<bool> ocean(count, false);
     std::vector<std::size_t> parent(count, count);
     std::vector<std::size_t> visit_order(count, count);
     std::vector<DrainageDirection> direction(count, DrainageDirection::Sink);
@@ -729,15 +731,16 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
             const double blend = std::min(1.0, regions.weight_sum);
             const double bias = regions.weight_sum > 0.0
                 ? regions.elevation_sum / regions.weight_sum * blend : 0.0;
-            elevation[i] = evaluate_terrain(
-                plan, world_x, world_z, bias).normalized_elevation;
-            const double moisture = fbm(
-                world_x / (province_scale * 0.82),
-                world_z / (province_scale * 0.82),
-                plan.seed ^ 0x68E31DA4C2B2AE35ull, 2);
-            accumulation[i] = clamp01(
-                plan.climate.base_humidity * 0.45 + 0.25 +
-                0.30 * (0.5 + 0.5 * moisture));
+            const TerrainField terrain = evaluate_terrain(
+                plan, world_x, world_z, bias);
+            elevation[i] = terrain.normalized_elevation;
+            ocean[i] = terrain.is_ocean(plan.sea_level_fraction);
+            const ClimateField climate = evaluate_climate(
+                plan, world_x, world_z, regions, terrain);
+            precipitation[i] = climate.precipitation;
+            // Each routing cell contributes its actual climate-derived rainfall.
+            // Ocean cells terminate drainage instead of adding river runoff.
+            accumulation[i] = ocean[i] ? 0.0 : precipitation[i];
         }
     }
 
@@ -789,6 +792,10 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     for (std::size_t z = 0; z < grid.height; ++z) {
         for (std::size_t x = 0; x < grid.width; ++x) {
             const std::size_t i = index(x, z);
+            if (ocean[i]) {
+                direction[i] = DrainageDirection::Sink;
+                continue;
+            }
             double best_drop = 0.0;
             for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
                 const auto nx = static_cast<std::int64_t>(x) + drainage_dx[d];
@@ -851,20 +858,10 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
             (accumulation[i] - threshold) / (threshold * 2.5));
         cell.lake_depth_m = std::max(0.0, filled[i] - elevation[i]) *
                             plan.climate.maximum_elevation_m;
-        const double world_x =
-            (static_cast<double>(i % grid.width) + 0.5) * scale;
-        const double world_z =
-            (static_cast<double>(i / grid.width) + 0.5) * scale;
-        const double moisture = fbm(
-            world_x / (province_scale * 0.82),
-            world_z / (province_scale * 0.82),
-            plan.seed ^ 0x68E31DA4C2B2AE35ull, 2);
-        const double precipitation = clamp01(
-            plan.climate.base_humidity * 0.70 + 0.10 +
-            0.20 * (0.5 + 0.5 * moisture));
-        cell.lake = cell.lake_depth_m >= plan.hydrology.lake_minimum_depth_m &&
+        cell.lake = !ocean[i] &&
+            cell.lake_depth_m >= plan.hydrology.lake_minimum_depth_m &&
             accumulation[i] >= plan.hydrology.lake_minimum_accumulation &&
-            precipitation >= plan.hydrology.lake_minimum_precipitation;
+            precipitation[i] >= plan.hydrology.lake_minimum_precipitation;
         cell.lake_surface_elevation = filled[i];
         cell.river = !cell.lake && direction[i] != DrainageDirection::Sink &&
                      accumulation[i] >= threshold;
