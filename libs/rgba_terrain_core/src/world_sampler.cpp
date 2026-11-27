@@ -213,6 +213,144 @@ TerrainField evaluate_terrain(const WorldPlan& plan, double x, double z,
     return {elevation, continentalness, mountain_strength};
 }
 
+
+struct HydrologyField {
+    DrainageDirection direction = DrainageDirection::Sink;
+    double accumulation = 0.0;
+    double river_strength = 0.0;
+    double lake_depth_m = 0.0;
+    bool river = false;
+    bool lake = false;
+};
+
+constexpr std::array<int, 8> drainage_dx{-1, 0, 1, 1, 1, 0, -1, -1};
+constexpr std::array<int, 8> drainage_dz{-1, -1, -1, 0, 1, 1, 1, 0};
+
+double terrain_at_grid(const WorldPlan& plan, std::int64_t gx,
+                       std::int64_t gz) {
+    const double scale = plan.hydrology.routing_cell_scale;
+    const double x = (static_cast<double>(gx) + 0.5) * scale;
+    const double z = (static_cast<double>(gz) + 0.5) * scale;
+    const auto regions = evaluate_regions(plan, x, z);
+    const double blend = std::min(1.0, regions.weight_sum);
+    const double bias = regions.weight_sum > 0.0
+        ? (regions.elevation_sum / regions.weight_sum) * blend : 0.0;
+    return evaluate_terrain(plan, x, z, bias).normalized_elevation;
+}
+
+std::pair<DrainageDirection, double> route_grid_cell(
+    const WorldPlan& plan, std::int64_t gx, std::int64_t gz,
+    double elevation) {
+    double best_drop = 0.0;
+    DrainageDirection direction = DrainageDirection::Sink;
+    for (std::size_t i = 0; i < drainage_dx.size(); ++i) {
+        const double neighbor = terrain_at_grid(
+            plan, gx + drainage_dx[i], gz + drainage_dz[i]);
+        const double distance = (i % 2 == 0) ? 1.41421356237 : 1.0;
+        const double drop = (elevation - neighbor) / distance;
+        if (drop > best_drop) {
+            best_drop = drop;
+            direction = static_cast<DrainageDirection>(i);
+        }
+    }
+    return {direction, best_drop};
+}
+
+// A bounded, coordinate-stable watershed estimate. Nearby source cells route
+// downhill on the same absolute D8 grid. A source contributes only when its
+// deterministic path reaches the queried routing cell within the search
+// budget. This avoids a world-sized accumulation raster and chunk-order state.
+HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
+                                  double normalized_elevation,
+                                  double precipitation) {
+    HydrologyField result;
+    const double scale = plan.hydrology.routing_cell_scale;
+    const auto gx = static_cast<std::int64_t>(std::floor(x / scale));
+    const auto gz = static_cast<std::int64_t>(std::floor(z / scale));
+    const double cell_x = (static_cast<double>(gx) + 0.5) * scale;
+    const double cell_z = (static_cast<double>(gz) + 0.5) * scale;
+    const double cell_elevation = terrain_at_grid(plan, gx, gz);
+    const auto [direction, drop] =
+        route_grid_cell(plan, gx, gz, cell_elevation);
+    result.direction = direction;
+
+    if (normalized_elevation <= plan.sea_level_fraction) {
+        return result;
+    }
+
+    // The source itself contributes runoff. Precipitation weights contributing
+    // cells, so dry headwaters contribute less than wet catchments.
+    result.accumulation = 0.35 + precipitation * 0.65;
+    constexpr int source_radius = 3;
+    constexpr int max_steps = 9;
+    for (int oz = -source_radius; oz <= source_radius; ++oz) {
+        for (int ox = -source_radius; ox <= source_radius; ++ox) {
+            if (ox == 0 && oz == 0) continue;
+            std::int64_t sx = gx + ox;
+            std::int64_t sz = gz + oz;
+            bool reaches_target = false;
+            double source_elevation = terrain_at_grid(plan, sx, sz);
+            const double source_runoff = clamp01(
+                plan.climate.base_humidity * 0.45 + 0.25 +
+                0.30 * (0.5 + 0.5 * fbm(
+                    (static_cast<double>(sx) + 0.5) * scale /
+                        (plan.scales.province_scale * 0.82),
+                    (static_cast<double>(sz) + 0.5) * scale /
+                        (plan.scales.province_scale * 0.82),
+                    plan.seed ^ 0x68E31DA4C2B2AE35ull, 2)));
+            for (int step = 0; step < max_steps; ++step) {
+                const auto [next_direction, next_drop] =
+                    route_grid_cell(plan, sx, sz, source_elevation);
+                if (next_direction == DrainageDirection::Sink ||
+                    next_drop <= 0.0) break;
+                const auto index = static_cast<std::size_t>(next_direction);
+                sx += drainage_dx[index];
+                sz += drainage_dz[index];
+                if (sx == gx && sz == gz) {
+                    reaches_target = true;
+                    break;
+                }
+                source_elevation = terrain_at_grid(plan, sx, sz);
+                // A path that descends below the target cannot subsequently
+                // flow uphill into it under this D8 routing rule.
+                if (source_elevation < cell_elevation - 1.0e-9) break;
+            }
+            if (reaches_target) {
+                result.accumulation += source_runoff;
+            }
+        }
+    }
+
+    // Approximate closed-basin depth from the local spill rim. This is a
+    // bounded depression test; full priority-flood basin filling is a later
+    // refinement when a cached regional drainage graph is introduced.
+    double lowest_rim = std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < drainage_dx.size(); ++i) {
+        lowest_rim = std::min(lowest_rim, terrain_at_grid(
+            plan, gx + drainage_dx[i] * 2,
+            gz + drainage_dz[i] * 2));
+    }
+    const double depression_fraction =
+        std::max(0.0, lowest_rim - cell_elevation);
+    result.lake_depth_m = depression_fraction *
+                          plan.climate.maximum_elevation_m;
+    const bool local_sink = direction == DrainageDirection::Sink ||
+                            drop < 1.0e-7;
+    result.lake = local_sink &&
+        result.lake_depth_m >= plan.hydrology.lake_minimum_depth_m &&
+        result.accumulation >= plan.hydrology.lake_minimum_accumulation &&
+        precipitation >= plan.hydrology.lake_minimum_precipitation;
+
+    const double threshold = plan.hydrology.river_accumulation_threshold;
+    result.river_strength = clamp01(
+        (result.accumulation - threshold) / (threshold * 2.5));
+    result.river = !result.lake && result.accumulation >= threshold &&
+                   !local_sink;
+    (void)cell_x;
+    (void)cell_z;
+    return result;
+}
+
 void validate_terrain_settings(const TerrainSettings& settings) {
     if (!std::isfinite(settings.min_height) ||
         !std::isfinite(settings.max_height) ||
@@ -378,6 +516,14 @@ WorldSample WorldSampler::sample(std::int64_t world_x,
     result.ocean_moisture = ocean_moisture;
     result.is_ocean = is_ocean;
     result.is_mountain = !is_ocean && terrain.mountain_strength > 0.34;
+    const HydrologyField hydrology = evaluate_hydrology(
+        plan_, x, z, terrain.normalized_elevation, precipitation);
+    result.drainage_direction = hydrology.direction;
+    result.watershed_accumulation = hydrology.accumulation;
+    result.river_strength = hydrology.river_strength;
+    result.lake_depth_m = hydrology.lake_depth_m;
+    result.is_river = hydrology.river;
+    result.is_lake = hydrology.lake;
     result.habitat_variation = clamp01(
         0.5 + 0.5 * fbm(
             x / plan_.scales.habitat_scale,
@@ -467,6 +613,12 @@ WorldSample WorldSampler::sample(std::int64_t world_x,
     if (result.is_mountain) {
         result.feature_flags |= mountain_flag;
     }
+    if (result.is_river) {
+        result.feature_flags |= 0x20u;
+    }
+    if (result.is_lake) {
+        result.feature_flags |= 0x40u;
+    }
     result.biome_transition = transition_from_scores(
         best_biome, second_biome);
     return result;
@@ -513,15 +665,20 @@ RgbaImage WorldSampler::generate_rgba_region(
             const WorldSample sample_at = sample(
                 origin_x + static_cast<std::int64_t>(x),
                 origin_z + static_cast<std::int64_t>(z));
+            const double channel_cut = sample_at.is_river
+                ? plan_.hydrology.river_channel_depth_fraction *
+                      sample_at.river_strength
+                : 0.0;
             const auto packed_height = static_cast<std::uint16_t>(
                 std::clamp(std::lround(
-                    sample_at.normalized_elevation * 65535.0), 0l, 65535l));
+                    std::max(0.0, sample_at.normalized_elevation -
+                                      channel_cut) * 65535.0), 0l, 65535l));
 
             std::uint8_t flags = static_cast<std::uint8_t>(
                 sample_at.biome_id & 0x07u);
             flags |= static_cast<std::uint8_t>(
                 sample_at.feature_flags & 0x78u);
-            if (sample_at.is_ocean) {
+            if (sample_at.is_ocean || sample_at.is_river || sample_at.is_lake) {
                 flags |= water_flag;
             }
 
