@@ -116,17 +116,17 @@ void print_map_report(const rgba_terrain::RgbaImage& image,
         river_pixels += (p.a & 0x20u) != 0 ? 1u : 0u;
     }
     std::cout << "RGBA data map: " << image.width << "x" << image.height
-              << "\\n"
+              << "\n"
               << "  R/G: packed 16-bit height range " << min_height
-              << ".." << max_height << "\\n"
-              << "  B: material ID; A: biome + feature flags\\n"
+              << ".." << max_height << "\n"
+              << "  B: material ID; A: biome + feature flags\n"
               << "  water: " << water_pixels << ", forest: " << forest_pixels
               << ", mountain: " << mountain_pixels << ", river: "
-              << river_pixels << "\\n"
+              << river_pixels << "\n"
               << "Voxel volume: " << volume.width << "x" << volume.depth
               << "x" << volume.height << ", " << volume.voxels.size()
               << " voxels, " << volume.voxels.size() * 5u
-              << " bytes of voxel payload\\n";
+              << " bytes of voxel payload\n";
 }
 
 int generate_command(int argc, char** argv) {
