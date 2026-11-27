@@ -145,3 +145,84 @@ TEST_CASE("sampler can generate a small region near the edge of a huge world") {
     CHECK(region.width == 4);
     CHECK(region.height == 3);
 }
+
+TEST_CASE("coupled climate diagnostics are deterministic and bounded") {
+    const WorldSampler sampler(make_default_world_plan(200000, 200000, 0xC11A7Eu));
+    bool found_land = false;
+    for (std::int64_t z = 40000; z < 160000 && !found_land; z += 7919) {
+        for (std::int64_t x = 40000; x < 160000; x += 6151) {
+            const auto sample = sampler.sample(x, z);
+            if (sample.is_ocean) {
+                continue;
+            }
+            const auto repeated = sampler.sample(x, z);
+            CHECK(sample == repeated);
+            CHECK(sample.orographic_lift >= 0.0);
+            CHECK(sample.orographic_lift <= 1.0);
+            CHECK(sample.rain_shadow >= 0.0);
+            CHECK(sample.rain_shadow <= 1.0);
+            CHECK(sample.ocean_moisture >= 0.0);
+            CHECK(sample.ocean_moisture <= 1.0);
+            CHECK(sample.humidity >= 0.0);
+            CHECK(sample.humidity <= 1.0);
+            CHECK(sample.precipitation >= 0.0);
+            CHECK(sample.precipitation <= 1.0);
+            found_land = true;
+            break;
+        }
+    }
+    CHECK(found_land);
+}
+
+TEST_CASE("elevation cools climate through the configured lapse rate") {
+    auto no_lapse_plan = make_default_world_plan(200000, 200000, 0xE1E7u);
+    auto lapse_plan = no_lapse_plan;
+    no_lapse_plan.climate.elevation_lapse_rate_c_per_km = 0.0;
+    lapse_plan.climate.elevation_lapse_rate_c_per_km = 10.0;
+
+    const WorldSampler no_lapse(std::move(no_lapse_plan));
+    const WorldSampler with_lapse(std::move(lapse_plan));
+    bool found_elevated_land = false;
+    for (std::int64_t z = 30000; z < 170000 && !found_elevated_land; z += 7919) {
+        for (std::int64_t x = 30000; x < 170000; x += 6151) {
+            const auto baseline = no_lapse.sample(x, z);
+            if (baseline.is_ocean || baseline.elevation_m < 500.0) {
+                continue;
+            }
+            const auto cooled = with_lapse.sample(x, z);
+            CHECK(cooled.temperature_c < baseline.temperature_c);
+            CHECK(cooled.temperature_c ==
+                  doctest::Approx(baseline.temperature_c -
+                                  baseline.elevation_m / 1000.0 * 10.0));
+            found_elevated_land = true;
+            break;
+        }
+    }
+    CHECK(found_elevated_land);
+}
+
+TEST_CASE("greater atmospheric moisture availability supports more precipitation") {
+    auto dry_plan = make_default_world_plan(200000, 200000, 0xA7105u);
+    auto wet_plan = dry_plan;
+    dry_plan.climate.base_humidity = 0.12;
+    wet_plan.climate.base_humidity = 0.82;
+
+    const WorldSampler dry(std::move(dry_plan));
+    const WorldSampler wet(std::move(wet_plan));
+    bool found_land = false;
+    for (std::int64_t z = 20000; z < 180000 && !found_land; z += 7919) {
+        for (std::int64_t x = 20000; x < 180000; x += 6151) {
+            const auto dry_sample = dry.sample(x, z);
+            if (dry_sample.is_ocean) {
+                continue;
+            }
+            const auto wet_sample = wet.sample(x, z);
+            CHECK(wet_sample.humidity >= dry_sample.humidity);
+            CHECK(wet_sample.precipitation >= dry_sample.precipitation);
+            found_land = true;
+            break;
+        }
+    }
+    CHECK(found_land);
+}
+
