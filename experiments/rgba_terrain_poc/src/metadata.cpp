@@ -1,11 +1,16 @@
 #include "rgba_terrain/metadata.hpp"
 #include <fstream>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 namespace rgba_terrain {
 namespace {
+std::string trim(const std::string& s) {
+  const auto first=s.find_first_not_of(" \t\r");
+  if(first==std::string::npos) return {};
+  const auto last=s.find_last_not_of(" \t\r");
+  return s.substr(first,last-first+1);
+}
 ChannelRole parse_role(const std::string& s) {
   if(s=="unused") return ChannelRole::Unused;
   if(s=="height8") return ChannelRole::Height8;
@@ -26,12 +31,13 @@ TerrainMetadata load_metadata(const std::string& path) {
   std::size_t line_number=0;
   while(std::getline(in,line)) {
     ++line_number;
-    const auto first=line.find_first_not_of(" \t\r");
-    if(first==std::string::npos || line[first]=='#') continue;
-    const auto equal=line.find('=',first);
+    line=trim(line);
+    if(line.empty() || line[0]=='#') continue;
+    const auto equal=line.find('=');
     if(equal==std::string::npos) throw std::runtime_error("metadata line "+std::to_string(line_number)+" needs key=value");
-    const auto key=line.substr(first,equal-first);
-    const auto value=line.substr(equal+1);
+    const auto key=trim(line.substr(0,equal));
+    const auto value=trim(line.substr(equal+1));
+    if(key.empty() || value.empty()) throw std::runtime_error("empty metadata key or value on line "+std::to_string(line_number));
     if(!values.emplace(key,value).second) throw std::runtime_error("duplicate metadata key: "+key);
   }
   auto required=[&](const std::string& key)->const std::string& {
@@ -41,7 +47,8 @@ TerrainMetadata load_metadata(const std::string& path) {
   };
   auto number=[&](const std::string& key,float& target) {
     const auto& v=required(key); std::size_t used=0;
-    target=std::stof(v,&used);
+    try { target=std::stof(v,&used); }
+    catch(...) { throw std::runtime_error("invalid number for "+key); }
     if(used!=v.size()) throw std::runtime_error("invalid number for "+key);
   };
   TerrainMetadata result;
