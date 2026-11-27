@@ -442,6 +442,44 @@ TEST_CASE("world region emits deterministic climate diagnostic preview layers") 
 }
 
 
+TEST_CASE("world region emits deterministic hydrology diagnostic preview layers") {
+    auto plan = make_default_world_plan(128, 128, 0xD4A1A6Eu);
+    plan.hydrology.routing_cell_scale = 8.0;
+    const WorldSampler sampler(std::move(plan));
+
+    TerrainSettings settings;
+    settings.min_height = 0.0f;
+    settings.max_height = 56.0f;
+    settings.volume_height = 64;
+    settings.sea_level = 12;
+
+    WorldHydrologyDiagnosticImages diagnostics;
+    const auto with_diagnostics = sampler.generate_rgba_region(
+        16, 16, 24, 20, settings, nullptr, &diagnostics);
+    const auto without_diagnostics = sampler.generate_rgba_region(
+        16, 16, 24, 20, settings);
+    REQUIRE(with_diagnostics.pixels.size() == without_diagnostics.pixels.size());
+    for (std::size_t i = 0; i < with_diagnostics.pixels.size(); ++i) {
+        CHECK(with_diagnostics.pixels[i].r == without_diagnostics.pixels[i].r);
+        CHECK(with_diagnostics.pixels[i].g == without_diagnostics.pixels[i].g);
+        CHECK(with_diagnostics.pixels[i].b == without_diagnostics.pixels[i].b);
+        CHECK(with_diagnostics.pixels[i].a == without_diagnostics.pixels[i].a);
+    }
+
+    const std::array<const RgbaImage*, 5> layers{
+        &diagnostics.flow_accumulation, &diagnostics.river_strength,
+        &diagnostics.drainage_direction, &diagnostics.lake_depth,
+        &diagnostics.lake_basins};
+    for (const auto* layer : layers) {
+        CHECK(layer->width == 24);
+        CHECK(layer->height == 20);
+        REQUIRE(layer->pixels.size() == 24u * 20u);
+        for (const auto& pixel : layer->pixels) {
+            CHECK(pixel.a == 255);
+        }
+    }
+}
+
 TEST_CASE("world plan exposes detailed biome definitions and v2 material packing") {
     const auto plan = make_default_world_plan(256, 256, 0xB10BEu);
     CHECK(plan.biomes.size() == 21);
