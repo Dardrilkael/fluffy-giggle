@@ -919,7 +919,7 @@ void apply_fluvial_terrain_shaping(
     // Their fans are attached to a river outlet from the mountain influence
     // zone, not painted as independent circular terrain features.
     std::vector<std::size_t> fan_seeds;
-    std::vector<std::size_t> fan_river_sources;
+    std::vector<std::size_t> fan_river_source_for_cell(count, count);
     const double mountain_system_radius =
         std::max(scale, plan.scales.province_scale * 0.24);
     for (std::size_t i = 0; i < count; ++i) {
@@ -927,7 +927,6 @@ void apply_fluvial_terrain_shaping(
         const std::size_t downstream = drainage_downstream_index(
             i, cells[i].direction, width, height);
         if (downstream == count || ocean[downstream]) continue;
-        const std::size_t order = cells[i].stream_order;
         const double source_distance = mountain_distance[i];
         const double downstream_distance = mountain_distance[downstream];
         const double source_proximity = std::isfinite(source_distance)
@@ -943,9 +942,10 @@ void apply_fluvial_terrain_shaping(
             mountain_strength[downstream] < 0.18;
         if (leaves_mountain_zone || leaves_ridge_field) {
             fan_seeds.push_back(downstream);
-            fan_river_sources.push_back(i);
+            if (fan_river_source_for_cell[downstream] == count) {
+                fan_river_source_for_cell[downstream] = i;
+            }
         }
-        (void)order;
     }
     const DistanceField fan_distance =
         build_distance_field(width, height, scale, fan_seeds);
@@ -1026,9 +1026,11 @@ void apply_fluvial_terrain_shaping(
             }
         }
 
-        const std::size_t fan_source = fan_distance.nearest_source[i];
-        if (fan_source < fan_seeds.size()) {
-            const std::size_t river_source = fan_river_sources[fan_source];
+        const std::size_t fan_seed_cell = fan_distance.nearest_source[i];
+        if (fan_seed_cell < count &&
+            fan_river_source_for_cell[fan_seed_cell] < count) {
+            const std::size_t river_source =
+                fan_river_source_for_cell[fan_seed_cell];
             const HydrologyField& river = cells[river_source];
             const double runoff = runoff_factor(river.accumulation, threshold);
             const auto radii = river_radii(river, scale, threshold);
@@ -1037,8 +1039,6 @@ void apply_fluvial_terrain_shaping(
             const double fan_d = fan_distance.distance[i];
             if (fan_d < fan_radius && fan_radius > 0.0) {
                 const std::size_t seed = fan_seeds[fan_source];
-                const std::size_t source_x = river_source % width;
-                const std::size_t source_z = river_source / width;
                 const std::size_t seed_x = seed % width;
                 const std::size_t seed_z = seed / width;
                 const auto d = static_cast<std::uint8_t>(
@@ -1060,8 +1060,6 @@ void apply_fluvial_terrain_shaping(
                 shaped += 0.00042 *
                     (0.5 + 0.12 * river.stream_order) * runoff *
                     profile * profile * forward;
-                (void)source_x;
-                (void)source_z;
             }
         }
 
