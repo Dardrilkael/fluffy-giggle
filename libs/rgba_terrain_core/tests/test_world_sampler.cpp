@@ -294,6 +294,90 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
     }
     CHECK(ocean_pixels > 0u);
 
+    // All land drainage must terminate at an ocean outlet when the finite
+    // routing grid contains ocean. The shared route ordering also guarantees
+    // that no mixed downhill/priority-parent cycle can exist.
+    constexpr std::size_t routing_cell_scale = 4;
+    constexpr std::size_t routing_width = 96 / routing_cell_scale;
+    constexpr std::size_t routing_height = 96 / routing_cell_scale;
+    constexpr std::size_t routing_cell_count =
+        routing_width * routing_height;
+    const std::array<std::array<std::uint8_t, 3>, 8> direction_colors{{
+        {{40, 110, 255}}, {{40, 210, 255}}, {{40, 230, 120}},
+        {{180, 240, 50}}, {{255, 190, 40}}, {{255, 110, 40}},
+        {{230, 50, 80}}, {{180, 60, 230}},
+    }};
+    const auto direction_from_pixel = [&](const Rgba8& pixel) {
+        for (std::size_t d = 0; d < direction_colors.size(); ++d) {
+            if (pixel.r == direction_colors[d][0] &&
+                pixel.g == direction_colors[d][1] &&
+                pixel.b == direction_colors[d][2]) {
+                return static_cast<int>(d);
+            }
+        }
+        return -1;
+    };
+    const auto output_elevation = [&](std::size_t x, std::size_t z) {
+        const auto& pixel = terrain.at(x, z);
+        return (static_cast<double>(pixel.r) * 256.0 + pixel.g) / 65535.0;
+    };
+    std::size_t land_routing_cells = 0;
+    for (std::size_t start_z = 0; start_z < routing_height; ++start_z) {
+        for (std::size_t start_x = 0; start_x < routing_width; ++start_x) {
+            const std::size_t start_world_x =
+                start_x * routing_cell_scale + routing_cell_scale / 2;
+            const std::size_t start_world_z =
+                start_z * routing_cell_scale + routing_cell_scale / 2;
+            if (output_elevation(start_world_x, start_world_z) <=
+                eroded.plan().sea_level_fraction) {
+                continue;
+            }
+            ++land_routing_cells;
+
+            std::size_t current_x = start_x;
+            std::size_t current_z = start_z;
+            bool reached_ocean = false;
+            bool route_valid = false;
+            for (std::size_t step = 0; step <= routing_cell_count; ++step) {
+                const std::size_t world_x =
+                    current_x * routing_cell_scale + routing_cell_scale / 2;
+                const std::size_t world_z =
+                    current_z * routing_cell_scale + routing_cell_scale / 2;
+                const auto& direction_pixel =
+                    erosion_diagnostics.drainage_direction.at(world_x, world_z);
+                if (direction_pixel.r == 0u && direction_pixel.g == 0u &&
+                    direction_pixel.b == 0u) {
+                    reached_ocean =
+                        output_elevation(world_x, world_z) <=
+                        eroded.plan().sea_level_fraction;
+                    route_valid = reached_ocean;
+                    break;
+                }
+
+                const int direction = direction_from_pixel(direction_pixel);
+                if (direction < 0) {
+                    break;
+                }
+                const auto next_x = static_cast<std::int64_t>(current_x) +
+                    std::array<int, 8>{0, 1, 1, 1, 0, -1, -1, -1}[
+                        static_cast<std::size_t>(direction)];
+                const auto next_z = static_cast<std::int64_t>(current_z) +
+                    std::array<int, 8>{-1, -1, 0, 1, 1, 1, 0, -1}[
+                        static_cast<std::size_t>(direction)];
+                if (next_x < 0 || next_z < 0 ||
+                    next_x >= static_cast<std::int64_t>(routing_width) ||
+                    next_z >= static_cast<std::int64_t>(routing_height)) {
+                    break;
+                }
+                current_x = static_cast<std::size_t>(next_x);
+                current_z = static_cast<std::size_t>(next_z);
+            }
+            CHECK(route_valid);
+            CHECK(reached_ocean);
+        }
+    }
+    CHECK(land_routing_cells > 0u);
+
     std::size_t changed_heights = 0;
     for (std::size_t i = 0; i < terrain.pixels.size(); ++i) {
         CHECK(terrain.pixels[i].r == repeated.pixels[i].r);
