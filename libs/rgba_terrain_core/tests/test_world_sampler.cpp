@@ -243,6 +243,59 @@ TEST_CASE("coarse hydrology remains identical across separately generated region
     }
 }
 
+TEST_CASE("whole-world erosion changes terrain deterministically and preserves chunk stitching") {
+    auto eroded_plan = make_default_world_plan(96, 96, 0xE20510u);
+    eroded_plan.hydrology.routing_cell_scale = 4.0;
+    eroded_plan.hydrology.river_accumulation_threshold = 1.8;
+    eroded_plan.hydrology.erosion_enabled = true;
+    auto baseline_plan = eroded_plan;
+    baseline_plan.hydrology.erosion_enabled = false;
+
+    const WorldSampler eroded(std::move(eroded_plan));
+    const WorldSampler baseline(std::move(baseline_plan));
+    TerrainSettings settings;
+    settings.min_height = 0.0f;
+    settings.max_height = 56.0f;
+    settings.volume_height = 64;
+    settings.sea_level = 12;
+
+    const auto terrain = eroded.generate_rgba_region(0, 0, 96, 96, settings);
+    const auto repeated = eroded.generate_rgba_region(0, 0, 96, 96, settings);
+    const auto un_eroded = baseline.generate_rgba_region(0, 0, 96, 96, settings);
+    REQUIRE(terrain.pixels.size() == 96u * 96u);
+    std::size_t changed_heights = 0;
+    for (std::size_t i = 0; i < terrain.pixels.size(); ++i) {
+        CHECK(terrain.pixels[i].r == repeated.pixels[i].r);
+        CHECK(terrain.pixels[i].g == repeated.pixels[i].g);
+        CHECK(terrain.pixels[i].b == repeated.pixels[i].b);
+        CHECK(terrain.pixels[i].a == repeated.pixels[i].a);
+        const auto height_changed =
+            terrain.pixels[i].r != un_eroded.pixels[i].r ||
+            terrain.pixels[i].g != un_eroded.pixels[i].g;
+        changed_heights += height_changed ? 1u : 0u;
+    }
+    CHECK(changed_heights > 0u);
+
+    const auto left = eroded.generate_rgba_region(0, 0, 48, 96, settings);
+    const auto right = eroded.generate_rgba_region(48, 0, 48, 96, settings);
+    for (std::size_t z = 0; z < 96; ++z) {
+        for (std::size_t x = 0; x < 48; ++x) {
+            const auto& whole_left = terrain.at(x, z);
+            const auto& split_left = left.at(x, z);
+            const auto& whole_right = terrain.at(x + 48, z);
+            const auto& split_right = right.at(x, z);
+            CHECK(whole_left.r == split_left.r);
+            CHECK(whole_left.g == split_left.g);
+            CHECK(whole_left.b == split_left.b);
+            CHECK(whole_left.a == split_left.a);
+            CHECK(whole_right.r == split_right.r);
+            CHECK(whole_right.g == split_right.g);
+            CHECK(whole_right.b == split_right.b);
+            CHECK(whole_right.a == split_right.a);
+        }
+    }
+}
+
 TEST_CASE("sampler can generate a small region near the edge of a huge world") {
     const WorldSampler sampler(make_default_world_plan(
         4000000000ll, 2000000000ll, 0xFACE1234));
