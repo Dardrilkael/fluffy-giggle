@@ -183,6 +183,7 @@ TEST_CASE("coarse hydrology runoff responds to the shared precipitation climate"
     auto dry_plan = make_default_world_plan(96, 96, 0xC11A7Eu);
     dry_plan.hydrology.routing_cell_scale = 4.0;
     dry_plan.hydrology.river_accumulation_threshold = 0.65;
+    dry_plan.hydrology.lake_minimum_accumulation = 1.0e9;
     dry_plan.climate.base_humidity = 0.08;
     auto wet_plan = dry_plan;
     wet_plan.climate.base_humidity = 0.92;
