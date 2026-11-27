@@ -28,6 +28,8 @@
       "inherits": "_base-msvc",
       "binaryDir": "${sourceDir}/build/debug",
       "cacheVariables": {
+        "WS_BUILD_EXPERIMENTS": "ON",
+        "WS_BUILD_LIBS": "",
         "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-msvc-debug"
       }
     },
@@ -93,6 +95,17 @@
       "binaryDir": "${sourceDir}/build/spice-debug",
       "cacheVariables": {
         "WS_BUILD_LIBS": "core;math;plotmath;spice",
+        "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-msvc-debug"
+      }
+    },
+    {
+      "name": "experiments-debug",
+      "displayName": "Experiments Debug (Ninja, MSVC, core;image;rgba_terrain_core + experiments)",
+      "inherits": "_base-msvc",
+      "binaryDir": "${sourceDir}/build/debug",
+      "cacheVariables": {
+        "WS_BUILD_EXPERIMENTS": "ON",
+        "WS_BUILD_LIBS": "core;image;rgba_terrain_core",
         "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-msvc-debug"
       }
     },
@@ -181,6 +194,10 @@
       "configurePreset": "spice-release"
     },
     {
+      "name": "experiments-debug",
+      "configurePreset": "experiments-debug"
+    },
+    {
       "name": "vs-debug",
       "configurePreset": "vs-debug",
       "configuration": "Debug"
@@ -241,6 +258,16 @@
     {
       "name": "spice-release",
       "configurePreset": "spice-release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "experiments-debug",
+      "configurePreset": "experiments-debug",
       "output": {
         "outputOnFailure": true
       },

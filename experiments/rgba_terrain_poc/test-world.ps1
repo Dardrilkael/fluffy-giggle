@@ -166,7 +166,7 @@ if (-not $SkipBuild) {
     }
 }
 
-$BuildDir = Join-Path $RepoRoot "build\rgba-terrain-poc"
+$BuildDir = Join-Path $RepoRoot "build\debug"
 $ExeName = if ($env:OS -eq "Windows_NT") { "rgba_terrain_poc.exe" } else { "rgba_terrain_poc" }
 $GeneratorCandidates = @(
     (Join-Path $BuildDir "bin\$Configuration\$ExeName"),
@@ -178,7 +178,7 @@ if (-not $Generator) {
         Select-Object -First 1 -ExpandProperty FullName
 }
 if (-not $Generator) {
-    throw "Could not find $ExeName under $BuildDir. Run without -SkipBuild."
+    throw "Could not find $ExeName under $BuildDir. Run without -SkipBuild or ensure experiments-debug preset was configured."
 }
 
 Write-Host ""

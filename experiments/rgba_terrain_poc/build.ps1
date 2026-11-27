@@ -20,25 +20,20 @@ function Invoke-NativeStep {
 }
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
-$BuildDir = Join-Path $RepoRoot "build\rgba-terrain-poc"
+$BuildDir = Join-Path $RepoRoot "build\debug"
 
 if ($Clean -and (Test-Path $BuildDir)) {
     Remove-Item -Recurse -Force $BuildDir
 }
 
-Write-Host "Configuring the RGBA terrain POC..." -ForegroundColor Cyan
+Write-Host "Configuring the RGBA terrain POC (using experiments-debug preset)..." -ForegroundColor Cyan
 Invoke-NativeStep "cmake" @(
-    "-S", $RepoRoot,
-    "-B", $BuildDir,
-    "-DWS_BUILD_APPS=OFF",
-    "-DWS_BUILD_EXPERIMENTS=ON",
-    "-DWS_BUILD_TESTS=ON",
-    "-DWS_BUILD_LIBS=rgba_terrain_core"
+    "--preset", "experiments-debug"
 )
 
 Write-Host "Building terrain generator and image/terrain tests..." -ForegroundColor Cyan
 Invoke-NativeStep "cmake" @(
-    "--build", $BuildDir,
+    "--build", "--preset", "experiments-debug",
     "--config", $Configuration,
     "--target", "rgba_terrain_poc", "test_image", "test_rgba_terrain_core",
     "--parallel"
@@ -46,8 +41,7 @@ Invoke-NativeStep "cmake" @(
 
 Write-Host "Running shared image and terrain-core tests..." -ForegroundColor Cyan
 Invoke-NativeStep "ctest" @(
-    "--test-dir", $BuildDir,
-    "-C", $Configuration,
+    "--preset", "experiments-debug",
     "--output-on-failure",
     "-R", "^(image($|\.)|rgba_terrain_core($|\.))"
 )
