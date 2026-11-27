@@ -63,7 +63,20 @@ density, and feature flags. Indexing is X-fastest, then Z, then Y:
 `x + z*width + y*width*depth`.
 
 The binary file is little-endian `RGAVOX02`: 8-byte magic, uint32 width,
-depth, and height, then five bytes per voxel in the same X/Z/Y order.
+depth, and height, then five bytes per voxel in the same X/Z/Y order. The
+format is encoded field-by-field and does not depend on C++ struct padding.
+The library reader rejects unknown versions, zero/overflowing dimensions,
+truncated payloads, trailing bytes, and invalid voxel-kind values.
+
+## Validate voxel reconstruction
+
+    rgba_terrain_poc validate terrain.png terrain.rgba-terrain terrain.rgba-voxels
+
+The command reloads the PNG and metadata, reconstructs the expected volume,
+loads the saved RGAVOX02 file, and compares dimensions and every voxel field.
+It reports mismatch counts by field and the first differing X/Y/Z coordinate.
+Exit codes: 0 = exact match, 1 = input/file I/O or parsing error, 2 = usage
+error, 3 = valid voxel file but reconstruction mismatch.
 
 ## Inspect a data map
 
