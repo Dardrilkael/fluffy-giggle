@@ -47,7 +47,7 @@ TEST_CASE("terrain import: maps generic IDs and preserves X/Z and column metadat
   volume.at(17, 4, 20) = {VoxelKind::Solid, 3, 3, 255, 0x20};
   volume.at(18, 4, 20) = {VoxelKind::Solid, 4, 0, 255, 0x00};
   volume.at(19, 4, 20) = {VoxelKind::Solid, 5, 0, 255, 0x00};
-  volume.at(20, 5, 20) = {VoxelKind::Water, 0, 0, 128, 0x00};
+  volume.at(20, 5, 20) = {VoxelKind::Water, 0, 0, 255, 0x00};
 
   voxel::World world;
   world.generate(123u);
