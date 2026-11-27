@@ -37,24 +37,23 @@ TEST_CASE("inventory: removal is all-or-nothing and clears empty stacks") {
 
 TEST_CASE("inventory: selected-slot removal is bounded and all-or-nothing") {
   Inventory inventory;
-  REQUIRE(inventory.add(Item::wood, 10) == 10);
+  REQUIRE(inventory.add(Item::wood, 8) == 8);
   REQUIRE(inventory.add(Item::stone, 3) == 3);
-  REQUIRE(inventory.add(Item::wood, 4) == 4);
+  REQUIRE(inventory.add(Item::wood, 8) == 8);
   CHECK(inventory.slot(0).item == Item::wood);
   CHECK(inventory.slot(0).count == 8);
   CHECK(inventory.slot(2).item == Item::wood);
-  CHECK(inventory.slot(2).count == 2);
-  CHECK_FALSE(inventory.remove_from_slot(2, 3));
-  CHECK(inventory.slot(2).count == 2);
+  CHECK(inventory.slot(2).count == 8);
+  CHECK_FALSE(inventory.remove_from_slot(2, 9));
+  CHECK(inventory.slot(2).count == 8);
   CHECK(inventory.remove_from_slot(2, 1));
-  CHECK(inventory.slot(2).count == 1);
+  CHECK(inventory.slot(2).count == 7);
   CHECK(inventory.slot(0).count == 8);
   CHECK_FALSE(inventory.remove_from_slot(3, 1));
   CHECK_FALSE(inventory.remove_from_slot(99, 1));
-  CHECK(inventory.remove_from_slot(2, 1));
+  CHECK(inventory.remove_from_slot(2, 7));
   CHECK(inventory.slot(2).empty());
 }
-
 TEST_CASE("inventory: slot swapping is bounded and value-semantic") {
   Inventory inventory;
   REQUIRE(inventory.add(Item::wood, 5) == 5);
