@@ -33,14 +33,14 @@ Invoke-NativeStep "cmake" @(
     "-DWS_BUILD_APPS=OFF",
     "-DWS_BUILD_EXPERIMENTS=ON",
     "-DWS_BUILD_TESTS=ON",
-    "-DWS_BUILD_LIBS=image"
+    "-DWS_BUILD_LIBS=rgba_terrain_core"
 )
 
 Write-Host "Building terrain generator and image/terrain tests..." -ForegroundColor Cyan
 Invoke-NativeStep "cmake" @(
     "--build", $BuildDir,
     "--config", $Configuration,
-    "--target", "rgba_terrain_poc", "rgba_terrain_tests", "test_image",
+    "--target", "rgba_terrain_poc", "rgba_terrain_tests", "test_rgba_terrain_core",
     "--parallel"
 )
 
@@ -49,7 +49,7 @@ Invoke-NativeStep "ctest" @(
     "--test-dir", $BuildDir,
     "-C", $Configuration,
     "--output-on-failure",
-    "-R", "^(image($|[.])|rgba_terrain_tests$)"
+    "-R", "^(rgba_terrain_core($|[.])$)"
 )
 
 $ExecutableName = "rgba_terrain_poc"
