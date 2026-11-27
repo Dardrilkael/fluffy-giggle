@@ -21,27 +21,47 @@ std::uint64_t mix_bits(std::uint64_t value) {
     return value ^ (value >> 31u);
 }
 
-double lattice(std::int64_t x, std::int64_t z, std::uint64_t seed) {
-    const std::uint64_t hash = mix_bits(
+struct Gradient2D {
+    double x;
+    double z;
+};
+
+// Sixteen evenly spaced unit gradients reduce the directional bias of the
+// four-corner value-noise lattice while keeping each sample allocation-free.
+constexpr std::array<Gradient2D, 16> gradient_directions{{
+    {1.0000000000000000, 0.0000000000000000},
+    {0.9238795325112867, 0.3826834323650898},
+    {0.7071067811865476, 0.7071067811865475},
+    {0.3826834323650898, 0.9238795325112867},
+    {0.0000000000000000, 1.0000000000000000},
+    {-0.3826834323650898, 0.9238795325112867},
+    {-0.7071067811865475, 0.7071067811865476},
+    {-0.9238795325112867, 0.3826834323650899},
+    {-1.0000000000000000, 0.0000000000000001},
+    {-0.9238795325112868, -0.3826834323650897},
+    {-0.7071067811865477, -0.7071067811865475},
+    {-0.3826834323650903, -0.9238795325112865},
+    {-0.0000000000000002, -1.0000000000000000},
+    {0.3826834323650900, -0.9238795325112866},
+    {0.7071067811865474, -0.7071067811865477},
+    {0.9238795325112865, -0.3826834323650904},
+}};
+
+std::uint64_t lattice_hash(
+    std::int64_t x, std::int64_t z, std::uint64_t seed) {
+    return mix_bits(
         seed ^ mix_bits(static_cast<std::uint64_t>(x)) ^
         mix_bits(static_cast<std::uint64_t>(z) + 0x632be59bd9b4e019ull));
-    const double unit = static_cast<double>(hash >> 11u) *
-                        (1.0 / 9007199254740992.0);
-    return unit * 2.0 - 1.0;
 }
 
-double smooth(double value) {
-    return value * value * (3.0 - 2.0 * value);
+double fade_quintic(double value) {
+    // Perlin's quintic fade has zero first and second derivatives at lattice
+    // boundaries, avoiding the visible slope changes of cubic interpolation.
+    return value * value * value *
+           (value * (value * 6.0 - 15.0) + 10.0);
 }
 
-double smoothstep(double edge0, double edge1, double value) {
-    if (edge1 <= edge0) {
-        return value < edge0 ? 0.0 : 1.0;
-    }
-    return smooth(std::clamp((value - edge0) / (edge1 - edge0), 0.0, 1.0));
-}
-
-double value_noise(double x, double z, std::uint64_t seed) {
+double gradient_noise(double x, double z, std::uint64_t seed) {
     const double floor_x = std::floor(x);
     const double floor_z = std::floor(z);
     constexpr double safe_lattice_limit = 9.0e18;
@@ -55,28 +75,53 @@ double value_noise(double x, double z, std::uint64_t seed) {
 
     const auto ix = static_cast<std::int64_t>(floor_x);
     const auto iz = static_cast<std::int64_t>(floor_z);
-    const double fx = smooth(x - floor_x);
-    const double fz = smooth(z - floor_z);
+    const double fx = x - floor_x;
+    const double fz = z - floor_z;
 
-    const double a = lattice(ix, iz, seed);
-    const double b = lattice(ix + 1, iz, seed);
-    const double c = lattice(ix, iz + 1, seed);
-    const double d = lattice(ix + 1, iz + 1, seed);
-    const double north = a + (b - a) * fx;
-    const double south = c + (d - c) * fx;
-    return north + (south - north) * fz;
+    const auto corner_dot = [&](std::int64_t dx, std::int64_t dz,
+                                double offset_x, double offset_z) {
+        const auto& gradient = gradient_directions[
+            static_cast<std::size_t>(
+                lattice_hash(ix + dx, iz + dz, seed) &
+                (gradient_directions.size() - 1u))];
+        return gradient.x * (fx - offset_x) +
+               gradient.z * (fz - offset_z);
+    };
+
+    const double n00 = corner_dot(0, 0, 0.0, 0.0);
+    const double n10 = corner_dot(1, 0, 1.0, 0.0);
+    const double n01 = corner_dot(0, 1, 0.0, 1.0);
+    const double n11 = corner_dot(1, 1, 1.0, 1.0);
+
+    const double u = fade_quintic(fx);
+    const double v = fade_quintic(fz);
+    const double north = n00 + (n10 - n00) * u;
+    const double south = n01 + (n11 - n01) * u;
+
+    // The scale keeps the useful range close to [-1,1] for the existing
+    // terrain-field amplitudes and climate thresholds.
+    return (north + (south - north) * v) * 1.4142135623730951;
 }
 
 double fbm(double x, double z, std::uint64_t seed, unsigned octaves) {
     double sum = 0.0;
     double amplitude = 0.5;
     double amplitude_sum = 0.0;
+    constexpr double lacunarity = 2.03;
+    // Rotate each successive octave as well as scaling it. The lattice axes
+    // therefore do not remain aligned across the full fractal spectrum.
+    constexpr double rotation_cos = 0.9323273456060345;  // cos(0.37 rad)
+    constexpr double rotation_sin = 0.3616154319649620;  // sin(0.37 rad)
     for (unsigned octave = 0; octave < octaves; ++octave) {
-        sum += value_noise(x, z, seed + octave * 0x9e3779b97f4a7c15ull) *
+        sum += gradient_noise(
+                   x, z, seed + octave * 0x9e3779b97f4a7c15ull) *
                amplitude;
         amplitude_sum += amplitude;
-        x *= 2.03;
-        z *= 2.03;
+
+        const double rotated_x = x * rotation_cos - z * rotation_sin;
+        const double rotated_z = x * rotation_sin + z * rotation_cos;
+        x = rotated_x * lacunarity;
+        z = rotated_z * lacunarity;
         amplitude *= 0.5;
     }
     return amplitude_sum > 0.0 ? sum / amplitude_sum : 0.0;
@@ -176,14 +221,32 @@ TerrainField evaluate_terrain(const WorldPlan& plan, double x, double z,
     const double continent_scale = plan.scales.continent_scale;
     const double province_scale = plan.scales.province_scale;
 
-    const double warp_x = fbm(x / (continent_scale * 0.72),
-                              z / (continent_scale * 0.72),
-                              plan.seed ^ 0x7F4A7C159E3779B9ull, 3);
-    const double warp_z = fbm(x / (continent_scale * 0.72) + 17.3,
-                              z / (continent_scale * 0.72) - 9.1,
-                              plan.seed ^ 0x94D049BB133111EBull, 3);
-    const double warped_x = x + warp_x * continent_scale * 0.075;
-    const double warped_z = z + warp_z * continent_scale * 0.075;
+    // Two independent warp bands bend continent outlines at both
+    // super-regional and province scales. The second band prevents broad
+    // warping from leaving smooth, repetitive nested blobs.
+    const double continental_warp_scale = continent_scale * 0.85;
+    const double regional_warp_scale = province_scale * 1.65;
+    const double continental_warp_x = fbm(
+        x / continental_warp_scale, z / continental_warp_scale,
+        plan.seed ^ 0x7F4A7C159E3779B9ull, 3);
+    const double continental_warp_z = fbm(
+        x / continental_warp_scale + 17.3,
+        z / continental_warp_scale - 9.1,
+        plan.seed ^ 0x94D049BB133111EBull, 3);
+    const double regional_warp_x = fbm(
+        x / regional_warp_scale + 31.7,
+        z / regional_warp_scale - 12.9,
+        plan.seed ^ 0xD1B54A32D192ED03ull, 2);
+    const double regional_warp_z = fbm(
+        x / regional_warp_scale - 8.3,
+        z / regional_warp_scale + 23.1,
+        plan.seed ^ 0xABC98388FB8FAC03ull, 2);
+    const double warped_x =
+        x + continental_warp_x * continent_scale * 0.13 +
+        regional_warp_x * province_scale * 0.10;
+    const double warped_z =
+        z + continental_warp_z * continent_scale * 0.13 +
+        regional_warp_z * province_scale * 0.10;
 
     const double continentalness = fbm(
         warped_x / continent_scale, warped_z / continent_scale,
