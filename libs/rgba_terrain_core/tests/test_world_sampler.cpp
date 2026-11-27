@@ -264,7 +264,9 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
     settings.volume_height = 64;
     settings.sea_level = 12;
 
-    const auto terrain = eroded.generate_rgba_region(0, 0, 96, 96, settings);
+    WorldHydrologyDiagnosticImages erosion_diagnostics;
+    const auto terrain = eroded.generate_rgba_region(
+        0, 0, 96, 96, settings, nullptr, &erosion_diagnostics);
     const auto repeated = eroded.generate_rgba_region(0, 0, 96, 96, settings);
     const auto un_eroded = baseline.generate_rgba_region(0, 0, 96, 96, settings);
     REQUIRE(terrain.pixels.size() == 96u * 96u);
@@ -280,6 +282,12 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
         changed_heights += height_changed ? 1u : 0u;
     }
     CHECK(changed_heights > 0u);
+    const auto& erosion_preview = erosion_diagnostics.erosion_delta;
+    std::size_t marked_erosion_cells = 0;
+    for (const auto& pixel : erosion_preview.pixels) {
+        marked_erosion_cells += (pixel.r > 0u || pixel.b > 0u) ? 1u : 0u;
+    }
+    CHECK(marked_erosion_cells > 0u);
 
     const auto left = eroded.generate_rgba_region(0, 0, 48, 96, settings);
     const auto right = eroded.generate_rgba_region(48, 0, 48, 96, settings);
