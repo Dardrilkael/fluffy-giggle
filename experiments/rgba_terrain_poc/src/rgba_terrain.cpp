@@ -27,8 +27,10 @@ void ChannelLayout::validate() const {
 }
 TerrainColumns generate_columns(const RgbaImage& image, const ChannelLayout& layout, const TerrainSettings& s) {
   image.validate(); layout.validate();
-  if (!std::isfinite(s.min_height) || !std::isfinite(s.max_height) || s.max_height < s.min_height)
-    throw std::invalid_argument("invalid terrain height range");
+  if (!std::isfinite(s.min_height) || !std::isfinite(s.max_height) ||
+      s.min_height < 0.0f || s.max_height < s.min_height ||
+      static_cast<double>(s.max_height) > std::numeric_limits<std::uint32_t>::max())
+    throw std::invalid_argument("terrain height range must be finite, non-negative, and fit uint32");
   auto find = [&](ChannelRole role) { for (int i=0;i<4;++i) if (layout.channels[static_cast<std::size_t>(i)]==role) return i; return -1; };
   const int h8=find(ChannelRole::Height8), hm=find(ChannelRole::Height16Msb), hl=find(ChannelRole::Height16Lsb);
   const int mat=find(ChannelRole::MaterialId), bio=find(ChannelRole::BiomeId), water=find(ChannelRole::WaterMask), den=find(ChannelRole::Density);
