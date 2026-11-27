@@ -103,31 +103,64 @@ RgbaImage generate_synthetic_map(std::size_t width, std::size_t depth,
             const float nx = static_cast<float>(x) / world_scale;
             const float nz = static_cast<float>(z) / world_scale;
 
-            const float continental = fbm(nx * 2.4f, nz * 2.4f,
+            // Low-frequency domain warping breaks up the smooth, blobby
+            // contours produced by sampling the continental field directly.
+            const float warp_x = fbm(nx * 1.7f, nz * 1.7f,
+                                    seed ^ 0x7F4A7C15u, 3);
+            const float warp_z = fbm(nx * 1.7f + 19.3f, nz * 1.7f - 7.1f,
+                                    seed ^ 0x94D049BBu, 3);
+            const float warped_x = nx + warp_x * 0.075f;
+            const float warped_z = nz + warp_z * 0.075f;
+
+            // Continentalness controls broad landmasses and ocean basins.
+            // A soft shoreline transition avoids a binary island mask.
+            const float continental = fbm(warped_x * 2.0f,
+                                           warped_z * 2.0f,
                                            seed ^ 0x31415926u, 5);
-            const float hills = fbm(nx * 11.0f, nz * 11.0f,
+            const float landmass = smoothstep(-0.28f, 0.34f, continental);
+            const float hills = fbm(warped_x * 10.0f, warped_z * 10.0f,
                                     seed ^ 0x27182818u, 4);
-            const float ridge_source = fbm(nx * 6.0f, nz * 6.0f,
-                                           seed ^ 0xA341316Cu, 4);
-            const float ridge = 1.0f - std::abs(ridge_source);
-            const float mountain = smooth(std::clamp(
-                (continental - 0.05f) * 2.8f, 0.0f, 1.0f));
-            const float broad = remap01(continental);
+
+            // Mountain ranges use a broad regional envelope plus elongated
+            // ridged noise. The unequal axis scales create connected chains
+            // rather than isolated, evenly distributed peaks.
+            const float mountain_region = fbm(
+                warped_x * 2.8f, warped_z * 2.8f,
+                seed ^ 0xA341316Cu, 4);
+            const float range_source = fbm(
+                warped_x * 3.2f, warped_z * 8.5f,
+                seed ^ 0xC8013EA4u, 4);
+            const float ridge_detail = fbm(
+                warped_x * 9.0f, warped_z * 12.0f,
+                seed ^ 0xAD90777Du, 3);
+            const float primary_ridge = std::pow(
+                std::max(0.0f, 1.0f - std::abs(range_source)), 1.45f);
+            const float secondary_ridge = std::pow(
+                std::max(0.0f, 1.0f - std::abs(ridge_detail)), 2.0f);
+            const float ridge = std::clamp(
+                primary_ridge * 0.78f + secondary_ridge * 0.22f,
+                0.0f, 1.0f);
+            const float mountain = smoothstep(
+                0.02f, 0.55f, mountain_region) *
+                smoothstep(0.12f, 0.58f, continental);
+
+            const float broad = smoothstep(0.0f, 1.0f, landmass);
             const float hill = remap01(hills);
+            const float foothills = mountain * (0.10f + ridge * 0.18f);
             const float terrain = std::clamp(
-                0.12f + broad * 0.40f + hill * 0.12f +
-                    mountain * ridge * 0.36f,
+                0.035f + broad * 0.47f + hill * 0.105f +
+                    foothills + mountain * ridge * 0.30f,
                 0.0f, 1.0f);
             float world_height = settings.min_height +
                                  terrain * height_span;
 
-            const float temperature = fbm(nx * 3.7f, nz * 3.7f,
+            const float temperature = fbm(warped_x * 3.7f, warped_z * 3.7f,
                                            seed ^ 0xB5297A4Du, 3);
-            const float moisture = fbm(nx * 5.1f, nz * 5.1f,
+            const float moisture = fbm(warped_x * 5.1f, warped_z * 5.1f,
                                         seed ^ 0x68E31DA4u, 3);
             const bool desert = temperature > 0.18f && moisture < -0.10f;
             const bool forest = moisture > 0.18f && temperature > -0.35f;
-            const bool mountains = mountain > 0.45f && ridge > 0.28f;
+            const bool mountains = mountain > 0.42f && ridge > 0.30f;
 
             // A gently meandering synthetic river. The center channel is
             // lowered to a bed below sea level, while a smooth distance
