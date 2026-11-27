@@ -40,16 +40,16 @@ Write-Host "Building terrain generator and image/terrain tests..." -ForegroundCo
 Invoke-NativeStep "cmake" @(
     "--build", $BuildDir,
     "--config", $Configuration,
-    "--target", "rgba_terrain_poc", "rgba_terrain_tests", "test_rgba_terrain_core",
+    "--target", "rgba_terrain_poc", "test_image", "test_rgba_terrain_core",
     "--parallel"
 )
 
-Write-Host "Running image and terrain tests..." -ForegroundColor Cyan
+Write-Host "Running shared image and terrain-core tests..." -ForegroundColor Cyan
 Invoke-NativeStep "ctest" @(
     "--test-dir", $BuildDir,
     "-C", $Configuration,
     "--output-on-failure",
-    "-R", "^(rgba_terrain_core($|[.])$)"
+    "-R", "^(image($|\\.)|rgba_terrain_core($|\\.))"
 )
 
 $ExecutableName = "rgba_terrain_poc"
