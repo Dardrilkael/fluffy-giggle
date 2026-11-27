@@ -226,3 +226,59 @@ TEST_CASE("greater atmospheric moisture availability supports more precipitation
     CHECK(found_land);
 }
 
+TEST_CASE("hydrology diagnostics are deterministic and bounded") {
+    const WorldSampler sampler(make_default_world_plan(
+        200000, 200000, 0xD4A1A6Eu));
+    bool found_land = false;
+    for (std::int64_t z = 45000; z < 155000 && !found_land; z += 7919) {
+        for (std::int64_t x = 45000; x < 155000; x += 6151) {
+            const auto first = sampler.sample(x, z);
+            if (first.is_ocean) continue;
+            const auto second = sampler.sample(x, z);
+            CHECK(first == second);
+            CHECK(first.watershed_accumulation >= 0.0);
+            CHECK(first.river_strength >= 0.0);
+            CHECK(first.river_strength <= 1.0);
+            CHECK(first.lake_depth_m >= 0.0);
+            CHECK(static_cast<std::uint8_t>(first.drainage_direction) <= 7 ||
+                  first.drainage_direction == DrainageDirection::Sink);
+            CHECK(!(first.is_river && first.is_lake));
+            found_land = true;
+            break;
+        }
+    }
+    CHECK(found_land);
+}
+
+TEST_CASE("hydrology settings reject invalid routing and water thresholds") {
+    auto plan = make_default_world_plan(1024, 1024, 17);
+    plan.hydrology.routing_cell_scale = 0.0;
+    CHECK_THROWS_AS(plan.validate(), std::invalid_argument);
+
+    plan = make_default_world_plan(1024, 1024, 17);
+    plan.hydrology.lake_minimum_precipitation = 1.5;
+    CHECK_THROWS_AS(plan.validate(), std::invalid_argument);
+}
+
+TEST_CASE("river and lake feature flags reconstruct inland surface water") {
+    TerrainSettings settings;
+    settings.min_height = 0.0f;
+    settings.max_height = 46.0f;
+    settings.volume_height = 64;
+    settings.sea_level = 12;
+
+    TerrainColumns columns;
+    columns.width = 2;
+    columns.depth = 1;
+    columns.columns = {
+        {0, 0, 20, 1, 1, 0, 255, 0x20},
+        {1, 0, 24, 2, 2, 0, 255, 0x40},
+    };
+    const auto volume = generate_voxel_volume(columns, settings);
+    CHECK(volume.at(0, 20, 0).kind == VoxelKind::Solid);
+    CHECK(volume.at(0, 21, 0).kind == VoxelKind::Water);
+    CHECK(volume.at(1, 24, 0).kind == VoxelKind::Solid);
+    CHECK(volume.at(1, 25, 0).kind == VoxelKind::Water);
+    CHECK(volume.at(0, 22, 0).kind == VoxelKind::Air);
+}
+
