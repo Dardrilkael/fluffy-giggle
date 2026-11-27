@@ -678,6 +678,184 @@ HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
 }
 
 
+// Evolve a deterministic finite-world elevation field before final D8
+// routing. All passes read one immutable elevation snapshot and write to a
+// separate buffer, so results do not depend on traversal or chunk order.
+void erode_terrain(std::vector<double>& elevation,
+                   const std::vector<double>& precipitation,
+                   const std::vector<bool>& ocean,
+                   std::size_t width, std::size_t height,
+                   double sea_level) {
+    const std::size_t count = elevation.size();
+    if (count == 0 || width == 0 || height == 0 ||
+        width > std::numeric_limits<std::size_t>::max() / height ||
+        count != width * height) {
+        return;
+    }
+    const auto index = [width](std::size_t x, std::size_t z) {
+        return z * width + x;
+    };
+    std::vector<double> next_elevation(count);
+    std::vector<double> accumulation(count);
+    std::vector<double> sediment(count);
+    std::vector<double> delta(count);
+    std::vector<std::size_t> order(count);
+    std::vector<DrainageDirection> direction(count, DrainageDirection::Sink);
+
+    constexpr int hydraulic_iterations = 4;
+    constexpr int thermal_iterations = 2;
+    constexpr double talus_threshold = 0.014;
+    constexpr double thermal_rate = 0.10;
+    for (int iteration = 0; iteration < hydraulic_iterations; ++iteration) {
+        std::fill(accumulation.begin(), accumulation.end(), 0.0);
+        std::fill(sediment.begin(), sediment.end(), 0.0);
+        std::fill(direction.begin(), direction.end(), DrainageDirection::Sink);
+        for (std::size_t i = 0; i < count; ++i) {
+            accumulation[i] = ocean[i] ? 0.0 : precipitation[i];
+            order[i] = i;
+            if (ocean[i]) continue;
+            const std::size_t x = i % width;
+            const std::size_t z = i / width;
+            double best_slope = 0.0;
+            for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
+                const auto nx = static_cast<std::int64_t>(x) + drainage_dx[d];
+                const auto nz = static_cast<std::int64_t>(z) + drainage_dz[d];
+                if (nx < 0 || nz < 0 ||
+                    nx >= static_cast<std::int64_t>(width) ||
+                    nz >= static_cast<std::int64_t>(height)) continue;
+                const std::size_t neighbor = index(
+                    static_cast<std::size_t>(nx), static_cast<std::size_t>(nz));
+                if (ocean[neighbor]) continue;
+                const double distance = (d % 2 == 1) ? 1.41421356237 : 1.0;
+                const double slope =
+                    (elevation[i] - elevation[neighbor]) / distance;
+                if (slope > best_slope) {
+                    best_slope = slope;
+                    direction[i] = static_cast<DrainageDirection>(d);
+                }
+            }
+        }
+        std::sort(order.begin(), order.end(),
+            [&](std::size_t lhs, std::size_t rhs) {
+                if (elevation[lhs] != elevation[rhs])
+                    return elevation[lhs] > elevation[rhs];
+                return lhs < rhs;
+            });
+        for (const std::size_t i : order) {
+            const auto d = direction[i];
+            if (d == DrainageDirection::Sink) continue;
+            const std::size_t di = static_cast<std::size_t>(d);
+            const auto nx = static_cast<std::int64_t>(i % width) + drainage_dx[di];
+            const auto nz = static_cast<std::int64_t>(i / width) + drainage_dz[di];
+            if (nx < 0 || nz < 0 ||
+                nx >= static_cast<std::int64_t>(width) ||
+                nz >= static_cast<std::int64_t>(height)) continue;
+            accumulation[index(static_cast<std::size_t>(nx),
+                               static_cast<std::size_t>(nz))] += accumulation[i];
+        }
+
+        next_elevation = elevation;
+        for (const std::size_t i : order) {
+            if (ocean[i]) continue;
+            const auto d = direction[i];
+            if (d == DrainageDirection::Sink) continue;
+            const std::size_t di = static_cast<std::size_t>(d);
+            const auto nx = static_cast<std::int64_t>(i % width) + drainage_dx[di];
+            const auto nz = static_cast<std::int64_t>(i / width) + drainage_dz[di];
+            if (nx < 0 || nz < 0 ||
+                nx >= static_cast<std::int64_t>(width) ||
+                nz >= static_cast<std::int64_t>(height)) continue;
+            const std::size_t downstream = index(
+                static_cast<std::size_t>(nx), static_cast<std::size_t>(nz));
+            const double distance = (di % 2 == 1) ? 1.41421356237 : 1.0;
+            const double slope = std::max(
+                0.0, (elevation[i] - elevation[downstream]) / distance);
+            const double stream_power =
+                std::pow(std::max(0.0, accumulation[i]), 0.55) *
+                std::pow(slope * 100.0, 0.65);
+            const double incision = std::min(
+                0.0018, 0.000055 * stream_power);
+            next_elevation[i] = std::max(
+                sea_level + 0.001, next_elevation[i] - incision);
+            sediment[i] += incision * 0.70;
+
+            // Transport most sediment downstream; deposit more where the
+            // channel flattens, forming small deterministic valley fans.
+            const double deposition_fraction =
+                0.12 + 0.58 * (1.0 - smoothstep(0.006, 0.035, slope));
+            const double deposited = sediment[i] * deposition_fraction;
+            next_elevation[downstream] = std::min(
+                0.995, next_elevation[downstream] + deposited);
+            sediment[downstream] += sediment[i] - deposited;
+        }
+        elevation.swap(next_elevation);
+
+        // Thermal relaxation moves material only when a cardinal slope
+        // exceeds the talus threshold. Pairwise transfers are accumulated
+        // from the same snapshot to avoid directional scan-order artifacts.
+        for (int thermal = 0; thermal < thermal_iterations; ++thermal) {
+            std::fill(delta.begin(), delta.end(), 0.0);
+            for (std::size_t z = 0; z < height; ++z) {
+                for (std::size_t x = 0; x < width; ++x) {
+                    const std::size_t high = index(x, z);
+                    if (ocean[high]) continue;
+                    constexpr std::array<std::array<int, 2>, 2> edges{{
+                        {{1, 0}}, {{0, 1}}}};
+                    for (const auto& edge : edges) {
+                        const std::size_t nx = x + 1u == width && edge[0] != 0
+                            ? width : x + static_cast<std::size_t>(edge[0]);
+                        const std::size_t nz = z + 1u == height && edge[1] != 0
+                            ? height : z + static_cast<std::size_t>(edge[1]);
+                        if (nx >= width || nz >= height) continue;
+                        const std::size_t low = index(nx, nz);
+                        if (ocean[low]) continue;
+                        const double difference =
+                            elevation[high] - elevation[low];
+                        if (difference <= talus_threshold) continue;
+                        const double transfer =
+                            (difference - talus_threshold) * thermal_rate;
+                        delta[high] -= transfer;
+                        delta[low] += transfer;
+                    }
+                }
+            }
+            next_elevation = elevation;
+            for (std::size_t i = 0; i < count; ++i) {
+                if (!ocean[i]) {
+                    next_elevation[i] = std::clamp(
+                        elevation[i] + delta[i], sea_level + 0.001, 0.995);
+                }
+            }
+            elevation.swap(next_elevation);
+        }
+    }
+}
+
+double sample_elevation_offset(const std::vector<double>& offsets,
+                               std::size_t width, std::size_t height,
+                               double scale, std::int64_t world_x,
+                               std::int64_t world_z) {
+    if (offsets.empty() || width == 0 || height == 0) return 0.0;
+    const double gx = std::clamp(
+        static_cast<double>(world_x) / scale - 0.5, 0.0,
+        static_cast<double>(width - 1));
+    const double gz = std::clamp(
+        static_cast<double>(world_z) / scale - 0.5, 0.0,
+        static_cast<double>(height - 1));
+    const auto x0 = static_cast<std::size_t>(std::floor(gx));
+    const auto z0 = static_cast<std::size_t>(std::floor(gz));
+    const auto x1 = std::min(width - 1, x0 + 1u);
+    const auto z1 = std::min(height - 1, z0 + 1u);
+    const double tx = gx - static_cast<double>(x0);
+    const double tz = gz - static_cast<double>(z0);
+    const auto at = [&](std::size_t x, std::size_t z) {
+        return offsets[z * width + x];
+    };
+    const double top = at(x0, z0) * (1.0 - tx) + at(x1, z0) * tx;
+    const double bottom = at(x0, z1) * (1.0 - tx) + at(x1, z1) * tx;
+    return top * (1.0 - tz) + bottom * tz;
+}
+
 // Whole-world coarse drainage context. Building this once per RGBA region keeps
 // flow accumulation continuous across output chunks and avoids reconstructing
 // a 13x13 terrain neighborhood for every output pixel.
@@ -685,6 +863,7 @@ struct HydrologyGrid {
     std::size_t width = 0;
     std::size_t height = 0;
     std::vector<HydrologyField> cells;
+    std::vector<double> elevation_offsets;
     double maximum_accumulation = 0.0;
     double maximum_lake_depth_m = 0.0;
     bool valid = false;
@@ -745,6 +924,38 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
             // Ocean cells terminate drainage instead of adding river runoff.
             accumulation[i] = ocean[i] ? 0.0 : precipitation[i];
         }
+    }
+
+    const std::vector<double> original_elevation = elevation;
+    if (plan.hydrology.erosion_enabled) {
+        erode_terrain(elevation, precipitation, ocean, grid.width, grid.height,
+                      plan.sea_level_fraction);
+    }
+    grid.elevation_offsets.resize(count, 0.0);
+    for (std::size_t i = 0; i < count; ++i) {
+        grid.elevation_offsets[i] = elevation[i] - original_elevation[i];
+        ocean[i] = elevation[i] <= plan.sea_level_fraction;
+        if (!ocean[i]) {
+            const std::size_t x = i % grid.width;
+            const std::size_t z = i / grid.width;
+            const double world_x = (static_cast<double>(x) + 0.5) * scale;
+            const double world_z = (static_cast<double>(z) + 0.5) * scale;
+            const auto regions = evaluate_regions(plan, world_x, world_z);
+            const TerrainField eroded_terrain{
+                elevation[i],
+                evaluate_terrain(plan, world_x, world_z,
+                    regions.weight_sum > 0.0
+                        ? regions.elevation_sum /
+                              regions.weight_sum *
+                              std::min(1.0, regions.weight_sum)
+                        : 0.0).continentalness,
+                0.0};
+            precipitation[i] = evaluate_climate(
+                plan, world_x, world_z, regions, eroded_terrain).precipitation;
+        } else {
+            precipitation[i] = 0.0;
+        }
+        accumulation[i] = ocean[i] ? 0.0 : precipitation[i];
     }
 
     using FloodNode = std::pair<double, std::size_t>;
