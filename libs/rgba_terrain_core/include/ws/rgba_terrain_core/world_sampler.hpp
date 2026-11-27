@@ -19,6 +19,16 @@ struct WorldClimateDiagnosticImages {
     RgbaImage ocean_moisture;
 };
 
+// Optional hydrology preview layers. These are independent diagnostic images;
+// they never replace or modify the authoritative RGBA terrain map.
+struct WorldHydrologyDiagnosticImages {
+    RgbaImage flow_accumulation;
+    RgbaImage river_strength;
+    RgbaImage drainage_direction;
+    RgbaImage lake_depth;
+    RgbaImage lake_basins;
+};
+
 // D8 direction on the hydrology routing grid. North is negative world Z.
 enum class DrainageDirection : std::uint8_t {
     North = 0,
@@ -93,7 +103,8 @@ public:
         std::int64_t origin_x, std::int64_t origin_z,
         std::size_t width, std::size_t depth,
         const TerrainSettings& settings,
-        WorldClimateDiagnosticImages* climate_diagnostics = nullptr) const;
+        WorldClimateDiagnosticImages* climate_diagnostics = nullptr,
+        WorldHydrologyDiagnosticImages* hydrology_diagnostics = nullptr) const;
 
 private:
     [[nodiscard]] WorldSample sample_impl(
