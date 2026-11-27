@@ -1,0 +1,7 @@
+# RGBA terrain metadata v1
+channel.r=height16_msb
+channel.g=height16_lsb
+channel.b=material_id
+channel.a=water_mask
+min_height=0
+max_height=256
