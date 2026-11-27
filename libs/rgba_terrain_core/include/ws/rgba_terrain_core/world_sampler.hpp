@@ -9,6 +9,17 @@
 namespace ws::rgba_terrain_core {
 
 // D8 direction on the hydrology routing grid. North is negative world Z.
+// Optional climate-only preview layers. These images are diagnostic products;
+ // they never replace or alter the authoritative RGBA terrain map.
+struct WorldClimateDiagnosticImages {
+    RgbaImage temperature;
+    RgbaImage humidity;
+    RgbaImage precipitation;
+    RgbaImage orographic_lift;
+    RgbaImage rain_shadow;
+    RgbaImage ocean_moisture;
+};
+
 enum class DrainageDirection : std::uint8_t {
     North = 0,
     NorthEast = 1,
@@ -79,7 +90,8 @@ public:
     [[nodiscard]] RgbaImage generate_rgba_region(
         std::int64_t origin_x, std::int64_t origin_z,
         std::size_t width, std::size_t depth,
-        const TerrainSettings& settings) const;
+        const TerrainSettings& settings,
+        WorldClimateDiagnosticImages* climate_diagnostics = nullptr) const;
 
 private:
     WorldPlan plan_;
