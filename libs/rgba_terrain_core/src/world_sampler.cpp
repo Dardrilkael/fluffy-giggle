@@ -700,6 +700,8 @@ void erode_terrain(std::vector<double>& elevation,
     const auto index = [width](std::size_t x, std::size_t z) {
         return z * width + x;
     };
+    const double land_floor = std::min(
+        0.995, sea_level + std::min(0.001, (1.0 - sea_level) * 0.25));
     std::vector<double> next_elevation(count);
     std::vector<double> accumulation(count);
     std::vector<double> sediment(count);
@@ -766,7 +768,7 @@ void erode_terrain(std::vector<double>& elevation,
             if (d == DrainageDirection::Sink) {
                 next_elevation[i] = std::clamp(
                     elevation[i] + sediment[i],
-                    sea_level + 0.001, 0.995);
+                    land_floor, 0.995);
                 continue;
             }
             const std::size_t di = static_cast<std::size_t>(d);
@@ -794,7 +796,7 @@ void erode_terrain(std::vector<double>& elevation,
             const double deposited = carried_sediment * deposition_fraction;
             next_elevation[i] = std::clamp(
                 elevation[i] - incision + deposited,
-                sea_level + 0.001, 0.995);
+                land_floor, 0.995);
             sediment[downstream] += carried_sediment - deposited;
         }
         elevation.swap(next_elevation);
@@ -838,7 +840,7 @@ void erode_terrain(std::vector<double>& elevation,
             for (std::size_t i = 0; i < count; ++i) {
                 if (!ocean[i]) {
                     next_elevation[i] = std::clamp(
-                        elevation[i] + delta[i], sea_level + 0.001, 0.995);
+                        elevation[i] + delta[i], land_floor, 0.995);
                 }
             }
             elevation.swap(next_elevation);
