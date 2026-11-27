@@ -131,6 +131,11 @@ double clamp01(double value) {
     return std::clamp(value, 0.0, 1.0);
 }
 
+double smoothstep(double edge0, double edge1, double value) {
+    const double t = clamp01((value - edge0) / (edge1 - edge0));
+    return t * t * (3.0 - 2.0 * t);
+}
+
 double climate_distance(double temperature, double humidity,
                         double elevation, double temperature_optimum,
                         double temperature_tolerance, double humidity_optimum,
