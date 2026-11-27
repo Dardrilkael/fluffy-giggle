@@ -15,19 +15,20 @@ target_include_directories(rgba_terrain_core PUBLIC include)
 target_compile_features(rgba_terrain_core PUBLIC cxx_std_20)
 target_link_libraries(rgba_terrain_core PUBLIC ws::image)
 
-if(MSVC)
-  target_compile_options(rgba_terrain_core PRIVATE /W4 /permissive-)
-else()
-  target_compile_options(rgba_terrain_core PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+ws_set_warnings(rgba_terrain_core)
 
-add_executable(rgba_terrain_poc src/main.cpp)
-target_link_libraries(rgba_terrain_poc PRIVATE rgba_terrain_core)
+# Use the workspace app helper so this executable inherits the same C++,
+# warning, linking, and build-output conventions as apps under apps/.
+# The root CMakeLists places the resulting .exe in build/<preset>/bin.
+ws_add_app(rgba_terrain_poc
+  SOURCES src/main.cpp
+  DEPENDS rgba_terrain_core)
 
 if(RGBA_TERRAIN_BUILD_TESTS)
   enable_testing()
   add_executable(rgba_terrain_tests tests/test_rgba_terrain.cpp)
   target_link_libraries(rgba_terrain_tests PRIVATE rgba_terrain_core)
+  ws_set_warnings(rgba_terrain_tests)
   # The current terrain test uses assert(); keep its checks active in Release.
   if(MSVC)
     target_compile_options(rgba_terrain_tests PRIVATE /UNDEBUG)
