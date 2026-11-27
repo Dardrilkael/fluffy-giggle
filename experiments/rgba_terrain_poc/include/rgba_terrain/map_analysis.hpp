@@ -35,8 +35,9 @@ struct TerrainMapAnalysis {
     std::uint64_t reserved_flag_columns = 0;
 };
 
-// Computes statistics from the decoded spatial columns. Neighbor differences
-// are measured on the original 2D pixel grid, not on a reduced feature vector.
+// Elevation statistics and neighbor differences use the original encoded
+// channel values (0..255 or 0..65535), not rounded voxel heights. Attribute
+// histograms and feature counts are decoded from the same source pixels.
 [[nodiscard]] TerrainMapAnalysis analyze_map(
     const RgbaImage& image, const ChannelLayout& layout,
     const TerrainSettings& settings);
