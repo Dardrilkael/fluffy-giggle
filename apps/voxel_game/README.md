@@ -8,13 +8,11 @@ Jolt behind `ws::physics3d`, OpenAL Soft behind `ws::audio`.
 ## What you get
 
 - **A procedurally generated 256 × 64 × 256 voxel world** (16×16 chunks of
-  16×64×16): multi-field FBM height and climate maps create plains,
-  forests, deserts, tundra, wetlands, alpine regions and rocky mountain regions. A low-frequency
-  field carves winding river channels and sandy banks; water fills low
-  ground to the water plane. 3D coherent density carves underground caves,
-  clustered 3D noise creates coal/iron ore veins, and tree density varies
-  with forest climate; tree trunks and leaf crowns are applied in world coordinates and can cross chunk boundaries. All fields are deterministic per seed
-  (default seed `0xC0FFEE`) and continuous across chunk boundaries.
+  16×64×16): the authoritative `rgba_terrain_core::WorldSampler` generates
+  the 2D elevation, climate, biome, and globally routed hydrology fields.
+  The existing voxel pass adds underground caves, clustered ore veins and
+  trees on top of that sampled surface. All generation is deterministic per
+  seed (default seed `0xC0FFEE`).
 - **World entry screen**: a fresh launch starts with no terrain world generated or loaded. Choose a seed, increment/decrement it or randomize it, then select **Generate / Regenerate PNG**. Terrain sampling runs in the background and writes the authoritative RGBA PNG plus metadata. The result is loaded as a preview behind the menu; it does not enter gameplay. **Load Saved PNG / Preview** loads the previous map without starting the game. **Play World** is enabled only after a map has been previewed and is the only menu action that enters gameplay.
 - **A first-person player**: WASD movement, mouse look, space jump
   (~1.5 m apex — clears a full block with margin), shift sprint. The
@@ -31,6 +29,27 @@ Jolt behind `ws::physics3d`, OpenAL Soft behind `ws::audio`.
   position/grounded readout, and the controls line.
 - **Audio**: synthesized place/break "tock" one-shots (in-memory PCM
   through `ws::audio::SoundDesc` — no asset files).
+
+## Terrain-generation ownership
+
+`libs/rgba_terrain_core/src/world_sampler.cpp` is the single authoritative
+2D world generator used by the voxel game's PNG pipeline. It owns gradient
+noise, continental and regional terrain, climate, biome selection, and
+finite-world hydrology. The game-specific world profile is centralized in
+`src/terrain_world_profile.hpp`; its feature scales are expressed in world
+units (one block = one unit), not recomputed from image dimensions.
+
+`generate_synthetic_map()` remains available for source compatibility with
+older callers and tests. It is only a v1 RGBA adapter over `WorldSampler`;
+it no longer owns a second noise, climate, biome, or river algorithm. Its
+legacy channel packing is retained, so old consumers can continue reading
+the original material and biome/flag fields. New production code should
+construct a `WorldSampler` and use `generate_rgba_region()` with the v2
+`MaterialFeatureFlags` / `BiomeId` layout.
+
+The voxel-only pass is deliberately separate from 2D world generation:
+caves, ores, and vegetation are 3D/gameplay details, not competing sources
+for the terrain surface, climate, or river network.
 
 ## Generating and loading worlds
 
@@ -136,10 +155,12 @@ the app (the repo's gating contract).
 ## The architecture
 
 ```
-src/world.hpp/.cpp    the voxel data model: the block table (16×16 chunks),
-                      seeded biome/climate fields, rivers, caves, ore
-                      veins, greedy meshing and a zero-copy VoxelGrid3D
-                      view over chunks.
+src/world.hpp/.cpp    the voxel data model and 3D detail pass (caves, ore,
+                      vegetation), greedy meshing and a zero-copy
+                      VoxelGrid3D view over chunks.
+src/terrain_world_profile.hpp
+                      shared world-unit scales and output settings for the
+                      authoritative WorldSampler pipeline.
 src/inventory.hpp     stackable item inventory, recipe definitions and atomic crafting.\nsrc/player.hpp/.cpp   the FPS character controller: yaw/pitch look,
                       gravity/jump integration, swept-AABB movement,
                       axis-separated sliding and probe-based grounding.
