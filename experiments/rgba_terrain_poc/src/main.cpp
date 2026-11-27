@@ -1,6 +1,8 @@
 #include <ws/rgba_terrain_core/metadata.hpp>
 #include <ws/rgba_terrain_core/map_analysis.hpp>
 #include <ws/rgba_terrain_core/rgba_terrain.hpp>
+#include <ws/rgba_terrain_core/voxel_file.hpp>
+#include <ws/rgba_terrain_core/voxel_validation.hpp>
 
 #include <ws/image/image.hpp>
 #include <ws/core/log.hpp>
@@ -19,88 +21,6 @@
 #include <vector>
 
 namespace {
-
-void write_u32(std::ostream& out, std::uint32_t value) {
-    for (unsigned shift = 0; shift < 32; shift += 8) {
-        out.put(static_cast<char>((value >> shift) & 255u));
-    }
-}
-
-std::uint32_t checked_u32(std::size_t value, const char* field) {
-    if (value > std::numeric_limits<std::uint32_t>::max()) {
-        throw std::runtime_error(std::string(field) +
-                                 " exceeds the file format limit");
-    }
-    return static_cast<std::uint32_t>(value);
-}
-
-std::size_t parse_size(const char* text, const char* field) {
-    std::size_t used = 0;
-    unsigned long long value = 0;
-    try {
-        value = std::stoull(text, &used);
-    } catch (...) {
-        throw std::runtime_error(std::string("invalid ") + field);
-    }
-    if (used != std::string(text).size() ||
-        value == 0 ||
-        value > std::numeric_limits<std::size_t>::max()) {
-        throw std::runtime_error(std::string("invalid ") + field);
-    }
-    return static_cast<std::size_t>(value);
-}
-
-std::uint32_t parse_seed(const char* text) {
-    std::size_t used = 0;
-    unsigned long long value = 0;
-    try {
-        value = std::stoull(text, &used, 0);
-    } catch (...) {
-        throw std::runtime_error("invalid seed");
-    }
-    if (used != std::string(text).size() ||
-        value > std::numeric_limits<std::uint32_t>::max()) {
-        throw std::runtime_error("seed must fit uint32 (decimal or 0x hex)");
-    }
-    return static_cast<std::uint32_t>(value);
-}
-
-std::vector<std::uint8_t> flatten_rgba(
-    const ws::rgba_terrain_core::RgbaImage& image) {
-    std::vector<std::uint8_t> bytes;
-    bytes.reserve(image.pixels.size() * 4u);
-    for (const auto& pixel : image.pixels) {
-        bytes.push_back(pixel.r);
-        bytes.push_back(pixel.g);
-        bytes.push_back(pixel.b);
-        bytes.push_back(pixel.a);
-    }
-    return bytes;
-}
-
-void write_voxel_file(const ws::rgba_terrain_core::VoxelVolume& volume,
-                      const std::string& path) {
-    std::ofstream out(path, std::ios::binary);
-    if (!out) {
-        throw std::runtime_error("cannot create voxel output: " + path);
-    }
-
-    // RGAVOX02: dimensions, then five bytes per voxel.
-    out.write("RGAVOX02", 8);
-    write_u32(out, checked_u32(volume.width, "width"));
-    write_u32(out, checked_u32(volume.depth, "depth"));
-    write_u32(out, checked_u32(volume.height, "height"));
-    for (const auto& voxel : volume.voxels) {
-        out.put(static_cast<char>(voxel.kind));
-        out.put(static_cast<char>(voxel.material_id));
-        out.put(static_cast<char>(voxel.biome_id));
-        out.put(static_cast<char>(voxel.density));
-        out.put(static_cast<char>(voxel.feature_flags));
-    }
-    if (!out) {
-        throw std::runtime_error("failed writing voxel volume: " + path);
-    }
-}
 
 void print_map_report(const ws::rgba_terrain_core::RgbaImage& image,
                       const ws::rgba_terrain_core::VoxelVolume& volume) {
@@ -259,7 +179,11 @@ int generate_command(int argc, char** argv) {
     const auto decoded_image = ws::rgba_terrain_core::load_rgba_image(argv[5]);
     const auto volume = ws::rgba_terrain_core::generate_voxel_volume(
         decoded_image, decoded_metadata.layout, decoded_metadata.settings);
-    write_voxel_file(volume, argv[7]);
+    const auto voxel_write = ws::rgba_terrain_core::write_voxel_file(argv[7], volume);
+    if (!voxel_write) {
+        ws::core::log_error(voxel_write.error());
+        return 1;
+    }
     print_map_report(decoded_image, volume);
     ws::core::info("rgba_terrain: wrote data PNG '{}'", argv[5]);
     ws::core::info("rgba_terrain: wrote metadata '{}'", argv[6]);
@@ -276,9 +200,72 @@ int convert_command(int argc, char** argv) {
     const auto image = ws::rgba_terrain_core::load_rgba_image(argv[2]);
     const auto volume = ws::rgba_terrain_core::generate_voxel_volume(
         image, metadata.layout, metadata.settings);
-    write_voxel_file(volume, argv[4]);
+    const auto voxel_write = ws::rgba_terrain_core::write_voxel_file(argv[4], volume);
+    if (!voxel_write) {
+        ws::core::log_error(voxel_write.error());
+        return 1;
+    }
     print_map_report(image, volume);
     return 0;
+}
+
+
+int validate_command(int argc, char** argv) {
+    if (argc != 5) {
+        ws::core::warn("rgba_terrain: usage: rgba_terrain_poc validate <input.png> <input.rgba-terrain> <input.rgba-voxels>");
+        return 2;
+    }
+    const auto metadata = ws::rgba_terrain_core::load_metadata(argv[3]);
+    const auto image = ws::rgba_terrain_core::load_rgba_image(argv[2]);
+    const auto expected = ws::rgba_terrain_core::generate_voxel_volume(
+        image, metadata.layout, metadata.settings);
+    const auto loaded = ws::rgba_terrain_core::read_voxel_file(argv[4]);
+    if (!loaded) {
+        ws::core::log_error(loaded.error());
+        return 1;
+    }
+
+    const auto report = ws::rgba_terrain_core::compare_voxel_volumes(
+        expected, *loaded);
+    ws::core::info("rgba_terrain: voxel validation");
+    ws::core::info("rgba_terrain: expected volume {}x{}x{}",
+                   expected.width, expected.depth, expected.height);
+    ws::core::info("rgba_terrain: actual volume {}x{}x{}",
+                   loaded->width, loaded->depth, loaded->height);
+    if (!report.dimensions_match) {
+        ws::core::error("rgba_terrain: voxel volume dimensions do not match");
+        return 3;
+    }
+    if (!report.expected_storage_valid || !report.actual_storage_valid) {
+        ws::core::error("rgba_terrain: invalid voxel storage");
+        return 3;
+    }
+
+    ws::core::info("rgba_terrain: compared {} voxels; mismatched {}",
+                   report.compared_voxels, report.mismatched_voxels);
+    constexpr std::array<const char*, 5> names{
+        "kind", "material", "biome", "density", "feature_flags"};
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        ws::core::info("rgba_terrain: {} mismatches={}",
+                       names[i], report.field_mismatches[i]);
+    }
+    if (report.exact_match()) {
+        ws::core::info("rgba_terrain: VALID — voxel file exactly matches PNG + metadata reconstruction");
+        return 0;
+    }
+    if (report.has_first_mismatch) {
+        const auto& m = report.first_mismatch;
+        ws::core::error(
+            "rgba_terrain: first mismatch at x={} y={} z={} "
+            "(expected kind/material/biome/density/flags={}/{}/{}/{}/{}, "
+            "actual={}/{}/{}/{}/{})",
+            m.x, m.y, m.z,
+            static_cast<unsigned>(m.expected.kind), m.expected.material_id,
+            m.expected.biome_id, m.expected.density, m.expected.feature_flags,
+            static_cast<unsigned>(m.actual.kind), m.actual.material_id,
+            m.actual.biome_id, m.actual.density, m.actual.feature_flags);
+    }
+    return 3;
 }
 
 }  // namespace
@@ -294,10 +281,14 @@ int main(int argc, char** argv) {
         if (argc >= 2 && std::string(argv[1]) == "inspect") {
             return inspect_command(argc, argv);
         }
+        if (argc >= 2 && std::string(argv[1]) == "validate") {
+            return validate_command(argc, argv);
+        }
         ws::core::info("rgba_terrain: RGBA terrain generator");
         ws::core::info("rgba_terrain: commands: generate <width> <depth> <seed> <out.png> <out.meta> <out.voxels>");
         ws::core::info("rgba_terrain:          convert <input.png> <input.meta> <out.voxels>");
         ws::core::info("rgba_terrain:          inspect <input.png> <input.meta>");
+        ws::core::info("rgba_terrain:          validate <input.png> <input.meta> <input.voxels>");
         return 2;
     } catch (const std::exception& exception) {
         ws::core::error("rgba_terrain: {}", exception.what());
