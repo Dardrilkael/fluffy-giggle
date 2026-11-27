@@ -84,6 +84,7 @@ void WorldPlan::validate() const {
     if (climate.base_humidity < 0.0 || climate.base_humidity > 1.0 ||
         climate.coastal_humidity_boost < 0.0 ||
         climate.coastal_humidity_boost > 1.0 ||
+        climate.elevation_lapse_rate_c_per_km < 0.0 ||
         climate.regional_temperature_variation_c < 0.0 ||
         climate.regional_humidity_variation < 0.0 ||
         climate.rain_shadow_strength < 0.0 ||

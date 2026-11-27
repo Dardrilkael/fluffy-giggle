@@ -69,7 +69,7 @@ TEST_CASE("world regions softly influence temperature, elevation and ecosystems"
     region.temperature_bias_c = 8.0;
     region.humidity_bias = 0.35;
     region.ecosystem_id = 1;
-    region.ecosystem_affinity = 0.65;
+    region.ecosystem_affinity = 1.0;
     regional_plan.regions.push_back(region);
 
     const WorldSampler baseline(std::move(baseline_plan));

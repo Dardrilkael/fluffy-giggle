@@ -21,7 +21,7 @@ struct WorldSample {
     std::uint8_t material_id = 1;
     std::uint8_t feature_flags = 0;
 
-    // Values near one indicate a strong distinction from the next candidate;
+    // Transition values near one indicate close competing candidates;
     // habitat_variation is a stable local field in [0,1].
     double ecosystem_transition = 0.0;
     double biome_transition = 0.0;

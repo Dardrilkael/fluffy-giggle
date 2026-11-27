@@ -334,7 +334,6 @@ WorldSample WorldSampler::sample(std::int64_t world_x,
 
     ScoredId best_biome;
     ScoredId second_biome;
-    const BiomeDefinition* selected_biome = nullptr;
     for (const auto& biome : plan_.biomes) {
         if (biome.id == 0 || biome.ecosystem_id != result.ecosystem_id) {
             continue;
@@ -359,17 +358,12 @@ WorldSample WorldSampler::sample(std::int64_t world_x,
             patch_noise * plan_.scales.sub_biome_spatial_bias +
             habitat_noise * 0.035;
         insert_top_two({biome.id, score}, best_biome, second_biome);
-        if (best_biome.id == biome.id) {
-            selected_biome = &biome;
-        } else if (second_biome.id == biome.id && selected_biome == nullptr) {
-            // The selected definition is assigned below after scoring all
-            // candidates, so this branch intentionally does not change it.
-        }
     }
 
     if (!std::isfinite(best_biome.score)) {
         throw std::logic_error("selected ecosystem has no matching biome");
     }
+    const BiomeDefinition* selected_biome = nullptr;
     for (const auto& biome : plan_.biomes) {
         if (biome.id == best_biome.id) {
             selected_biome = &biome;
