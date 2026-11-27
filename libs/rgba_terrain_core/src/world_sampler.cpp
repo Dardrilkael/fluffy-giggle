@@ -895,9 +895,6 @@ HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
 
 
 // Evolve a deterministic finite-world elevation field before final D8
-// routing. All passes read one immutable elevation snapshot and write to a
-// separate buffer, so results do not depend on traversal or chunk order.
-// Evolve a deterministic finite-world elevation field before final D8
 // routing. Each hydraulic iteration rebuilds the shared drainage graph from
 // the current elevation snapshot, so incision never follows stale channels.
 void erode_terrain(std::vector<double>& elevation,
