@@ -17,6 +17,7 @@ enum class ChannelRole : std::uint8_t {
     BiomeId,
     WaterMask,
     Density,
+    BiomeWaterFlags,
 };
 
 enum class Channel : std::uint8_t { R = 0, G = 1, B = 2, A = 3 };
@@ -71,7 +72,7 @@ struct TerrainSettings {
 struct VoxelColumn {
     std::size_t x{}, z{};
     std::uint32_t height{};
-    std::uint8_t material_id{}, biome_id{}, water_mask{}, density{};
+    std::uint8_t material_id{}, biome_id{}, water_mask{}, density{}, feature_flags{};
 };
 
 struct TerrainColumns {
@@ -85,13 +86,13 @@ enum class VoxelKind : std::uint8_t {
     Water = 2,
 };
 
-// Four bytes per voxel. material_id is meaningful for Solid and Water;
-// biome_id and density preserve their column fields on generated cells.
+// Five bytes per voxel. feature_flags are preserved independently from biome ID.
 struct Voxel {
     VoxelKind kind = VoxelKind::Air;
     std::uint8_t material_id = 0;
     std::uint8_t biome_id = 0;
     std::uint8_t density = 0;
+    std::uint8_t feature_flags = 0;
 };
 
 struct VoxelVolume {
@@ -112,5 +113,8 @@ struct VoxelVolume {
 [[nodiscard]] VoxelVolume generate_voxel_volume(
     const RgbaImage&, const ChannelLayout&, const TerrainSettings&);
 [[nodiscard]] RgbaImage load_rgba_image(const std::string& path);
+[[nodiscard]] RgbaImage generate_synthetic_map(
+    std::size_t width, std::size_t depth, std::uint32_t seed,
+    const TerrainSettings& settings);
 
 }  // namespace rgba_terrain
