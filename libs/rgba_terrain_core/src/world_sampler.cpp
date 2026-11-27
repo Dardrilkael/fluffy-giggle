@@ -347,6 +347,23 @@ HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
     return result;
 }
 
+std::uint8_t diagnostic_gray(double value) {
+    return static_cast<std::uint8_t>(
+        std::clamp(std::lround(clamp01(value) * 255.0), 0l, 255l));
+}
+
+Rgba8 diagnostic_pixel(double value) {
+    const std::uint8_t channel = diagnostic_gray(value);
+    return {channel, channel, channel, 255};
+}
+
+void initialize_diagnostic_image(RgbaImage& image,
+                                 std::size_t width, std::size_t depth) {
+    image.width = width;
+    image.height = depth;
+    image.pixels.resize(width * depth);
+}
+
 void validate_terrain_settings(const TerrainSettings& settings) {
     if (!std::isfinite(settings.min_height) ||
         !std::isfinite(settings.max_height) ||
@@ -622,7 +639,8 @@ WorldSample WorldSampler::sample(std::int64_t world_x,
 RgbaImage WorldSampler::generate_rgba_region(
     std::int64_t origin_x, std::int64_t origin_z,
     std::size_t width, std::size_t depth,
-    const TerrainSettings& settings) const {
+    const TerrainSettings& settings,
+    WorldClimateDiagnosticImages* climate_diagnostics) const {
     validate_terrain_settings(settings);
     if (origin_x < 0 || origin_z < 0 || width == 0 || depth == 0 ||
         width > std::numeric_limits<std::size_t>::max() / depth ||
@@ -655,11 +673,50 @@ RgbaImage WorldSampler::generate_rgba_region(
     image.height = depth;
     image.pixels.resize(width * depth);
 
+    double temperature_min = std::min(
+        plan_.climate.equator_temperature_c,
+        plan_.climate.pole_temperature_c) -
+        plan_.climate.regional_temperature_variation_c -
+        plan_.climate.maximum_elevation_m *
+            plan_.climate.elevation_lapse_rate_c_per_km / 1000.0;
+    double temperature_max = std::max(
+        plan_.climate.equator_temperature_c,
+        plan_.climate.pole_temperature_c) +
+        plan_.climate.regional_temperature_variation_c;
+    if (temperature_max <= temperature_min) {
+        temperature_max = temperature_min + 1.0;
+    }
+
+    if (climate_diagnostics != nullptr) {
+        initialize_diagnostic_image(climate_diagnostics->temperature, width, depth);
+        initialize_diagnostic_image(climate_diagnostics->humidity, width, depth);
+        initialize_diagnostic_image(climate_diagnostics->precipitation, width, depth);
+        initialize_diagnostic_image(climate_diagnostics->orographic_lift, width, depth);
+        initialize_diagnostic_image(climate_diagnostics->rain_shadow, width, depth);
+        initialize_diagnostic_image(climate_diagnostics->ocean_moisture, width, depth);
+    }
+
     for (std::size_t z = 0; z < depth; ++z) {
         for (std::size_t x = 0; x < width; ++x) {
             const WorldSample sample_at = sample(
                 origin_x + static_cast<std::int64_t>(x),
                 origin_z + static_cast<std::int64_t>(z));
+            if (climate_diagnostics != nullptr) {
+                const std::size_t index = z * width + x;
+                climate_diagnostics->temperature.pixels[index] = diagnostic_pixel(
+                    (sample_at.temperature_c - temperature_min) /
+                    (temperature_max - temperature_min));
+                climate_diagnostics->humidity.pixels[index] =
+                    diagnostic_pixel(sample_at.humidity);
+                climate_diagnostics->precipitation.pixels[index] =
+                    diagnostic_pixel(sample_at.precipitation);
+                climate_diagnostics->orographic_lift.pixels[index] =
+                    diagnostic_pixel(sample_at.orographic_lift);
+                climate_diagnostics->rain_shadow.pixels[index] =
+                    diagnostic_pixel(sample_at.rain_shadow);
+                climate_diagnostics->ocean_moisture.pixels[index] =
+                    diagnostic_pixel(sample_at.ocean_moisture);
+            }
             const double channel_cut = sample_at.is_river
                 ? plan_.hydrology.river_channel_depth_fraction *
                       sample_at.river_strength
@@ -686,6 +743,14 @@ RgbaImage WorldSampler::generate_rgba_region(
     }
 
     image.validate();
+    if (climate_diagnostics != nullptr) {
+        climate_diagnostics->temperature.validate();
+        climate_diagnostics->humidity.validate();
+        climate_diagnostics->precipitation.validate();
+        climate_diagnostics->orographic_lift.validate();
+        climate_diagnostics->rain_shadow.validate();
+        climate_diagnostics->ocean_moisture.validate();
+    }
     return image;
 }
 
