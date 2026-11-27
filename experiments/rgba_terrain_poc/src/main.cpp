@@ -13,6 +13,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <format>
 #include <functional>
@@ -112,6 +113,84 @@ void print_map_report(const ws::rgba_terrain_core::RgbaImage& image,
                    volume.voxels.size() * 5u);
 }
 
+void write_preview_png(const std::filesystem::path& path,
+                       const ws::rgba_terrain_core::RgbaImage& image) {
+    const auto bytes = flatten_rgba(image);
+    const auto written = ws::image::write_rgba8_png_file(
+        path.string(), checked_u32(image.width, "preview width"),
+        checked_u32(image.height, "preview height"), bytes);
+    if (!written) {
+        throw std::runtime_error(
+            "diagnostic PNG write failed for '" + path.string() +
+            "': " + written.error().message);
+    }
+}
+
+void write_map_diagnostics(
+    const ws::rgba_terrain_core::RgbaImage& image,
+    const ws::rgba_terrain_core::TerrainMetadata& metadata,
+    const std::filesystem::path& output_directory) {
+    std::filesystem::create_directories(output_directory);
+    const auto previews = ws::rgba_terrain_core::make_diagnostic_images(
+        image, metadata.layout, metadata.settings);
+    const std::array<std::pair<const char*, const ws::rgba_terrain_core::RgbaImage*>, 9>
+        outputs{{
+            {"elevation", &previews.elevation},
+            {"slope", &previews.slope},
+            {"biome", &previews.biome},
+            {"material", &previews.material},
+            {"water", &previews.water},
+            {"forest", &previews.forest},
+            {"mountain", &previews.mountain},
+            {"river", &previews.river},
+            {"lake", &previews.lake},
+        }};
+    for (const auto& [name, preview] : outputs) {
+        const auto path = output_directory / (std::string(name) + ".png");
+        write_preview_png(path, *preview);
+        ws::core::info("rgba_terrain: wrote diagnostic '{}'", path.string());
+    }
+}
+
+void write_climate_diagnostics(
+    const ws::rgba_terrain_core::WorldClimateDiagnosticImages& previews,
+    const std::filesystem::path& source_png) {
+    const auto directory = source_png.parent_path();
+    const std::string stem = source_png.stem().string();
+    const std::array<std::pair<const char*, const ws::rgba_terrain_core::RgbaImage*>, 6>
+        outputs{{
+            {"temperature", &previews.temperature},
+            {"humidity", &previews.humidity},
+            {"precipitation", &previews.precipitation},
+            {"orographic_lift", &previews.orographic_lift},
+            {"rain_shadow", &previews.rain_shadow},
+            {"ocean_moisture", &previews.ocean_moisture},
+        }};
+    for (const auto& [name, preview] : outputs) {
+        const auto path = directory / (stem + "_" + name + ".png");
+        write_preview_png(path, *preview);
+        ws::core::info("rgba_terrain: wrote climate diagnostic '{}'", path.string());
+    }
+}
+
+void print_histogram(
+    const char* label, const std::array<std::uint64_t, 16>& histogram) {
+    std::string summary = std::string(label) + ":";
+    for (std::size_t i = 0; i < histogram.size(); ++i) {
+        summary += std::format(" {}={}", i, histogram[i]);
+    }
+    ws::core::info("rgba_terrain: {}", summary);
+}
+
+void print_components(
+    const char* label,
+    const ws::rgba_terrain_core::ConnectedRegionStats& regions) {
+    ws::core::info(
+        "rgba_terrain: {} components={} largest={} isolated={}",
+        label, regions.component_count, regions.largest_component,
+        regions.isolated_pixels);
+}
+
 void print_distribution(const char* label,
                          const std::array<std::uint64_t, 256>& counts) {
     std::vector<std::pair<std::uint64_t, unsigned>> sorted;
@@ -155,8 +234,19 @@ int inspect_command(int argc, char** argv) {
                    analysis.distinct_heights, analysis.mean_height, analysis.standard_deviation);
     ws::core::info("rgba_terrain: horizontal neighbor step: mean={:.3f} max={} across {} edges",
                    analysis.mean_horizontal_step, analysis.max_horizontal_step, analysis.horizontal_edges);
-    ws::core::info("rgba_terrain: vertical neighbor step: mean={:.3f} max={} across {} edges",
-                   analysis.mean_vertical_step, analysis.max_vertical_step, analysis.vertical_edges);
+    ws::core::info("rgba_terrain: vertical neighbor step: mean={:.3f} max={} at ({},{}) across {} edges",
+                   analysis.mean_vertical_step, analysis.max_vertical_step,
+                   analysis.max_vertical_step_x, analysis.max_vertical_step_z,
+                   analysis.vertical_edges);
+    ws::core::info("rgba_terrain: horizontal max step location=({}, {})",
+                   analysis.max_horizontal_step_x, analysis.max_horizontal_step_z);
+    ws::core::info("rgba_terrain: slope degrees mean={:.3f} p50={:.3f} p90={:.3f} p95={:.3f} p99={:.3f} max={:.3f} at ({},{})",
+                   analysis.mean_slope_degrees, analysis.slope_p50_degrees,
+                   analysis.slope_p90_degrees, analysis.slope_p95_degrees,
+                   analysis.slope_p99_degrees, analysis.max_slope_degrees,
+                   analysis.max_slope_x, analysis.max_slope_z);
+    print_histogram("elevation histogram (16 bins)", analysis.elevation_histogram);
+    print_histogram("slope histogram (16 bins, 0..90 degrees)", analysis.slope_histogram);
     print_distribution("surface materials", analysis.materials);
     print_distribution("biomes", analysis.biomes);
     ws::core::info("rgba_terrain: feature coverage water={} ({:.3f}%)",
@@ -169,6 +259,30 @@ int inspect_command(int argc, char** argv) {
                    analysis.river_columns, percentage(analysis.river_columns));
     ws::core::info("rgba_terrain: feature coverage lake={} ({:.3f}%)",
                    analysis.lake_columns, percentage(analysis.lake_columns));
+    print_components("water", analysis.water_regions);
+    print_components("forest", analysis.forest_regions);
+    print_components("mountain", analysis.mountain_regions);
+    print_components("river", analysis.river_regions);
+    print_components("lake", analysis.lake_regions);
+    for (std::size_t biome = 0; biome < analysis.biome_regions.size(); ++biome) {
+        print_components(
+            ("biome " + std::to_string(biome)).c_str(),
+            analysis.biome_regions[biome]);
+    }
+    return 0;
+}
+
+int diagnose_command(int argc, char** argv) {
+    if (argc != 5) {
+        ws::core::warn("rgba_terrain: usage: rgba_terrain_poc diagnose <input.png> <input.rgba-terrain> <output-directory>");
+        return 2;
+    }
+    const auto metadata = ws::rgba_terrain_core::load_metadata(argv[3]);
+    const auto image = ws::rgba_terrain_core::load_rgba_image(argv[2]);
+    const std::filesystem::path output_directory(argv[4]);
+    write_map_diagnostics(image, metadata, output_directory);
+    ws::core::info("rgba_terrain: wrote nine independent map diagnostic images to '{}'",
+                   output_directory.string());
     return 0;
 }
 
@@ -285,7 +399,9 @@ int generate_world_command(int argc, char** argv) {
     plan.validate();
 
     const ws::rgba_terrain_core::WorldSampler sampler(std::move(plan));
-    const auto image = sampler.generate_rgba_region(0, 0, width, depth, settings);
+    ws::rgba_terrain_core::WorldClimateDiagnosticImages climate_diagnostics;
+    const auto image = sampler.generate_rgba_region(
+        0, 0, width, depth, settings, &climate_diagnostics);
     const auto bytes = flatten_rgba(image);
     const auto written = ws::image::write_rgba8_png_file(
         argv[5], checked_u32(width, "width"), checked_u32(depth, "depth"), bytes);
@@ -315,6 +431,11 @@ int generate_world_command(int argc, char** argv) {
         return 1;
     }
     print_map_report(decoded_image, volume);
+    const auto diagnostics_directory =
+        std::filesystem::path(argv[5]).parent_path() /
+        (std::filesystem::path(argv[5]).stem().string() + "_diagnostics");
+    write_map_diagnostics(decoded_image, decoded_metadata, diagnostics_directory);
+    write_climate_diagnostics(climate_diagnostics, std::filesystem::path(argv[5]));
     ws::core::info("rgba_terrain: generated with WorldSampler + hydrology");
     ws::core::info("rgba_terrain: wrote data PNG '{}'", argv[5]);
     ws::core::info("rgba_terrain: wrote metadata '{}'", argv[6]);
@@ -415,6 +536,9 @@ int main(int argc, char** argv) {
         if (argc >= 2 && std::string(argv[1]) == "inspect") {
             return inspect_command(argc, argv);
         }
+        if (argc >= 2 && std::string(argv[1]) == "diagnose") {
+            return diagnose_command(argc, argv);
+        }
         if (argc >= 2 && std::string(argv[1]) == "validate") {
             return validate_command(argc, argv);
         }
@@ -423,6 +547,7 @@ int main(int argc, char** argv) {
         ws::core::info("rgba_terrain:          generate-world <width> <depth> <seed> <out.png> <out.meta> <out.voxels>");
         ws::core::info("rgba_terrain:          convert <input.png> <input.meta> <out.voxels>");
         ws::core::info("rgba_terrain:          inspect <input.png> <input.meta>");
+        ws::core::info("rgba_terrain:          diagnose <input.png> <input.meta> <output-directory>");
         ws::core::info("rgba_terrain:          validate <input.png> <input.meta> <input.voxels>");
         return 2;
     } catch (const std::exception& exception) {
