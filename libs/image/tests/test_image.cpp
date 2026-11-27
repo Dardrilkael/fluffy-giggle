@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <system_error>
+#include <vector>
 
 #include <ws/image/image.hpp>
 
