@@ -101,10 +101,12 @@ inline constexpr int kChunkSizeZ = 16;
 inline constexpr int kChunkSizeY = 64;
 inline constexpr int kBlocksPerChunk =
     kChunkSizeX * kChunkSizeZ * kChunkSizeY;
-// The fixed world: 8x8 chunks = 128 x 128 blocks, 64 tall. Every mesh
-// exists up front - no streaming in this first build.
-inline constexpr int kWorldChunksX = 8;
-inline constexpr int kWorldChunksZ = 8;
+// The fixed world: 16x16 chunks = 256 x 256 blocks, 64 tall. This
+// matches the RGBA terrain data-map's native 256x256 spatial resolution;
+// no resampling or loss of source columns is needed. Every mesh exists up
+// front - no streaming in this first build.
+inline constexpr int kWorldChunksX = 16;
+inline constexpr int kWorldChunksZ = 16;
 inline constexpr int kWorldSizeX = kWorldChunksX * kChunkSizeX;
 inline constexpr int kWorldSizeZ = kWorldChunksZ * kChunkSizeZ;
 
