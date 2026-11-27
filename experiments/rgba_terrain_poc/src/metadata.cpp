@@ -1,5 +1,6 @@
 #include "rgba_terrain/metadata.hpp"
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -56,11 +57,39 @@ TerrainMetadata load_metadata(const std::string& path) {
                           parse_role(required("channel.b")),parse_role(required("channel.a"))};
   number("min_height",result.settings.min_height);
   number("max_height",result.settings.max_height);
+  auto optional_u32=[&](const std::string& key, std::uint32_t& target) {
+    const auto it=values.find(key); if(it==values.end()) return;
+    std::size_t used=0; unsigned long long parsed=0;
+    try { parsed=std::stoull(it->second,&used); }
+    catch(...) { throw std::runtime_error("invalid integer for "+key); }
+    if(used!=it->second.size() || parsed>std::numeric_limits<std::uint32_t>::max())
+      throw std::runtime_error("invalid integer for "+key);
+    target=static_cast<std::uint32_t>(parsed);
+  };
+  auto optional_u8=[&](const std::string& key, std::uint8_t& target) {
+    std::uint32_t parsed=target; optional_u32(key,parsed);
+    if(parsed>255) throw std::runtime_error(key+" must be in [0,255]");
+    target=static_cast<std::uint8_t>(parsed);
+  };
+  optional_u32("volume_height",result.settings.volume_height);
+  optional_u32("sea_level",result.settings.sea_level);
+  optional_u32("subsurface_depth",result.settings.subsurface_depth);
+  optional_u8("water_threshold",result.settings.water_threshold);
+  optional_u8("default_material",result.settings.default_material);
+  optional_u8("subsurface_material",result.settings.subsurface_material);
+  optional_u8("deep_material",result.settings.deep_material);
+  optional_u8("water_material",result.settings.water_material);
+  optional_u8("default_biome",result.settings.default_biome);
+  optional_u8("solid_density",result.settings.solid_density);
   result.layout.validate();
   for(const auto& [key,value]:values) {
     (void)value;
     if(key!="channel.r" && key!="channel.g" && key!="channel.b" && key!="channel.a" &&
-       key!="min_height" && key!="max_height")
+       key!="min_height" && key!="max_height" && key!="volume_height" &&
+       key!="sea_level" && key!="subsurface_depth" && key!="water_threshold" &&
+       key!="default_material" && key!="subsurface_material" &&
+       key!="deep_material" && key!="water_material" && key!="default_biome" &&
+       key!="solid_density")
       throw std::runtime_error("unknown metadata key: "+key);
   }
   return result;
