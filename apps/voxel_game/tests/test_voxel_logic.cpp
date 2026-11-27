@@ -1559,6 +1559,12 @@ TEST_CASE("meshing: cut-out blocks preserve opaque neighbor faces") {
   REQUIRE(world.set_block(x + 1, y, z, voxel::Block::leaves));
   CHECK(face_count(3) == 6u);
   CHECK(face_count(12) == 5u);
+
+  // Ice shares the glass tile and therefore follows the same cut-out rule.
+  (void)world.set_block(x + 1, y, z, voxel::Block::air);
+  REQUIRE(world.set_block(x + 1, y, z, voxel::Block::ice));
+  CHECK(face_count(3) == 6u);
+  CHECK(face_count(11) == 5u);
 }
 
 TEST_CASE("worldgen: tree crowns extend across chunk boundaries") {
