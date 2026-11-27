@@ -67,8 +67,8 @@ TEST_CASE("world regions softly influence temperature, elevation and ecosystems"
     region.rotation_radians = 0.35;
     region.elevation_bias = 0.10;
     region.temperature_bias_c = 8.0;
-    region.humidity_bias = 0.35;
-    region.ecosystem_id = 1;
+    region.humidity_bias = -0.10;
+    region.ecosystem_id = 3;
     region.ecosystem_affinity = 1.0;
     regional_plan.regions.push_back(region);
 
@@ -78,8 +78,8 @@ TEST_CASE("world regions softly influence temperature, elevation and ecosystems"
     const auto after = regional.sample(100000, 100000);
     CHECK(after.normalized_elevation > before.normalized_elevation);
     CHECK(after.temperature_c > before.temperature_c);
-    CHECK(after.humidity >= before.humidity);
-    CHECK(after.ecosystem_id == 1);
+    CHECK(after.humidity < before.humidity);
+    CHECK(after.ecosystem_id == 3);
 }
 
 TEST_CASE("RGBA regions stitch exactly when generated as separate chunks") {
