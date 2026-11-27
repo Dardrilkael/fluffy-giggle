@@ -1,5 +1,6 @@
 #include "rgba_terrain/rgba_terrain.hpp"
 #include "rgba_terrain/metadata.hpp"
+#include "rgba_terrain/map_analysis.hpp"
 
 #include <cassert>
 #include <filesystem>
@@ -172,5 +173,18 @@ int main() {
     const auto parsed_columns = generate_columns(
         generated, parsed_metadata.layout, parsed_metadata.settings);
     assert(parsed_columns.columns.size() == generated.pixels.size());
+
+    const auto analysis = analyze_map(
+        generated, packed_layout, generated_settings);
+    assert(analysis.width == 64 && analysis.depth == 64);
+    assert(analysis.min_height <= analysis.max_height);
+    assert(analysis.distinct_heights > 1);
+    assert(analysis.standard_deviation > 0.0);
+    assert(analysis.horizontal_edges == 64u * 63u);
+    assert(analysis.vertical_edges == 64u * 63u);
+    assert(analysis.water_columns > 0);
+    assert(analysis.river_columns > 0);
+    assert(analysis.materials[1] + analysis.materials[4] +
+               analysis.materials[5] == 64u * 64u);
     return 0;
 }
