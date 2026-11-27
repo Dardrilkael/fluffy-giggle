@@ -23,7 +23,8 @@ TEST_CASE("audio reflections: an impulse yields correctly delayed echoes") {
 
 TEST_CASE("audio reflections: distance conversion is round-trip propagation") {
   const auto tap = ws::audio::reflection_from_distance(10.0f, 0.75f, 44100);
-  CHECK(tap.delay_frames == 2572);
+  // 2 * 10 m / 343 m/s * 44100 Hz = 2571.14 frames, rounded to nearest.
+  CHECK(tap.delay_frames == 2571);
   CHECK(tap.gain == doctest::Approx(0.75f));
 }
 
