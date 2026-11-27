@@ -44,6 +44,16 @@ remain recorded for later reconsideration.
 - [ ] Add a versioned world-plan serializer and AI planner adapter.
 - [ ] Extend chunk reconstruction and game streaming to consume generated regions directly.
 
+## 7. Coupled environmental simulation — FOUNDATION
+- [x] Derive temperature from latitude and elevation using a configurable lapse rate.
+- [x] Transport moisture deterministically from upwind ocean fetch.
+- [x] Couple windward terrain rise to orographic lift, cooling and precipitation.
+- [x] Carry leeward ridge exposure into a rain-shadow moisture reduction.
+- [x] Feed precipitation back into remaining atmospheric moisture availability.
+- [x] Keep all atmospheric fetches in absolute coordinates so independent chunks agree.
+- [ ] Add explicit hydrology, drainage networks, soil-water storage and seasonal climate.
+- [ ] Replace the compact single prevailing-wind model with authored regional/circulation fields.
+
 ## Design constraints
 - Deterministic for fixed inputs.
 - Preserve source spatial ordering and raw channel values.
