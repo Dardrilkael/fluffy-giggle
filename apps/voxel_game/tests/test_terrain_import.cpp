@@ -129,3 +129,16 @@ TEST_CASE("terrain import: rejects partial density because game blocks are binar
       voxel::TerrainImportError::unsupported_density));
   CHECK(world.block_at(12, 7, 14) == before);
 }
+
+TEST_CASE("terrain import: rejects biome IDs outside the game vocabulary") {
+  auto volume = make_empty_game_volume();
+  for (std::size_t y = 0; y < volume.height; ++y) {
+    volume.at(2, y, 3).biome_id = 250;
+  }
+  voxel::World world;
+  world.generate(654u);
+  const auto imported = voxel::import_terrain_volume(world, volume);
+  CHECK_FALSE(imported.has_value());
+  CHECK(imported.error().code == static_cast<std::int32_t>(
+      voxel::TerrainImportError::unsupported_biome_id));
+}
