@@ -19,6 +19,9 @@ unset(_want)
 if(ws_want_core)
   add_subdirectory(core)
 endif()
+if(ws_want_image)
+  add_subdirectory(image)
+endif()
 if(ws_want_math)
   # ws::math: dense Matrix<T> + LU and ws-owned fixed-size vecmath; the spice
   # arc grows the sparse symbolic-reuse LU facade here (its MNA solver's
