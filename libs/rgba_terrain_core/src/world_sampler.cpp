@@ -219,12 +219,23 @@ struct HydrologyField {
     double accumulation = 0.0;
     double river_strength = 0.0;
     double lake_depth_m = 0.0;
+    double lake_surface_elevation = 0.0;
     bool river = false;
     bool lake = false;
 };
 
 constexpr std::array<int, 8> drainage_dx{0, 1, 1, 1, 0, -1, -1, -1};
 constexpr std::array<int, 8> drainage_dz{-1, -1, 0, 1, 1, 1, 0, -1};
+
+// Each query builds the same bounded, absolute-coordinate drainage window.
+// Routing is evaluated once per cell, then runoff is accumulated downstream
+// in descending elevation order. No world-sized or chunk-local state exists.
+constexpr int watershed_radius = 5;
+constexpr int watershed_width = watershed_radius * 2 + 1;
+constexpr int watershed_cell_count = watershed_width * watershed_width;
+constexpr int elevation_radius = watershed_radius + 1;
+constexpr int elevation_width = elevation_radius * 2 + 1;
+constexpr int elevation_cell_count = elevation_width * elevation_width;
 
 double terrain_at_grid(const WorldPlan& plan, std::int64_t gx,
                        std::int64_t gz) {
@@ -238,112 +249,265 @@ double terrain_at_grid(const WorldPlan& plan, std::int64_t gx,
     return evaluate_terrain(plan, x, z, bias).normalized_elevation;
 }
 
-std::pair<DrainageDirection, double> route_grid_cell(
-    const WorldPlan& plan, std::int64_t gx, std::int64_t gz,
-    double elevation) {
-    double best_drop = 0.0;
-    DrainageDirection direction = DrainageDirection::Sink;
-    for (std::size_t i = 0; i < drainage_dx.size(); ++i) {
-        const double neighbor = terrain_at_grid(
-            plan, gx + drainage_dx[i], gz + drainage_dz[i]);
-        const double distance = (i % 2 == 1) ? 1.41421356237 : 1.0;
-        const double drop = (elevation - neighbor) / distance;
-        if (drop > best_drop) {
-            best_drop = drop;
-            direction = static_cast<DrainageDirection>(i);
-        }
-    }
-    return {direction, best_drop};
-}
-
-// A bounded, coordinate-stable watershed estimate. Nearby source cells route
-// downhill on the same absolute D8 grid. A source contributes only when its
-// deterministic path reaches the queried routing cell within the search
-// budget. This avoids a world-sized accumulation raster and chunk-order state.
 HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
                                   double normalized_elevation,
                                   double precipitation) {
     HydrologyField result;
     const double scale = plan.hydrology.routing_cell_scale;
-    const auto gx = static_cast<std::int64_t>(std::floor(x / scale));
-    const auto gz = static_cast<std::int64_t>(std::floor(z / scale));
-    const double cell_elevation = terrain_at_grid(plan, gx, gz);
-    const auto [direction, drop] =
-        route_grid_cell(plan, gx, gz, cell_elevation);
-    result.direction = direction;
+    const double grid_x = std::floor(x / scale);
+    const double grid_z = std::floor(z / scale);
 
-    if (normalized_elevation <= plan.sea_level_fraction) {
+    // Keep room for the fixed window's coordinate offsets before converting
+    // floating-point grid coordinates to signed integers.
+    constexpr double offset = static_cast<double>(elevation_radius + 1);
+    const double min_grid = static_cast<double>(
+        std::numeric_limits<std::int64_t>::min()) + offset;
+    const double max_grid = static_cast<double>(
+        std::numeric_limits<std::int64_t>::max()) - offset;
+    if (!std::isfinite(grid_x) || !std::isfinite(grid_z) ||
+        grid_x < min_grid || grid_x > max_grid ||
+        grid_z < min_grid || grid_z > max_grid) {
         return result;
     }
 
-    // The source itself contributes runoff. Precipitation weights contributing
-    // cells, so dry headwaters contribute less than wet catchments.
-    result.accumulation = 0.35 + precipitation * 0.65;
-    constexpr int source_radius = 1;
-    constexpr int max_steps = 8;
-    for (int oz = -source_radius; oz <= source_radius; ++oz) {
-        for (int ox = -source_radius; ox <= source_radius; ++ox) {
-            if (ox == 0 && oz == 0) continue;
-            std::int64_t sx = gx + ox;
-            std::int64_t sz = gz + oz;
-            bool reaches_target = false;
-            double source_elevation = terrain_at_grid(plan, sx, sz);
-            const double source_runoff = clamp01(
-                plan.climate.base_humidity * 0.45 + 0.25 +
-                0.30 * (0.5 + 0.5 * fbm(
-                    (static_cast<double>(sx) + 0.5) * scale /
-                        (plan.scales.province_scale * 0.82),
-                    (static_cast<double>(sz) + 0.5) * scale /
-                        (plan.scales.province_scale * 0.82),
-                    plan.seed ^ 0x68E31DA4C2B2AE35ull, 2)));
-            for (int step = 0; step < max_steps; ++step) {
-                const auto [next_direction, next_drop] =
-                    route_grid_cell(plan, sx, sz, source_elevation);
-                if (next_direction == DrainageDirection::Sink ||
-                    next_drop <= 0.0) break;
-                const auto index = static_cast<std::size_t>(next_direction);
-                sx += drainage_dx[index];
-                sz += drainage_dz[index];
-                if (sx == gx && sz == gz) {
-                    reaches_target = true;
-                    break;
-                }
-                source_elevation = terrain_at_grid(plan, sx, sz);
-                // A path that descends below the target cannot subsequently
-                // flow uphill into it under this D8 routing rule.
-                if (source_elevation < cell_elevation - 1.0e-9) break;
-            }
-            if (reaches_target) {
-                result.accumulation += source_runoff;
-            }
+    const auto gx = static_cast<std::int64_t>(grid_x);
+    const auto gz = static_cast<std::int64_t>(grid_z);
+    const auto elevation_index = [](int dx, int dz) {
+        return static_cast<std::size_t>(
+            (dz + elevation_radius) * elevation_width +
+            (dx + elevation_radius));
+    };
+    const auto cell_index = [](int column, int row) {
+        return static_cast<std::size_t>(row * watershed_width + column);
+    };
+
+    // The one-cell halo supplies all D8 neighbors for the routing window.
+    std::array<double, elevation_cell_count> elevations{};
+    for (int dz = -elevation_radius; dz <= elevation_radius; ++dz) {
+        for (int dx = -elevation_radius; dx <= elevation_radius; ++dx) {
+            elevations[elevation_index(dx, dz)] =
+                terrain_at_grid(plan, gx + dx, gz + dz);
         }
     }
 
-    // Approximate closed-basin depth from the local spill rim. This is a
-    // bounded depression test; full priority-flood basin filling is a later
-    // refinement when a cached regional drainage graph is introduced.
-    double lowest_rim = std::numeric_limits<double>::infinity();
-    for (std::size_t i = 0; i < drainage_dx.size(); ++i) {
-        lowest_rim = std::min(lowest_rim, terrain_at_grid(
-            plan, gx + drainage_dx[i] * 2,
-            gz + drainage_dz[i] * 2));
+    std::array<double, watershed_cell_count> cell_elevation{};
+    std::array<double, watershed_cell_count> cell_drop{};
+    std::array<double, watershed_cell_count> accumulation{};
+    std::array<DrainageDirection, watershed_cell_count> directions{};
+    std::array<std::size_t, watershed_cell_count> order{};
+
+    const double province_scale = plan.scales.province_scale;
+    for (int row = 0; row < watershed_width; ++row) {
+        for (int column = 0; column < watershed_width; ++column) {
+            const int dx = column - watershed_radius;
+            const int dz = row - watershed_radius;
+            const std::size_t index = cell_index(column, row);
+            const double elevation = elevations[elevation_index(dx, dz)];
+            cell_elevation[index] = elevation;
+
+            double best_drop = 0.0;
+            DrainageDirection best_direction = DrainageDirection::Sink;
+            for (std::size_t direction = 0;
+                 direction < drainage_dx.size(); ++direction) {
+                const double neighbor = elevations[elevation_index(
+                    dx + drainage_dx[direction],
+                    dz + drainage_dz[direction])];
+                const double distance = (direction % 2 == 1)
+                    ? 1.41421356237 : 1.0;
+                const double drop = (elevation - neighbor) / distance;
+                if (drop > best_drop) {
+                    best_drop = drop;
+                    best_direction = static_cast<DrainageDirection>(direction);
+                }
+            }
+            directions[index] = best_direction;
+            cell_drop[index] = best_drop;
+
+            const std::int64_t source_x = gx + dx;
+            const std::int64_t source_z = gz + dz;
+            const double world_x = (static_cast<double>(source_x) + 0.5) * scale;
+            const double world_z = (static_cast<double>(source_z) + 0.5) * scale;
+            const double moisture_noise = fbm(
+                world_x / (province_scale * 0.82),
+                world_z / (province_scale * 0.82),
+                plan.seed ^ 0x68E31DA4C2B2AE35ull, 2);
+            const double estimated_runoff = clamp01(
+                plan.climate.base_humidity * 0.45 + 0.25 +
+                0.30 * (0.5 + 0.5 * moisture_noise));
+            accumulation[index] =
+                (column == watershed_radius && row == watershed_radius)
+                    ? 0.35 + precipitation * 0.65
+                    : estimated_runoff;
+            order[index] = index;
+        }
     }
-    const double depression_fraction =
-        std::max(0.0, lowest_rim - cell_elevation);
-    result.lake_depth_m = depression_fraction *
-                          plan.climate.maximum_elevation_m;
-    const bool local_sink = direction == DrainageDirection::Sink ||
-                            drop < 1.0e-7;
-    result.lake = local_sink &&
-        result.lake_depth_m >= plan.hydrology.lake_minimum_depth_m &&
-        result.accumulation >= plan.hydrology.lake_minimum_accumulation &&
-        precipitation >= plan.hydrology.lake_minimum_precipitation;
+
+    // Strictly downhill D8 edges form a directed acyclic graph. Propagating
+    // from high cells to low cells produces local flow accumulation without
+    // repeatedly tracing the same paths from every source.
+    std::sort(order.begin(), order.end(),
+        [&](std::size_t lhs, std::size_t rhs) {
+            if (cell_elevation[lhs] != cell_elevation[rhs]) {
+                return cell_elevation[lhs] > cell_elevation[rhs];
+            }
+            return lhs < rhs;
+        });
+
+    for (const std::size_t index : order) {
+        const auto direction = directions[index];
+        if (direction == DrainageDirection::Sink) {
+            continue;
+        }
+        const int column = static_cast<int>(index % watershed_width);
+        const int row = static_cast<int>(index / watershed_width);
+        const auto direction_index = static_cast<std::size_t>(direction);
+        const int next_column = column + drainage_dx[direction_index];
+        const int next_row = row + drainage_dz[direction_index];
+        if (next_column < 0 || next_column >= watershed_width ||
+            next_row < 0 || next_row >= watershed_width) {
+            continue;
+        }
+        accumulation[cell_index(next_column, next_row)] += accumulation[index];
+    }
+
+    constexpr std::size_t target_index =
+        static_cast<std::size_t>(watershed_radius * watershed_width +
+                                 watershed_radius);
+    result.direction = directions[target_index];
+    result.accumulation = accumulation[target_index];
 
     const double threshold = plan.hydrology.river_accumulation_threshold;
     result.river_strength = clamp01(
         (result.accumulation - threshold) / (threshold * 2.5));
-    result.river = !result.lake && result.accumulation >= threshold &&
-                   !local_sink;
+
+    // Follow the target's globally deterministic D8 edges inside this local
+    // window to find its terminal sink. If the route exits the window, lake
+    // classification is deferred rather than inventing a local basin.
+    std::size_t sink_index = target_index;
+    bool found_sink = false;
+    for (int step = 0; step < watershed_cell_count; ++step) {
+        const auto direction = directions[sink_index];
+        if (direction == DrainageDirection::Sink) {
+            found_sink = true;
+            break;
+        }
+        const int column = static_cast<int>(sink_index % watershed_width);
+        const int row = static_cast<int>(sink_index / watershed_width);
+        const auto direction_index = static_cast<std::size_t>(direction);
+        const int next_column = column + drainage_dx[direction_index];
+        const int next_row = row + drainage_dz[direction_index];
+        if (next_column < 0 || next_column >= watershed_width ||
+            next_row < 0 || next_row >= watershed_width) {
+            break;
+        }
+        sink_index = cell_index(next_column, next_row);
+    }
+
+    bool sink_is_lake = false;
+    double spill_elevation = 0.0;
+    if (found_sink) {
+        // Minimax flood from the sink to the window boundary finds the lowest
+        // local escape level: the minimum possible maximum elevation along
+        // any 8-connected path from the sink to the edge.
+        std::array<double, watershed_cell_count> spill_cost{};
+        std::array<bool, watershed_cell_count> visited{};
+        spill_cost.fill(std::numeric_limits<double>::infinity());
+        spill_cost[sink_index] = cell_elevation[sink_index];
+
+        bool found_spill = false;
+        for (int iteration = 0; iteration < watershed_cell_count; ++iteration) {
+            std::size_t current = watershed_cell_count;
+            double current_cost = std::numeric_limits<double>::infinity();
+            for (std::size_t candidate = 0;
+                 candidate < watershed_cell_count; ++candidate) {
+                if (!visited[candidate] &&
+                    spill_cost[candidate] < current_cost) {
+                    current = candidate;
+                    current_cost = spill_cost[candidate];
+                }
+            }
+            if (current == watershed_cell_count) {
+                break;
+            }
+            visited[current] = true;
+
+            const int column = static_cast<int>(current % watershed_width);
+            const int row = static_cast<int>(current / watershed_width);
+            if (column == 0 || row == 0 ||
+                column == watershed_width - 1 ||
+                row == watershed_width - 1) {
+                spill_elevation = current_cost;
+                found_spill = true;
+                break;
+            }
+
+            for (std::size_t direction = 0;
+                 direction < drainage_dx.size(); ++direction) {
+                const int next_column = column + drainage_dx[direction];
+                const int next_row = row + drainage_dz[direction];
+                if (next_column < 0 || next_column >= watershed_width ||
+                    next_row < 0 || next_row >= watershed_width) {
+                    continue;
+                }
+                const std::size_t next = cell_index(next_column, next_row);
+                if (visited[next]) {
+                    continue;
+                }
+                const double candidate_cost = std::max(
+                    current_cost, cell_elevation[next]);
+                if (candidate_cost < spill_cost[next]) {
+                    spill_cost[next] = candidate_cost;
+                }
+            }
+        }
+
+        const double depression_fraction = found_spill
+            ? std::max(0.0, spill_elevation - cell_elevation[sink_index])
+            : 0.0;
+        result.lake_depth_m = depression_fraction *
+                              plan.climate.maximum_elevation_m;
+
+        const int sink_column =
+            static_cast<int>(sink_index % watershed_width);
+        const int sink_row =
+            static_cast<int>(sink_index / watershed_width);
+        const double sink_world_x =
+            (static_cast<double>(gx + sink_column - watershed_radius) + 0.5) *
+            scale;
+        const double sink_world_z =
+            (static_cast<double>(gz + sink_row - watershed_radius) + 0.5) *
+            scale;
+        const double sink_moisture_noise = fbm(
+            sink_world_x / (province_scale * 0.82),
+            sink_world_z / (province_scale * 0.82),
+            plan.seed ^ 0x68E31DA4C2B2AE35ull, 2);
+        const double sink_precipitation = clamp01(
+            plan.climate.base_humidity * 0.70 + 0.10 +
+            0.20 * (0.5 + 0.5 * sink_moisture_noise));
+
+        sink_is_lake = found_spill &&
+            result.lake_depth_m >= plan.hydrology.lake_minimum_depth_m &&
+            accumulation[sink_index] >=
+                plan.hydrology.lake_minimum_accumulation &&
+            sink_precipitation >=
+                plan.hydrology.lake_minimum_precipitation;
+    }
+
+    const bool target_inside_basin = sink_is_lake &&
+        cell_elevation[target_index] <= spill_elevation + 1.0e-9 &&
+        normalized_elevation <= spill_elevation + 1.0e-9;
+    result.lake = target_inside_basin;
+    if (result.lake) {
+        // The current RGBA format stores one elevation value per column. Use
+        // the shared spill level for all basin columns so the reconstructed
+        // lake has a flat surface instead of water following the basin floor.
+        result.lake_surface_elevation = spill_elevation;
+    }
+
+    const bool local_sink =
+        result.direction == DrainageDirection::Sink || cell_drop[target_index] < 1.0e-7;
+    result.river = !result.lake && !local_sink &&
+                   result.accumulation >= threshold;
     return result;
 }
 
@@ -534,6 +698,7 @@ WorldSample WorldSampler::sample(std::int64_t world_x,
     result.watershed_accumulation = hydrology.accumulation;
     result.river_strength = hydrology.river_strength;
     result.lake_depth_m = hydrology.lake_depth_m;
+    result.lake_surface_elevation = hydrology.lake_surface_elevation;
     result.is_river = hydrology.river;
     result.is_lake = hydrology.lake;
     result.habitat_variation = clamp01(
@@ -727,14 +892,17 @@ RgbaImage WorldSampler::generate_rgba_region(
                 climate_diagnostics->ocean_moisture.pixels[index] =
                     diagnostic_pixel(sample_at.ocean_moisture);
             }
+            const double surface_elevation = sample_at.is_lake
+                ? sample_at.lake_surface_elevation
+                : sample_at.normalized_elevation;
             const double channel_cut = sample_at.is_river
                 ? plan_.hydrology.river_channel_depth_fraction *
                       sample_at.river_strength
                 : 0.0;
             const auto packed_height = static_cast<std::uint16_t>(
                 std::clamp(std::lround(
-                    std::max(0.0, sample_at.normalized_elevation -
-                                      channel_cut) * 65535.0), 0l, 65535l));
+                    std::max(0.0, surface_elevation - channel_cut) *
+                    65535.0), 0l, 65535l));
 
             std::uint8_t flags = static_cast<std::uint8_t>(
                 sample_at.biome_id & 0x07u);

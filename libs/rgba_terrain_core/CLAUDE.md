@@ -22,7 +22,7 @@ Reusable CPU-side terrain data-map and voxel reconstruction library.
 - World feature scales use absolute world units, independent of total world dimensions.
 - Chunk/region output samples global coordinates; independently generated neighboring regions must stitch exactly.
 - Diagnostic previews are independent disposable RGBA8 images; never use them as terrain inputs. Climate preview layers are emitted from the same deterministic samples and do not change the authoritative RGBA data map.
-- Hydrology routing uses an absolute world-coordinate D8 grid and a bounded local watershed estimate; never cache chunk-local flow state or make output depend on generation order.
+- Hydrology uses an absolute world-coordinate D8 grid, fixed-window flow accumulation and local spill-level basin detection; never cache chunk-local flow state or make output depend on generation order.
 - Alpha feature bits 0x08/0x10/0x20/0x40 represent forest/mountain/river/lake; 0x80 marks water presence. Inland river/lake water is reconstructed immediately above its encoded channel/basin bed.
 - Avoid per-voxel heap allocations.
 

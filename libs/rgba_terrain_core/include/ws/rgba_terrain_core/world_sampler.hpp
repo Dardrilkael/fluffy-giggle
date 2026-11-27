@@ -52,6 +52,8 @@ struct WorldSample {
     double watershed_accumulation = 0.0;
     double river_strength = 0.0;
     double lake_depth_m = 0.0;
+    // Shared normalized spill elevation for cells classified inside a lake basin.
+    double lake_surface_elevation = 0.0;
 
     std::uint8_t ecosystem_id = 0;
     std::uint8_t biome_id = 0;
