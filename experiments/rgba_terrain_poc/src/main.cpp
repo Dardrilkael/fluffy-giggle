@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
+#include <utility>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
