@@ -1,7 +1,8 @@
 # ws::image
 
-A small reusable image-decoding library. It wraps the repository's pinned
-stb_image dependency behind workspace-owned types and error reporting.
+A small reusable image I/O library. It wraps the repository's pinned
+stb_image and stb_image_write dependencies behind workspace-owned types and
+error reporting.
 
 Example use:
 
