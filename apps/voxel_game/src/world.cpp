@@ -488,6 +488,12 @@ void World::generate(std::uint32_t seed) {
           const bool has_tree = !desert && !mountains && !river_bank &&
                                 height > kWaterLevel + 1 &&
                                 tree_at(wx, wz, seed, tree_density);
+
+          const Biome biome = mountains ? Biome::mountain
+                              : desert ? Biome::desert
+                              : forest ? Biome::forest
+                                       : Biome::plains;
+          (void)set_column_metadata(wx, wz, biome, 0);
     
     
           for (int y = kWorldFloor; y <= height; ++y) {
