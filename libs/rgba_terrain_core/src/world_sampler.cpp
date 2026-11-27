@@ -441,8 +441,6 @@ double terrain_at_grid(const WorldPlan& plan, std::int64_t gx,
 // when steepest-downhill edges and depression-spill parent edges meet.
 struct DrainageRouting {
     std::vector<double> filled_elevation;
-    std::vector<std::size_t> parent;
-    std::vector<std::size_t> visit_order;
     std::vector<std::size_t> upstream_order;
     std::vector<DrainageDirection> direction;
 };
@@ -461,9 +459,9 @@ DrainageRouting build_drainage_routing(
 
     const std::size_t count = elevation.size();
     routing.filled_elevation.resize(count);
-    routing.parent.assign(count, count);
-    routing.visit_order.assign(count, count);
     routing.direction.assign(count, DrainageDirection::Sink);
+    std::vector<std::size_t> parent(count, count);
+    std::vector<std::size_t> visit_order(count, count);
 
     const auto index = [width](std::size_t x, std::size_t z) {
         return z * width + x;
@@ -495,7 +493,7 @@ DrainageRouting build_drainage_routing(
         }
         visited[i] = true;
         routing.filled_elevation[i] = elevation[i];
-        routing.visit_order[i] = sequence++;
+        visit_order[i] = sequence++;
         frontier.emplace(routing.filled_elevation[i], i);
     }
 
@@ -519,9 +517,9 @@ DrainageRouting build_drainage_routing(
                 continue;
             }
             visited[next] = true;
-            routing.parent[next] = current;
+            parent[next] = current;
             routing.filled_elevation[next] = std::max(elevation[next], level);
-            routing.visit_order[next] = sequence++;
+            visit_order[next] = sequence++;
             frontier.emplace(routing.filled_elevation[next], next);
         }
     }
@@ -556,7 +554,7 @@ DrainageRouting build_drainage_routing(
                     routing.filled_elevation[i] ||
                 (routing.filled_elevation[next] ==
                      routing.filled_elevation[i] &&
-                 routing.visit_order[next] < routing.visit_order[i]);
+                 visit_order[next] < visit_order[i]);
             if (!precedes) {
                 continue;
             }
@@ -571,11 +569,11 @@ DrainageRouting build_drainage_routing(
         }
 
         if (best_direction == DrainageDirection::Sink &&
-            routing.parent[i] != count) {
-            const std::size_t parent = routing.parent[i];
-            const auto dx = static_cast<std::int64_t>(parent % width) -
+            parent[i] != count) {
+            const std::size_t parent_index = parent[i];
+            const auto dx = static_cast<std::int64_t>(parent_index % width) -
                             static_cast<std::int64_t>(x);
-            const auto dz = static_cast<std::int64_t>(parent / width) -
+            const auto dz = static_cast<std::int64_t>(parent_index / width) -
                             static_cast<std::int64_t>(z);
             for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
                 if (drainage_dx[d] == dx && drainage_dz[d] == dz) {
@@ -601,8 +599,8 @@ DrainageRouting build_drainage_routing(
                 return routing.filled_elevation[lhs] >
                        routing.filled_elevation[rhs];
             }
-            if (routing.visit_order[lhs] != routing.visit_order[rhs]) {
-                return routing.visit_order[lhs] > routing.visit_order[rhs];
+            if (visit_order[lhs] != visit_order[rhs]) {
+                return visit_order[lhs] > visit_order[rhs];
             }
             return lhs > rhs;
         });
@@ -612,9 +610,13 @@ DrainageRouting build_drainage_routing(
 std::size_t drainage_downstream_index(
     std::size_t source, DrainageDirection direction,
     std::size_t width, std::size_t height) {
+    if (width == 0 || height == 0 ||
+        width > std::numeric_limits<std::size_t>::max() / height) {
+        return std::numeric_limits<std::size_t>::max();
+    }
     const std::size_t count = width * height;
     const auto d = static_cast<std::uint8_t>(direction);
-    if (d >= drainage_dx.size() || width == 0 || height == 0) {
+    if (source >= count || d >= drainage_dx.size()) {
         return count;
     }
     const auto x = static_cast<std::int64_t>(source % width) +
