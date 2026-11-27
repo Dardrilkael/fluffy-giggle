@@ -49,7 +49,7 @@ Invoke-NativeStep "ctest" @(
     "--test-dir", $BuildDir,
     "-C", $Configuration,
     "--output-on-failure",
-    "-R", "^(image($|\\.)|rgba_terrain_core($|\\.))"
+    "-R", "^(image($|\.)|rgba_terrain_core($|\.))"
 )
 
 $ExecutableName = "rgba_terrain_poc"
