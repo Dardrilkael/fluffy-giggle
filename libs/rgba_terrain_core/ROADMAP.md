@@ -6,19 +6,21 @@ remain recorded for later reconsideration.
 
 ## 1. Terrain continuity — IN PROGRESS
 - [x] Replace abrupt river height clamping with a distance-based channel and gradual banks.
-- [ ] Add quantitative checks for bank gradients and unintended cliffs.
+- [x] Add slope percentiles, slope histograms and extreme-neighbor coordinates for quantitative review.
+- [ ] Add configurable thresholds that distinguish real cliffs from generation or encoding artifacts.
 - [x] Keep river masks, water presence and terrain elevation distinct.
 
-## 2. Expanded spatial inspector — SKIPPED
-- [ ] Add slope percentiles and elevation-difference histograms.
-- [ ] Report coordinates of extreme neighbor differences.
-- [ ] Measure connected regions for rivers, lakes and biome/feature masks.
+## 2. Expanded spatial inspector — IMPLEMENTED
+- [x] Add slope percentiles and elevation/slope histograms.
+- [x] Report coordinates of extreme horizontal/vertical neighbor differences and steepest samples.
+- [x] Measure 8-connected regions for rivers, lakes, water, biomes and feature masks.
 - [ ] Distinguish real cliffs from generation or encoding artifacts.
 
-## 3. Diagnostic map visualizations — SKIPPED
-- [ ] Generate independent previews for elevation, slope, biome, material, water and feature masks.
-- [ ] Keep previews separate from the authoritative RGBA map.
-- [ ] Ensure previews never feed back into source data.
+## 3. Diagnostic map visualizations — IMPLEMENTED
+- [x] Generate independent previews for elevation, slope, biome, material, water and individual feature masks.
+- [x] Generate climate previews for temperature, humidity, precipitation, orographic lift, rain shadow and ocean moisture during sampling.
+- [x] Keep previews separate from the authoritative RGBA map.
+- [x] Ensure previews never feed back into source data.
 
 ## 4. Voxel reconstruction validation — CURRENT
 - [x] Verify PNG dimensions and row-major X/Z coordinate preservation.
