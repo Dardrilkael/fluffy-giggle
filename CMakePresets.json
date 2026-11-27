@@ -72,7 +72,7 @@
       "binaryDir": "${sourceDir}/build/linux",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "WS_BUILD_LIBS": "core;math;plotmath;spice;jobs;settings;net;physics;circsim;ui;schematic;gestures;audio",
+        "WS_BUILD_LIBS": "core;math;plotmath;spice;jobs;settings;net;physics;circsim;ui;schematic;gestures;audio;gameplay;rgba_terrain_core",
         "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-linux"
       }
     },
@@ -134,7 +134,7 @@
         "WS_BUILD_TESTS": "OFF",
         "WS_BUILD_APPS": "ON",
         "FETCHCONTENT_BASE_DIR": "${sourceDir}/build/fc-android-arm64",
-        "WS_BUILD_LIBS": "ui;circsim;jobs;platform;app;settings;audio;net;physics;gestures;schematic;plotmath"
+        "WS_BUILD_LIBS": "ui;circsim;jobs;platform;app;settings;audio;net;physics;gestures;schematic;plotmath;gameplay;rgba_terrain_core"
       }
     },
     {
