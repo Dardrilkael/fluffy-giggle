@@ -1013,20 +1013,6 @@ class VoxelApp final : public ws::ui::App {
     if (entry_preview_loaded_ && terrain_preview_texture_.id != 0) {
       r2d::draw_quad(preview_x, preview_y, preview_size, preview_size,
                      r2d::rgba(255, 255, 255, 255), terrain_preview_texture_);
-      const float labels_x[4] = {preview_x + 6.0f, preview_x + 246.0f,
-                                 preview_x + 6.0f, preview_x + 246.0f};
-      const float labels_y[4] = {preview_y + 6.0f, preview_y + 6.0f,
-                                 preview_y + 246.0f, preview_y + 246.0f};
-      const char* channel_labels[4] = {
-          "R  HEIGHT MSB", "G  HEIGHT LSB",
-          "B  MATERIAL / FLAGS", "A  BIOME ID"};
-      for (int i = 0; i < 4; ++i) {
-        r2d::draw_quad(labels_x[i], labels_y[i], 184.0f, 25.0f,
-                       r2d::rgba(8, 12, 14, 205));
-        (void)r2d::draw_text(labels_x[i] + 7.0f, labels_y[i] + 5.0f,
-                             channel_labels[i], font_,
-                             r2d::rgba(245, 247, 239));
-      }
     } else {
       r2d::draw_rounded_quad(preview_x, preview_y, preview_size,
                              preview_size, 3.0f, r2d::rgba(31, 39, 42, 255));
@@ -1043,6 +1029,12 @@ class VoxelApp final : public ws::ui::App {
     std::snprintf(seed_text, sizeof(seed_text), "%u", world_seed_);
     (void)r2d::draw_text(controls_x + 130.0f, panel.y + 94.0f,
                          seed_text, font_, r2d::rgba(220, 226, 210));
+    (void)r2d::draw_text(controls_x, panel.y + 190.0f,
+                         "R: height MSB    G: height LSB", font_,
+                         r2d::rgba(190, 201, 186));
+    (void)r2d::draw_text(controls_x, panel.y + 208.0f,
+                         "B: material/flags    A: biome ID", font_,
+                         r2d::rgba(190, 201, 186));
     const auto controls = entry_seed_controls(frame);
     for (const auto& control : controls) {
       r2d::draw_rounded_quad(control.x, control.y, control.w, control.h,
