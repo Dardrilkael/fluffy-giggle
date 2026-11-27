@@ -2075,7 +2075,21 @@ RgbaImage WorldSampler::generate_rgba_region(
         initialize_diagnostic_image(
             hydrology_diagnostics->lake_basins, width, depth);
         initialize_diagnostic_image(
+            hydrology_diagnostics->stream_order, width, depth);
+        initialize_diagnostic_image(
+            hydrology_diagnostics->watershed_basins, width, depth);
+        initialize_diagnostic_image(
+            hydrology_diagnostics->river_influence, width, depth);
+        initialize_diagnostic_image(
+            hydrology_diagnostics->mountain_peak_distance, width, depth);
+        initialize_diagnostic_image(
             hydrology_diagnostics->erosion_delta, width, depth);
+        initialize_diagnostic_image(
+            hydrology_diagnostics->hydraulic_erosion_delta, width, depth);
+        initialize_diagnostic_image(
+            hydrology_diagnostics->thermal_erosion_delta, width, depth);
+        initialize_diagnostic_image(
+            hydrology_diagnostics->fluvial_terrain_delta, width, depth);
     }
 
     const double height_span =
@@ -2206,6 +2220,9 @@ RgbaImage WorldSampler::generate_rgba_region(
                 sample_at.drainage_direction = hydro.direction;
                 sample_at.watershed_accumulation = hydro.accumulation;
                 sample_at.river_strength = hydro.river_strength;
+                sample_at.watershed_id = hydro.watershed_id;
+                sample_at.stream_order = hydro.stream_order;
+                sample_at.river_class = hydro.river_class;
                 sample_at.lake_depth_m = hydro.lake_depth_m;
                 sample_at.lake_surface_elevation = hydro.lake_surface_elevation;
                 sample_at.is_river = hydro.river;
@@ -2243,6 +2260,9 @@ RgbaImage WorldSampler::generate_rgba_region(
                     hydro.direction = sample_at.drainage_direction;
                     hydro.accumulation = sample_at.watershed_accumulation;
                     hydro.river_strength = sample_at.river_strength;
+                    hydro.watershed_id = sample_at.watershed_id;
+                    hydro.stream_order = sample_at.stream_order;
+                    hydro.river_class = sample_at.river_class;
                     hydro.lake_depth_m = sample_at.lake_depth_m;
                     hydro.river = sample_at.is_river;
                     hydro.lake = sample_at.is_lake;
@@ -2287,29 +2307,90 @@ RgbaImage WorldSampler::generate_rgba_region(
                     hydro.lake ? Rgba8{40, 120, 255, 255}
                                : Rgba8{0, 0, 0, 255};
 
-                const double erosion_intensity =
-                    hydrology_grid.valid &&
-                    hydrology_grid.maximum_erosion_offset > 0.0
-                    ? clamp01(std::abs(erosion_offset) /
-                              hydrology_grid.maximum_erosion_offset)
-                    : 0.0;
-                const std::uint8_t erosion_channel =
-                    diagnostic_gray(erosion_intensity);
-                hydrology_diagnostics->erosion_delta.pixels[index] =
-                    erosion_offset < 0.0
-                        ? Rgba8{erosion_channel, 0, 0, 255}
-                        : (erosion_offset > 0.0
-                            ? Rgba8{0, 0, erosion_channel, 255}
+                hydrology_diagnostics->stream_order.pixels[index] =
+                    diagnostic_pixel(
+                        static_cast<double>(hydro.stream_order) / 8.0);
+
+                const std::uint64_t basin_hash =
+                    mix_bits(static_cast<std::uint64_t>(hydro.watershed_id));
+                hydrology_diagnostics->watershed_basins.pixels[index] =
+                    hydro.watershed_id == 0u
+                        ? Rgba8{0, 0, 0, 255}
+                        : Rgba8{
+                            static_cast<std::uint8_t>(48u + (basin_hash & 0xAFu)),
+                            static_cast<std::uint8_t>(48u + ((basin_hash >> 8u) & 0xAFu)),
+                            static_cast<std::uint8_t>(48u + ((basin_hash >> 16u) & 0xAFu)),
+                            255};
+
+                hydrology_diagnostics->river_influence.pixels[index] =
+                    diagnostic_pixel(hydro.river_influence);
+                const double mountain_system_radius = std::max(
+                    plan_.hydrology.routing_cell_scale,
+                    plan_.scales.province_scale * 0.24);
+                const double mountain_proximity =
+                    std::isfinite(hydro.mountain_peak_distance_m)
+                        ? std::exp(-hydro.mountain_peak_distance_m /
+                                   mountain_system_radius)
+                        : 0.0;
+                hydrology_diagnostics->mountain_peak_distance.pixels[index] =
+                    diagnostic_pixel(mountain_proximity);
+
+                const std::size_t routing_x = std::min(
+                    hydrology_grid.width - 1,
+                    static_cast<std::size_t>(
+                        (origin_x + static_cast<std::int64_t>(x)) /
+                        plan_.hydrology.routing_cell_scale));
+                const std::size_t routing_z = std::min(
+                    hydrology_grid.height - 1,
+                    static_cast<std::size_t>(
+                        (origin_z + static_cast<std::int64_t>(z)) /
+                        plan_.hydrology.routing_cell_scale));
+                const std::size_t routing_index =
+                    routing_z * hydrology_grid.width + routing_x;
+                const auto encode_delta = [](double delta, double maximum) {
+                    const std::uint8_t channel = diagnostic_gray(
+                        maximum > 0.0 ? std::abs(delta) / maximum : 0.0);
+                    return delta < 0.0
+                        ? Rgba8{channel, 0, 0, 255}
+                        : (delta > 0.0
+                            ? Rgba8{0, 0, channel, 255}
                             : Rgba8{0, 0, 0, 255});
+                };
+                const double hydraulic_delta =
+                    hydrology_grid.valid
+                        ? hydrology_grid.hydraulic_offsets[routing_index]
+                        : 0.0;
+                const double thermal_delta =
+                    hydrology_grid.valid
+                        ? hydrology_grid.thermal_offsets[routing_index]
+                        : 0.0;
+                const double fluvial_delta =
+                    hydrology_grid.valid
+                        ? hydrology_grid.fluvial_offsets[routing_index]
+                        : 0.0;
+                const double erosion_delta = hydraulic_delta + thermal_delta;
+                hydrology_diagnostics->erosion_delta.pixels[index] =
+                    encode_delta(
+                        erosion_delta,
+                        hydrology_grid.maximum_erosion_offset);
+                hydrology_diagnostics->hydraulic_erosion_delta.pixels[index] =
+                    encode_delta(
+                        hydraulic_delta,
+                        hydrology_grid.maximum_hydraulic_offset);
+                hydrology_diagnostics->thermal_erosion_delta.pixels[index] =
+                    encode_delta(
+                        thermal_delta,
+                        hydrology_grid.maximum_thermal_offset);
+                hydrology_diagnostics->fluvial_terrain_delta.pixels[index] =
+                    encode_delta(
+                        fluvial_delta,
+                        hydrology_grid.maximum_fluvial_offset);
             }
 
             const double surface_elevation = sample_at.is_lake
                 ? sample_at.lake_surface_elevation
                 : sample_at.normalized_elevation;
-            const double channel_cut = sample_at.is_river
-                ? plan_.hydrology.river_channel_depth_fraction *
-                      sample_at.river_strength
-                : 0.0;
+            const double channel_cut = 0.0;
             const auto packed_height = static_cast<std::uint16_t>(
                 std::clamp(std::lround(
                     std::max(0.0, surface_elevation - channel_cut) *
