@@ -22,6 +22,14 @@
 
 namespace {
 
+std::uint32_t checked_u32(std::size_t value, const char* field) {
+    if (value > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::runtime_error(std::string(field) +
+                                 " exceeds the file format limit");
+    }
+    return static_cast<std::uint32_t>(value);
+}
+
 void print_map_report(const ws::rgba_terrain_core::RgbaImage& image,
                       const ws::rgba_terrain_core::VoxelVolume& volume) {
     std::uint32_t min_height = 65535;
