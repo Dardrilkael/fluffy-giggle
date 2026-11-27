@@ -302,6 +302,8 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
     constexpr std::size_t routing_height = 96 / routing_cell_scale;
     constexpr std::size_t routing_cell_count =
         routing_width * routing_height;
+    const std::array<int, 8> route_dx{{0, 1, 1, 1, 0, -1, -1, -1}};
+    const std::array<int, 8> route_dz{{-1, -1, 0, 1, 1, 1, 0, -1}};
     const std::array<std::array<std::uint8_t, 3>, 8> direction_colors{{
         {{40, 110, 255}}, {{40, 210, 255}}, {{40, 230, 120}},
         {{180, 240, 50}}, {{255, 190, 40}}, {{255, 110, 40}},
@@ -321,6 +323,8 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
         const auto& pixel = terrain.at(x, z);
         return (static_cast<double>(pixel.r) * 256.0 + pixel.g) / 65535.0;
     };
+    REQUIRE(erosion_diagnostics.drainage_direction.width == 96);
+    REQUIRE(erosion_diagnostics.drainage_direction.height == 96);
     std::size_t land_routing_cells = 0;
     for (std::size_t start_z = 0; start_z < routing_height; ++start_z) {
         for (std::size_t start_x = 0; start_x < routing_width; ++start_x) {
@@ -359,11 +363,9 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
                     break;
                 }
                 const auto next_x = static_cast<std::int64_t>(current_x) +
-                    std::array<int, 8>{0, 1, 1, 1, 0, -1, -1, -1}[
-                        static_cast<std::size_t>(direction)];
+                    route_dx[static_cast<std::size_t>(direction)];
                 const auto next_z = static_cast<std::int64_t>(current_z) +
-                    std::array<int, 8>{-1, -1, 0, 1, 1, 1, 0, -1}[
-                        static_cast<std::size_t>(direction)];
+                    route_dz[static_cast<std::size_t>(direction)];
                 if (next_x < 0 || next_z < 0 ||
                     next_x >= static_cast<std::int64_t>(routing_width) ||
                     next_z >= static_cast<std::int64_t>(routing_height)) {
