@@ -320,12 +320,14 @@ CMakeLists only wire ws libraries together.
 terrain library. The game world is 256x256x64 (16x16 chunks) to preserve the
 current 256x256 source map without resampling.
 
-At startup the import is opt-in via all three environment variables:
-`WS_VOXEL_TERRAIN_PNG`, `WS_VOXEL_TERRAIN_META`, and
-`WS_VOXEL_TERRAIN_VOXELS`. The app rebuilds the expected volume from PNG +
-metadata and requires an exact RGAVOX02 match before importing. If any one
-variable is set, all three are required; an invalid import stops startup
-rather than silently falling back to procedural terrain.
+A normal desktop launch opens the title screen with no terrain world
+generated or loaded. The menu can load the saved PNG + metadata as a preview,
+or generate/regenerate them in the background and then preview the result.
+Previewing does not enter gameplay; **Play World** is the explicit transition
+that starts the player in the currently previewed map. The optional
+`WS_VOXEL_TERRAIN_PNG` and `WS_VOXEL_TERRAIN_META` environment variables
+remain available for direct-import/developer runs; PNG + metadata are
+authoritative, while `WS_VOXEL_TERRAIN_VOXELS` is optional validation only.
 
 The adapter preflights the full source before replacing world data. It
 preserves X/Z coordinates, per-column biome and feature flags, and accepts
