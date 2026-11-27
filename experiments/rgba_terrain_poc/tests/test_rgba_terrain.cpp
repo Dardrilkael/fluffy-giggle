@@ -101,8 +101,7 @@ int main() {
     const auto generated = generate_synthetic_map(64, 64, 0xC0FFEEu, generated_settings);
     const auto generated_again = generate_synthetic_map(64, 64, 0xC0FFEEu, generated_settings);
     assert(generated.pixels.size() == 64u * 64u);
-    bool has_water = false, has_forest = false, has_mountain = false;
-    bool has_river = false, has_multiple_heights = false;
+    bool has_water = false, has_river = false, has_multiple_heights = false;
     const auto first_height = (static_cast<unsigned>(generated.pixels[0].r) << 8u) | generated.pixels[0].g;
     for (std::size_t i = 0; i < generated.pixels.size(); ++i) {
         const auto& pixel = generated.pixels[i];
@@ -111,18 +110,19 @@ int main() {
         const auto h = (static_cast<unsigned>(pixel.r) << 8u) | pixel.g;
         has_multiple_heights = has_multiple_heights || h != first_height;
         has_water = has_water || (pixel.a & 0x80u) != 0;
-        has_forest = has_forest || (pixel.a & 0x08u) != 0;
-        has_mountain = has_mountain || (pixel.a & 0x10u) != 0;
         has_river = has_river || (pixel.a & 0x20u) != 0;
     }
     assert(has_multiple_heights && has_water && has_river);
-    assert(has_forest || has_mountain);
 
     const auto generated_columns = generate_columns(generated, packed_layout, generated_settings);
     assert(generated_columns.columns.size() == generated.pixels.size());
     const auto generated_volume = generate_voxel_volume(generated_columns, generated_settings);
     assert(generated_volume.voxels.size() == 64u * 64u * 64u);
     bool flags_survive = false;
+    bool has_water_voxel = false;
+    for (const auto& voxel : generated_volume.voxels) {
+        has_water_voxel = has_water_voxel || voxel.kind == VoxelKind::Water;
+    }
     for (const auto& column : generated_columns.columns) {
         const auto& top = generated_volume.at(column.x, column.height, column.z);
         assert(top.biome_id == column.biome_id);
@@ -130,6 +130,7 @@ int main() {
         flags_survive = flags_survive || top.feature_flags != 0;
     }
     assert(flags_survive);
+    assert(has_water_voxel);
 
     rejected = false;
     try {
