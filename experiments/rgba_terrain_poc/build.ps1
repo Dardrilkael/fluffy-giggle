@@ -72,3 +72,4 @@ Write-Host "Build and tests completed." -ForegroundColor Green
 Write-Host "Executable: $Executable"
 Write-Host "Example:"
 Write-Host "  & $Executable generate 256 256 0xC0FFEE terrain.png terrain.rgba-terrain terrain.rgba-voxels"
+Write-Host "  & $Executable inspect terrain.png terrain.rgba-terrain"
