@@ -60,7 +60,7 @@ before launching `voxel_game`:
 
 ```powershell
 $env:WS_VOXEL_TERRAIN_PNG = "C:\terrain\terrain.png"
-$env:WS_VOXEL_TERRAIN_META = "C:\terrain\terrain.meta"
+$env:WS_VOXEL_TERRAIN_META = "C:\terrain\terrain.rgba-terrain"
 ```
 
 The app decodes the PNG, reconstructs the voxel volume from its pixels and
