@@ -147,9 +147,9 @@ void WorldPlan::validate() const {
         if (!ecosystem_ids[biome.ecosystem_id]) {
             throw std::invalid_argument("biome references an unknown ecosystem");
         }
-        if ((biome.feature_flags & 0xC7u) != 0) {
+        if ((biome.feature_flags & 0x87u) != 0) {
             throw std::invalid_argument(
-                "biome feature_flags may only use bits 3, 4 and 5");
+                "biome feature_flags may only use bits 3 through 6");
         }
         validate_climate_match(
             biome.temperature_optimum_c, biome.temperature_tolerance_c,
