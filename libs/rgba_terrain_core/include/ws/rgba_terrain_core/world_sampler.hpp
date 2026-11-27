@@ -84,6 +84,9 @@ struct WorldSample {
     friend bool operator==(const WorldSample&, const WorldSample&) = default;
 };
 
+// Authoritative deterministic 2D world generator. Production terrain maps
+// should be generated through this sampler; generate_synthetic_map() is only
+// a legacy v1 channel-layout adapter retained for source compatibility.
 class WorldSampler {
 public:
     // Owns a copy of the compact plan and validates it once at construction.
@@ -96,9 +99,11 @@ public:
     [[nodiscard]] WorldSample sample(
         std::int64_t world_x, std::int64_t world_z) const;
 
-    // Produces a small RGBA8 data-map region at its global world origin. The
-    // returned image can be passed through the existing PNG writer and voxel
-    // reconstruction path. The region must fit entirely inside the world.
+    // Produces an RGBA8 v2 data-map region at its global world origin:
+    // R/G = 16-bit normalized elevation, B = material/feature nibbles,
+    // A = biome ID. The returned image can be passed through the existing
+    // PNG writer and voxel reconstruction path. The region must fit entirely
+    // inside the finite world. This is the production map-generation API.
     [[nodiscard]] RgbaImage generate_rgba_region(
         std::int64_t origin_x, std::int64_t origin_z,
         std::size_t width, std::size_t depth,
