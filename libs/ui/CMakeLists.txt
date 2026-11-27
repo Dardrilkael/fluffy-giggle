@@ -62,14 +62,14 @@ endif()
 # library (apps draw through <ws/ui/widgets.hpp>). Static archives still
 # forward these targets to the final link, so symbols resolve.
 if(ANDROID)
-  target_link_libraries(ws_ui PRIVATE imgui implot volk stb ws::image android log)
+  target_link_libraries(ws_ui PRIVATE imgui implot volk stb android log)
   # native_app_glue headers for src/platform/window_android.cpp (its .c
   # lands in the
   # app module in A2; the header-only usage here is enough for the seam).
   target_include_directories(ws_ui PRIVATE
     "${ANDROID_NDK}/sources/android/native_app_glue")
 else()
-  target_link_libraries(ws_ui PRIVATE imgui implot glfw volk stb ws::image)
+  target_link_libraries(ws_ui PRIVATE imgui implot glfw volk stb)
   if(WIN32)
     # window_glfw.cpp's OS dark-mode probe (App::prefers_dark) reads the
     # Personalize key through RegGetValueA, which advapi32 owns. A system
