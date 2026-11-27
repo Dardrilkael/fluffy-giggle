@@ -3,7 +3,7 @@ if(NOT TARGET ws::image)
   message(FATAL_ERROR "RGBA terrain POC requires ws::image. Configure the workspace with WS_BUILD_LIBS=image (or build all libraries).")
 endif()
 
-option(RGBA_TERRAIN_BUILD_TESTS "Build RGBA terrain tests" ON)
+option(RGBA_TERRAIN_BUILD_TESTS "Build RGBA terrain tests" ${WS_BUILD_TESTS})
 
 add_library(rgba_terrain_core
   src/rgba_terrain.cpp
