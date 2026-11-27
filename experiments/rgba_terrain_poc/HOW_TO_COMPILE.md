@@ -27,6 +27,14 @@ The command writes a lossless RGBA8 data PNG, its metadata sidecar, and a
 dense RGAVOX02 voxel file. The PNG is reloaded through the strict shared image
 library before voxelization, checking the actual persisted map path.
 
+## Inspect the generated map
+
+    rgba_terrain_poc inspect terrain.png terrain.rgba-terrain
+
+This reads the PNG and metadata and reports encoded elevation variation,
+neighbor continuity, material/biome counts, and feature coverage without
+building a voxel volume.
+
 ## Convert an existing map
 
     rgba_terrain_poc convert input.png input.rgba-terrain output.rgba-voxels
