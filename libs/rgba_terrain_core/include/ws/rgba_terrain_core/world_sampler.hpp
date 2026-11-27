@@ -27,6 +27,8 @@ struct WorldHydrologyDiagnosticImages {
     RgbaImage drainage_direction;
     RgbaImage lake_depth;
     RgbaImage lake_basins;
+    // Red = incision, blue = deposition; intensity is normalized per world.
+    RgbaImage erosion_delta;
 };
 
 // D8 direction on the hydrology routing grid. North is negative world Z.
