@@ -11,7 +11,7 @@
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Weverything"
 #endif
-#include <stb_truetype.h>  // declarations only; the implementation TU is stb_impl.cpp
+#include <stb_truetype.h>  // declarations only; implemented by stb_truetype_impl.cpp in ws::ui
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #elif defined(__clang__)
