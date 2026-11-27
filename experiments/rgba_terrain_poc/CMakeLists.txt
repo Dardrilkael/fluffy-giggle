@@ -9,7 +9,8 @@ add_library(rgba_terrain_core
   src/rgba_terrain.cpp
   src/metadata.cpp
   src/image_io.cpp
-  src/synthetic_map.cpp)
+  src/synthetic_map.cpp
+  src/map_analysis.cpp)
 target_include_directories(rgba_terrain_core PUBLIC include)
 target_compile_features(rgba_terrain_core PUBLIC cxx_std_20)
 target_link_libraries(rgba_terrain_core PUBLIC ws::image)
