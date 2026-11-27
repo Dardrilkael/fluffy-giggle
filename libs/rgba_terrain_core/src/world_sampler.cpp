@@ -708,8 +708,8 @@ DrainageMetrics accumulate_drainage(
     std::vector<std::uint8_t> maximum_upstream_order(count, 0u);
     std::vector<std::uint16_t> maximum_order_tributaries(count, 0u);
     for (std::size_t i = 0; i < count; ++i) {
-        // Rainfall is the only runoff source. Basin area alone never creates
-        // discharge: a dry contributing cell adds correspondingly little.
+        // Rainfall and temperature-dependent snowmelt are the only runoff
+        // sources. Basin area alone never creates discharge.
         metrics.accumulation[i] = ocean[i] ? 0.0 : runoff[i];
     }
 
@@ -1606,7 +1606,7 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
             ocean[i] = terrain.is_ocean(plan.sea_level_fraction);
             const ClimateField climate = evaluate_climate(
                 plan, world_x, world_z, regions, terrain);
-            runoff[i] = climate.precipitation;
+            runoff[i] = evaluate_runoff(climate);
         }
     }
 
@@ -1687,8 +1687,8 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
         }
     }
 
-    // Re-evaluate precipitation over the hydraulically + thermally modified
-    // surface before constructing the final river hierarchy.
+    // Re-evaluate precipitation-derived runoff over the hydraulically +
+    // thermally modified surface before constructing the final river hierarchy.
     for (std::size_t i = 0; i < count; ++i) {
         ocean[i] = elevation[i] <= plan.sea_level_fraction;
         if (ocean[i]) {
@@ -1709,8 +1709,8 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
         TerrainField eroded_terrain = evaluate_terrain(
             plan, world_x, world_z, bias);
         eroded_terrain.normalized_elevation = elevation[i];
-        runoff[i] = evaluate_climate(
-            plan, world_x, world_z, regions, eroded_terrain).precipitation;
+        runoff[i] = evaluate_runoff(evaluate_climate(
+            plan, world_x, world_z, regions, eroded_terrain));
     }
 
     const DrainageRouting routing =
