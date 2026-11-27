@@ -1004,7 +1004,7 @@ class VoxelApp final : public ws::ui::App {
     // Left side: the exact R/G/B/A bytes are shown as four grayscale maps.
     const float preview_x = panel.x + 28.0f;
     const float preview_y = panel.y + 118.0f;
-    constexpr float preview_size = 480.0f;
+    constexpr float preview_size = 512.0f;
     (void)r2d::draw_text(preview_x, panel.y + 88.0f, "RAW RGBA CHANNELS",
                          font_, r2d::rgba(181, 194, 178));
     r2d::draw_rounded_quad(preview_x - 3.0f, preview_y - 3.0f,
@@ -1034,9 +1034,6 @@ class VoxelApp final : public ws::ui::App {
                            "No saved terrain PNG yet", font_,
                            r2d::rgba(155, 170, 160));
     }
-    (void)r2d::draw_text(preview_x, panel.y + 608.0f,
-                         "Each quadrant shows exact 8-bit channel intensity.",
-                         font_, r2d::rgba(155, 170, 160));
 
     // Right side: seed controls and actions.
     const float controls_x = panel.x + 560.0f;
