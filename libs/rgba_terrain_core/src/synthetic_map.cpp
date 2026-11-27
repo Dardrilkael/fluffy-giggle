@@ -55,14 +55,12 @@ RgbaImage generate_synthetic_map(std::size_t width, std::size_t depth,
             "synthetic map sea level must lie strictly between min and max height");
     }
 
+    const double sea_normalized = plan.sea_level_fraction;
     const WorldSampler sampler(std::move(plan));
     const RgbaImage modern = sampler.generate_rgba_region(
         0, 0, width, depth, settings);
 
     RgbaImage legacy{width, depth, std::vector<Rgba8>(width * depth)};
-    const double height_span =
-        static_cast<double>(settings.max_height) - settings.min_height;
-    const double sea_normalized = plan.sea_level_fraction;
     for (std::size_t i = 0; i < modern.pixels.size(); ++i) {
         const Rgba8& source = modern.pixels[i];
         const std::uint8_t material_id = source.b & 0x0Fu;
@@ -109,7 +107,6 @@ RgbaImage generate_synthetic_map(std::size_t width, std::size_t depth,
         };
     }
 
-    (void)height_span;
     legacy.validate();
     return legacy;
 }
