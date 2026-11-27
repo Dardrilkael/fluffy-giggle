@@ -117,17 +117,14 @@ FetchContent_Declare(implot
   GIT_TAG v0.16
   GIT_SHALLOW TRUE
   SOURCE_SUBDIR _ws_no_cmake)
-# stb has no release tags - pinned to a master commit. stb_image.h is
-# v2.30 (2024-05-31) at this hash. GIT_SHALLOW is OFF: GitHub blocks
-# shallow-fetching arbitrary commit SHAs (it only allows shallow fetch of
-# tags and branches), so GIT_SHALLOW TRUE + a raw hash fails at checkout
-# with "unable to read tree". The stb repo is small (~20 MB), so a full
-# clone is cheap and always works.
 foreach(dep vulkan_headers volk vma imgui implot)
   FetchContent_MakeAvailable(${dep})
 endforeach()
 endif()  # ws_wants_ui declares
 # stb_image and stb_truetype share one pinned upstream header checkout.
+# stb has no release tags - pin a master commit. GIT_SHALLOW stays OFF:
+# GitHub blocks shallow-fetching arbitrary commit SHAs, and the full repo
+# clone is small enough for this shared dependency.
 # ws::image owns the image implementation; ws::ui retains only truetype.
 if(ws_wants_ui OR ws_wants_image)
   FetchContent_Declare(stb
