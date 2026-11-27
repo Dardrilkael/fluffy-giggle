@@ -51,7 +51,12 @@ remain recorded for later reconsideration.
 - [x] Carry leeward ridge exposure into a rain-shadow moisture reduction.
 - [x] Feed precipitation back into remaining atmospheric moisture availability.
 - [x] Keep all atmospheric fetches in absolute coordinates so independent chunks agree.
-- [ ] Add explicit hydrology, drainage networks, soil-water storage and seasonal climate.
+- [x] Add deterministic absolute-grid D8 drainage directions.
+- [x] Estimate precipitation-weighted local watershed contributions without a world-sized raster.
+- [x] Detect local closed depressions as candidate lakes and classify river channels.
+- [x] Carve river beds into the existing height channel and reconstruct inland water voxels.
+- [ ] Replace bounded local accumulation/depression heuristics with cached regional flow graphs and priority-flood basin filling.
+- [ ] Add soil-water storage, infiltration, evaporation and seasonal climate.
 - [ ] Replace the compact single prevailing-wind model with authored regional/circulation fields.
 
 ## Design constraints
