@@ -279,8 +279,8 @@ HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
     // The source itself contributes runoff. Precipitation weights contributing
     // cells, so dry headwaters contribute less than wet catchments.
     result.accumulation = 0.35 + precipitation * 0.65;
-    constexpr int source_radius = 3;
-    constexpr int max_steps = 9;
+    constexpr int source_radius = 1;
+    constexpr int max_steps = 8;
     for (int oz = -source_radius; oz <= source_radius; ++oz) {
         for (int ox = -source_radius; ox <= source_radius; ++ox) {
             if (ox == 0 && oz == 0) continue;
