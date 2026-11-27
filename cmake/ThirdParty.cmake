@@ -127,10 +127,8 @@ foreach(dep vulkan_headers volk vma imgui implot)
   FetchContent_MakeAvailable(${dep})
 endforeach()
 endif()  # ws_wants_ui declares
-+
-# stb_image is shared by ws::image and ws::ui. Fetch it whenever either
-# library is part of the configured subset; the implementation itself is
-# owned by ws::image, while the UI keeps its separate stb_truetype TU.
+# stb_image and stb_truetype share one pinned upstream header checkout.
+# ws::image owns the image implementation; ws::ui retains only truetype.
 if(ws_wants_ui OR ws_wants_image)
   FetchContent_Declare(stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
