@@ -99,35 +99,34 @@ void write_voxel_file(const rgba_terrain::VoxelVolume& volume,
 
 void print_map_report(const rgba_terrain::RgbaImage& image,
                       const rgba_terrain::VoxelVolume& volume) {
-    std::uint8_t min_height_hi = 255, max_height_hi = 0;
-    std::uint8_t min_height_lo = 255, max_height_lo = 0;
+    std::uint32_t min_height = 65535;
+    std::uint32_t max_height = 0;
     std::size_t water_pixels = 0;
     std::size_t forest_pixels = 0;
     std::size_t mountain_pixels = 0;
+    std::size_t river_pixels = 0;
     for (const auto& p : image.pixels) {
-        min_height_hi = std::min(min_height_hi, p.r);
-        max_height_hi = std::max(max_height_hi, p.r);
-        min_height_lo = std::min(min_height_lo, p.g);
-        max_height_lo = std::max(max_height_lo, p.g);
+        const std::uint32_t height =
+            (static_cast<std::uint32_t>(p.r) << 8u) | p.g;
+        min_height = std::min(min_height, height);
+        max_height = std::max(max_height, height);
         water_pixels += (p.a & 0x80u) != 0 ? 1u : 0u;
         forest_pixels += (p.a & 0x08u) != 0 ? 1u : 0u;
         mountain_pixels += (p.a & 0x10u) != 0 ? 1u : 0u;
+        river_pixels += (p.a & 0x20u) != 0 ? 1u : 0u;
     }
     std::cout << "RGBA data map: " << image.width << "x" << image.height
-              << "\n"
-              << "  R/G: packed 16-bit height (high-byte range "
-              << static_cast<unsigned>(min_height_hi) << ".."
-              << static_cast<unsigned>(max_height_hi) << ", low-byte range "
-              << static_cast<unsigned>(min_height_lo) << ".."
-              << static_cast<unsigned>(max_height_lo) << ")\n"
-              << "  B: material ID; A: biome + feature flags\n"
-              << "  water pixels: " << water_pixels
-              << ", forest: " << forest_pixels
-              << ", mountain: " << mountain_pixels << "\n"
+              << "\\n"
+              << "  R/G: packed 16-bit height range " << min_height
+              << ".." << max_height << "\\n"
+              << "  B: material ID; A: biome + feature flags\\n"
+              << "  water: " << water_pixels << ", forest: " << forest_pixels
+              << ", mountain: " << mountain_pixels << ", river: "
+              << river_pixels << "\\n"
               << "Voxel volume: " << volume.width << "x" << volume.depth
               << "x" << volume.height << ", " << volume.voxels.size()
               << " voxels, " << volume.voxels.size() * 5u
-              << " bytes of voxel payload\n";
+              << " bytes of voxel payload\\n";
 }
 
 int generate_command(int argc, char** argv) {
