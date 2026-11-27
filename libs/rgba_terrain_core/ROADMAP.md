@@ -27,7 +27,7 @@ remain recorded for later reconsideration.
 - [ ] Verify voxel kind, material, biome and density for every voxel.
 - [x] Add versioned voxel-file read/write round-trip validation.
 - [x] Add a CLI validation command for PNG + metadata + voxel file.
-- [ ] Add negative tests for malformed dimensions, truncated files and invalid fields.
+- [x] Add negative tests for malformed dimensions, truncated payloads, trailing data, invalid voxel kinds and field mismatches.
 
 ## 5. Voxel-game integration — PLANNED
 - [ ] Add an explicit adapter from generic material/biome IDs to game content.
