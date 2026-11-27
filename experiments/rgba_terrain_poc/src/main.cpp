@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <format>
 #include <functional>
 #include <utility>
 #include <limits>
