@@ -739,6 +739,338 @@ DrainageMetrics accumulate_drainage(
     return metrics;
 }
 
+struct DistanceField {
+    std::vector<double> distance;
+    std::vector<std::size_t> nearest_source;
+};
+
+// Deterministic 8-neighbour distance transform. The source index is part of
+// the queue key, so equal-distance ties are stable across runs and platforms.
+DistanceField build_distance_field(
+    std::size_t width, std::size_t height, double cell_scale,
+    const std::vector<std::size_t>& seeds) {
+    DistanceField field;
+    if (width == 0 || height == 0 ||
+        width > std::numeric_limits<std::size_t>::max() / height ||
+        !std::isfinite(cell_scale) || cell_scale <= 0.0) {
+        return field;
+    }
+    const std::size_t count = width * height;
+    field.distance.assign(count, std::numeric_limits<double>::infinity());
+    field.nearest_source.assign(count, count);
+
+    using Node = std::tuple<double, std::size_t, std::size_t>;
+    std::priority_queue<Node, std::vector<Node>, std::greater<Node>> frontier;
+    for (const std::size_t seed : seeds) {
+        if (seed >= count) continue;
+        if (field.distance[seed] == 0.0 &&
+            field.nearest_source[seed] <= seed) {
+            continue;
+        }
+        field.distance[seed] = 0.0;
+        field.nearest_source[seed] = seed;
+        frontier.emplace(0.0, seed, seed);
+    }
+
+    while (!frontier.empty()) {
+        const auto [distance, current, source] = frontier.top();
+        frontier.pop();
+        if (distance != field.distance[current] ||
+            source != field.nearest_source[current]) {
+            continue;
+        }
+        const std::size_t x = current % width;
+        const std::size_t z = current / width;
+        for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
+            const auto nx = static_cast<std::int64_t>(x) + drainage_dx[d];
+            const auto nz = static_cast<std::int64_t>(z) + drainage_dz[d];
+            if (nx < 0 || nz < 0 ||
+                nx >= static_cast<std::int64_t>(width) ||
+                nz >= static_cast<std::int64_t>(height)) {
+                continue;
+            }
+            const std::size_t next =
+                static_cast<std::size_t>(nz) * width +
+                static_cast<std::size_t>(nx);
+            const double step = (d % 2u == 1u)
+                ? cell_scale * 1.4142135623730951 : cell_scale;
+            const double candidate = distance + step;
+            if (candidate < field.distance[next] ||
+                (candidate == field.distance[next] &&
+                 source < field.nearest_source[next])) {
+                field.distance[next] = candidate;
+                field.nearest_source[next] = source;
+                frontier.emplace(candidate, next, source);
+            }
+        }
+    }
+    return field;
+}
+
+std::vector<double> build_mountain_peak_distance(
+    const std::vector<double>& elevation,
+    const std::vector<double>& mountain_strength,
+    std::size_t width, std::size_t height, double cell_scale) {
+    const std::size_t count = elevation.size();
+    if (count == 0 || mountain_strength.size() != count) {
+        return {};
+    }
+    std::vector<std::size_t> peaks;
+    double highest_mountain = -std::numeric_limits<double>::infinity();
+    std::size_t fallback_peak = count;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (mountain_strength[i] < 0.34) continue;
+        if (elevation[i] > highest_mountain) {
+            highest_mountain = elevation[i];
+            fallback_peak = i;
+        }
+        bool local_peak = true;
+        const std::size_t x = i % width;
+        const std::size_t z = i / width;
+        for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
+            const auto nx = static_cast<std::int64_t>(x) + drainage_dx[d];
+            const auto nz = static_cast<std::int64_t>(z) + drainage_dz[d];
+            if (nx < 0 || nz < 0 ||
+                nx >= static_cast<std::int64_t>(width) ||
+                nz >= static_cast<std::int64_t>(height)) {
+                continue;
+            }
+            const std::size_t neighbor =
+                static_cast<std::size_t>(nz) * width +
+                static_cast<std::size_t>(nx);
+            if (elevation[neighbor] > elevation[i] ||
+                (elevation[neighbor] == elevation[i] && neighbor < i)) {
+                local_peak = false;
+                break;
+            }
+        }
+        if (local_peak) peaks.push_back(i);
+    }
+    if (peaks.empty() && fallback_peak != count) {
+        peaks.push_back(fallback_peak);
+    }
+    const DistanceField distances =
+        build_distance_field(width, height, cell_scale, peaks);
+    return distances.distance;
+}
+
+double runoff_factor(double accumulation, double threshold) {
+    if (threshold <= 0.0) return 0.0;
+    return clamp01(std::log1p(std::max(0.0, accumulation / threshold)) /
+                   std::log1p(20.0));
+}
+
+std::array<double, 3> river_radii(
+    const HydrologyField& river, double cell_scale,
+    double threshold) {
+    if (river.stream_order == 0u) return {0.0, 0.0, 0.0};
+    const double runoff = runoff_factor(river.accumulation, threshold);
+    const double order = static_cast<double>(river.stream_order);
+    const double channel = cell_scale *
+        (0.22 + 0.15 * order + 0.12 * runoff);
+    const double bank = channel * (1.9 + 0.22 * order);
+    const double floodplain = bank * (1.35 + 0.42 * order);
+    return {channel, bank, floodplain};
+}
+
+// Apply spatially continuous river landforms around the final drainage graph.
+// Channels are cut deepest at their centerline; banks transition gradually,
+// floodplains flatten toward a local surface average, terraces sit beyond the
+// active floodplain, and mountain-front outlets receive directional fan deposits.
+void apply_fluvial_terrain_shaping(
+    std::vector<double>& elevation,
+    const std::vector<bool>& ocean,
+    const std::vector<double>& mountain_strength,
+    std::vector<HydrologyField>& cells,
+    std::size_t width, std::size_t height,
+    const WorldPlan& plan,
+    std::vector<double>& offsets) {
+    const std::size_t count = elevation.size();
+    const double scale = plan.hydrology.routing_cell_scale;
+    const double threshold = plan.hydrology.river_accumulation_threshold;
+    offsets.assign(count, 0.0);
+    if (count == 0 || ocean.size() != count ||
+        mountain_strength.size() != count || cells.size() != count) {
+        return;
+    }
+
+    const std::vector<double> base_elevation = elevation;
+    const std::vector<double> mountain_distance =
+        build_mountain_peak_distance(
+            base_elevation, mountain_strength, width, height, scale);
+    std::vector<std::size_t> river_seeds;
+    river_seeds.reserve(count / 8u);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (cells[i].stream_order > 0u && !ocean[i]) {
+            river_seeds.push_back(i);
+        }
+        cells[i].mountain_peak_distance_m =
+            i < mountain_distance.size()
+                ? mountain_distance[i]
+                : std::numeric_limits<double>::infinity();
+    }
+    const DistanceField river_distance =
+        build_distance_field(width, height, scale, river_seeds);
+    for (std::size_t i = 0; i < count; ++i) {
+        cells[i].river_distance_m = river_distance.distance[i];
+    }
+
+    // Detect mountain-system exits along the actual downstream network.
+    // Their fans are attached to a river outlet from the mountain influence
+    // zone, not painted as independent circular terrain features.
+    std::vector<std::size_t> fan_seeds;
+    std::vector<std::size_t> fan_river_sources;
+    const double mountain_system_radius =
+        std::max(scale, plan.scales.province_scale * 0.24);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (cells[i].stream_order == 0u || ocean[i]) continue;
+        const std::size_t downstream = drainage_downstream_index(
+            i, cells[i].direction, width, height);
+        if (downstream == count || ocean[downstream]) continue;
+        const std::size_t order = cells[i].stream_order;
+        const double source_distance = mountain_distance[i];
+        const double downstream_distance = mountain_distance[downstream];
+        const double source_proximity = std::isfinite(source_distance)
+            ? std::exp(-source_distance / mountain_system_radius) : 0.0;
+        const double downstream_proximity =
+            std::isfinite(downstream_distance)
+                ? std::exp(-downstream_distance / mountain_system_radius)
+                : 0.0;
+        const bool leaves_mountain_zone =
+            source_proximity >= 0.35 && downstream_proximity < 0.35;
+        const bool leaves_ridge_field =
+            mountain_strength[i] >= 0.18 &&
+            mountain_strength[downstream] < 0.18;
+        if (leaves_mountain_zone || leaves_ridge_field) {
+            fan_seeds.push_back(downstream);
+            fan_river_sources.push_back(i);
+        }
+        (void)order;
+    }
+    const DistanceField fan_distance =
+        build_distance_field(width, height, scale, fan_seeds);
+
+    // A small neighbourhood average gives floodplains a distinct, flatter
+    // surface without replacing the larger-scale terrain or climate fields.
+    std::vector<double> local_average(count, 0.0);
+    for (std::size_t z = 0; z < height; ++z) {
+        for (std::size_t x = 0; x < width; ++x) {
+            double sum = 0.0;
+            std::size_t samples = 0;
+            for (int dz = -2; dz <= 2; ++dz) {
+                for (int dx = -2; dx <= 2; ++dx) {
+                    const auto nx = static_cast<std::int64_t>(x) + dx;
+                    const auto nz = static_cast<std::int64_t>(z) + dz;
+                    if (nx < 0 || nz < 0 ||
+                        nx >= static_cast<std::int64_t>(width) ||
+                        nz >= static_cast<std::int64_t>(height)) {
+                        continue;
+                    }
+                    const std::size_t neighbor =
+                        static_cast<std::size_t>(nz) * width +
+                        static_cast<std::size_t>(nx);
+                    if (ocean[neighbor]) continue;
+                    sum += base_elevation[neighbor];
+                    ++samples;
+                }
+            }
+            local_average[z * width + x] = samples > 0u
+                ? sum / static_cast<double>(samples)
+                : base_elevation[z * width + x];
+        }
+    }
+
+    const double land_floor = std::min(
+        1.0, plan.sea_level_fraction +
+            std::min(0.001, (1.0 - plan.sea_level_fraction) * 0.25));
+    for (std::size_t i = 0; i < count; ++i) {
+        if (ocean[i]) continue;
+        const double distance = river_distance.distance[i];
+        const std::size_t river_source = river_distance.nearest_source[i];
+        double shaped = base_elevation[i];
+        if (river_source < count) {
+            const HydrologyField& river = cells[river_source];
+            const auto radii = river_radii(river, scale, threshold);
+            const double channel_radius = radii[0];
+            const double bank_radius = radii[1];
+            const double floodplain_radius = radii[2];
+            const double runoff = runoff_factor(river.accumulation, threshold);
+            const double order = static_cast<double>(river.stream_order);
+
+            const double channel_profile = 1.0 - smoothstep(
+                channel_radius * 0.40, bank_radius, distance);
+            const double channel_depth =
+                plan.hydrology.river_channel_depth_fraction *
+                (0.40 + 0.15 * std::max(0.0, order - 1.0)) *
+                (0.35 + 0.65 * runoff);
+            shaped -= channel_depth * channel_profile;
+
+            const double floodplain_profile =
+                (1.0 - smoothstep(bank_radius, floodplain_radius, distance)) *
+                smoothstep(channel_radius, bank_radius, distance);
+            const double flatten_strength =
+                std::min(0.28, (0.035 + 0.035 * order) * runoff) *
+                floodplain_profile;
+            shaped += (local_average[i] - base_elevation[i]) *
+                      flatten_strength;
+
+            if (river.stream_order >= 3u) {
+                const double terrace_width =
+                    std::max(scale * 0.45, floodplain_radius * 0.12);
+                const double terrace_distance =
+                    (distance - floodplain_radius * 1.14) / terrace_width;
+                const double terrace_profile =
+                    std::exp(-0.5 * terrace_distance * terrace_distance);
+                shaped += 0.00018 * runoff *
+                    (order - 1.0) * terrace_profile;
+            }
+        }
+
+        const std::size_t fan_source = fan_distance.nearest_source[i];
+        if (fan_source < fan_seeds.size()) {
+            const std::size_t river_source = fan_river_sources[fan_source];
+            const HydrologyField& river = cells[river_source];
+            const double runoff = runoff_factor(river.accumulation, threshold);
+            const auto radii = river_radii(river, scale, threshold);
+            const double fan_radius = radii[2] *
+                (1.8 + 0.18 * static_cast<double>(river.stream_order));
+            const double fan_d = fan_distance.distance[i];
+            if (fan_d < fan_radius && fan_radius > 0.0) {
+                const std::size_t seed = fan_seeds[fan_source];
+                const std::size_t source_x = river_source % width;
+                const std::size_t source_z = river_source / width;
+                const std::size_t seed_x = seed % width;
+                const std::size_t seed_z = seed / width;
+                const auto d = static_cast<std::uint8_t>(
+                    cells[river_source].direction);
+                const double flow_x = static_cast<double>(drainage_dx[d]);
+                const double flow_z = static_cast<double>(drainage_dz[d]);
+                const double vx = static_cast<double>(
+                    static_cast<std::int64_t>(i % width) -
+                    static_cast<std::int64_t>(seed_x));
+                const double vz = static_cast<double>(
+                    static_cast<std::int64_t>(i / width) -
+                    static_cast<std::int64_t>(seed_z));
+                const double radial = std::hypot(vx, vz);
+                const double forward = radial > 0.0
+                    ? clamp01((vx * flow_x + vz * flow_z) /
+                              (radial * std::hypot(flow_x, flow_z)) + 0.20)
+                    : 1.0;
+                const double profile = 1.0 - fan_d / fan_radius;
+                shaped += 0.00042 *
+                    (0.5 + 0.12 * river.stream_order) * runoff *
+                    profile * profile * forward;
+                (void)source_x;
+                (void)source_z;
+            }
+        }
+
+        shaped = std::clamp(shaped, land_floor, 1.0);
+        offsets[i] = shaped - base_elevation[i];
+        elevation[i] = shaped;
+    }
+}
+
 HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
                                   double normalized_elevation,
                                   [[maybe_unused]] double precipitation) {
