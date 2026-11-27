@@ -3,6 +3,8 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
+#include <string>
 
 #include <ws/image/image.hpp>
 
@@ -57,4 +59,37 @@ TEST_CASE("RGBA loader rejects empty and malformed encoded input") {
         0, 1, 2, 3, 4, 5, 6, 7
     };
     CHECK_FALSE(ws::image::load_rgba8_memory(not_an_image).has_value());
+}
+
+TEST_CASE("RGBA8 PNG writer round-trips exact bytes") {
+    const auto path = std::filesystem::temp_directory_path() /
+                      "ws_image_rgba_roundtrip.png";
+    constexpr std::array<std::uint8_t, 8> pixels = {
+        0x10, 0x20, 0x30, 0x40,
+        0x50, 0x60, 0x70, 0x80
+    };
+
+    const auto written = ws::image::write_rgba8_png_file(
+        path.string(), 2, 1, pixels);
+    REQUIRE(written.has_value());
+
+    const auto decoded = ws::image::load_rgba8_file(path.string());
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+
+    REQUIRE(decoded.has_value());
+    CHECK(decoded->width == 2);
+    CHECK(decoded->height == 1);
+    REQUIRE(decoded->pixels.size() == pixels.size());
+    CHECK(decoded->pixels == std::vector<std::uint8_t>(
+        pixels.begin(), pixels.end()));
+}
+
+TEST_CASE("RGBA8 PNG writer rejects mismatched or empty input") {
+    constexpr std::array<std::uint8_t, 3> too_short = {1, 2, 3};
+    CHECK_FALSE(ws::image::write_rgba8_png_file(
+        "unused.png", 1, 1, too_short).has_value());
+    const std::array<std::uint8_t, 0> empty{};
+    CHECK_FALSE(ws::image::write_rgba8_png_file(
+        "", 1, 1, empty).has_value());
 }
