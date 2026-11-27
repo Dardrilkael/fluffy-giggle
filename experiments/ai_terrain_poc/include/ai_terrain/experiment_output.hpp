@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -10,12 +11,9 @@
 
 namespace ai_terrain {
 
-// Writes a self-contained sample directory: exact height samples, a viewable
-// BMP preview, analyzer output, and controller output.
 class ExperimentOutput {
  public:
   explicit ExperimentOutput(std::filesystem::path root);
-
   [[nodiscard]] const std::filesystem::path& root() const noexcept { return root_; }
 
   void write_sample(const std::string& name, const Heightmap& map,
