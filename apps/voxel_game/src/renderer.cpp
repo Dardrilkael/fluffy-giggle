@@ -340,11 +340,16 @@ void draw_world(const VoxelRenderer& renderer,
                 const ws::ui::r2d::Camera3D& camera, float aspect,
                 perf::Counters* counters, bool cast_shadows,
                  bool receive_shadows) {
-  // Leaves have binary transparent pixels. Draw opaque geometry first,
-  // then foliage with depth testing enabled but depth writes disabled:
-  // transparent texels blend as zero and reveal the already-rendered world.
+  // Leaves use binary cut-out alpha; glass and ice share a cut-out
+  // resource-pack tile. Draw opaque geometry first, then these materials
+  // with depth testing enabled but depth writes disabled.
   const int leaves_tile =
       atlas::kTileFor[static_cast<std::size_t>(Block::leaves)][0];
+  const int glass_tile =
+      atlas::kTileFor[static_cast<std::size_t>(Block::glass)][0];
+  const auto is_alpha_tile = [&](int tile) {
+    return tile == leaves_tile || tile == glass_tile;
+  };
   const culling::Frustum fr = culling::extract_frustum(
       camera.eye, camera.target, camera.up, camera.fov_y, aspect,
       camera.near_z, camera.far_z);
@@ -409,7 +414,7 @@ void draw_world(const VoxelRenderer& renderer,
     if (foliage) {
       material.depth_write = false;
       // The shadow pass has no alpha-tested fragment stage; don't cast
-      // solid rectangular leaf-card shadows.
+      // solid rectangular cut-out cards' shadows.
       material.casts_shadow = false;
     }
     ws::ui::r3d::draw_mesh(chunk.mesh, identity, material);
@@ -417,22 +422,22 @@ void draw_world(const VoxelRenderer& renderer,
 
   // Pass 1: all opaque terrain, in its normal chunk order.
   for (const VoxelRenderer::ChunkMesh& chunk : renderer.chunk_meshes()) {
-    if (chunk.index_count != 0 && chunk.tile != leaves_tile &&
+    if (chunk.index_count != 0 && !is_alpha_tile(chunk.tile) &&
         chunk_visible(chunk)) {
       draw_chunk(chunk, false);
     }
   }
 
-  // Pass 2: foliage, far-to-near by chunk center. Back-to-front order
-  // reduces overlap artifacts between transparent leaf meshes while
-  // the opaque depth buffer still prevents foliage showing through walls.
-  std::array<const VoxelRenderer::ChunkMesh*, kWorldChunksX * kWorldChunksZ>
-      foliage_meshes{};
-  std::size_t foliage_count = 0;
+  // Pass 2: cut-out materials, far-to-near by chunk center. At most two
+  // alpha tile meshes (leaves and glass/ice) can belong to each chunk.
+  constexpr std::size_t kMaxAlphaMeshes =
+      2u * static_cast<std::size_t>(kWorldChunksX * kWorldChunksZ);
+  std::array<const VoxelRenderer::ChunkMesh*, kMaxAlphaMeshes> alpha_meshes{};
+  std::size_t alpha_count = 0;
   for (const VoxelRenderer::ChunkMesh& chunk : renderer.chunk_meshes()) {
-    if (chunk.index_count != 0 && chunk.tile == leaves_tile &&
-        chunk_visible(chunk) && foliage_count < foliage_meshes.size()) {
-      foliage_meshes[foliage_count++] = &chunk;
+    if (chunk.index_count != 0 && is_alpha_tile(chunk.tile) &&
+        chunk_visible(chunk) && alpha_count < alpha_meshes.size()) {
+      alpha_meshes[alpha_count++] = &chunk;
     }
   }
   const auto distance_sq = [&](const VoxelRenderer::ChunkMesh* chunk) {
@@ -443,13 +448,13 @@ void draw_world(const VoxelRenderer& renderer,
                      0.5f * static_cast<float>(kChunkSizeZ) - camera.eye[2];
     return dx * dx + dy * dy + dz * dz;
   };
-  std::sort(foliage_meshes.begin(),
-            foliage_meshes.begin() + static_cast<std::ptrdiff_t>(foliage_count),
+  std::sort(alpha_meshes.begin(),
+            alpha_meshes.begin() + static_cast<std::ptrdiff_t>(alpha_count),
             [&](const VoxelRenderer::ChunkMesh* a, const VoxelRenderer::ChunkMesh* b) {
               return distance_sq(a) > distance_sq(b);
             });
-  for (std::size_t i = 0; i < foliage_count; ++i) {
-    draw_chunk(*foliage_meshes[i], true);
+  for (std::size_t i = 0; i < alpha_count; ++i) {
+    draw_chunk(*alpha_meshes[i], true);
   }
 }
 
