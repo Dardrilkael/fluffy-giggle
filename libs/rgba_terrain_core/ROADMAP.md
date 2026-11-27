@@ -21,12 +21,12 @@ remain recorded for later reconsideration.
 - [ ] Ensure previews never feed back into source data.
 
 ## 4. Voxel reconstruction validation — CURRENT
-- [ ] Verify PNG dimensions and row-major X/Z coordinate preservation.
-- [ ] Verify exact height decoding for supported channel layouts.
-- [ ] Verify material, biome, water, density and feature metadata per column.
+- [x] Verify PNG dimensions and row-major X/Z coordinate preservation.
+- [x] Verify exact height decoding for supported channel layouts.
+- [x] Verify material, biome, water, density and feature metadata per column.
 - [ ] Verify voxel kind, material, biome and density for every voxel.
-- [ ] Add versioned voxel-file read/write round-trip validation.
-- [ ] Add a CLI validation command for PNG + metadata + voxel file.
+- [x] Add versioned voxel-file read/write round-trip validation.
+- [x] Add a CLI validation command for PNG + metadata + voxel file.
 - [ ] Add negative tests for malformed dimensions, truncated files and invalid fields.
 
 ## 5. Voxel-game integration — PLANNED
