@@ -67,3 +67,9 @@ $env:WS_VOXEL_TERRAIN_VOXELS = "C:\terrain\terrain.rgba-voxels"
 The app reconstructs the expected volume from the PNG and metadata and checks
 the persisted voxel file byte-field-for-byte-field before import. With none of
 the variables set, the original seeded procedural world remains the default.
+
+
+The adapter's headless acceptance suite is `test_voxel_terrain_import`. It
+covers material/biome mapping, feature metadata retention, water and air,
+chunk-edge coordinates, and failure atomicity for unsupported materials,
+inconsistent columns and partial density.
