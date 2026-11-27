@@ -498,10 +498,18 @@ TEST_CASE("world region emits deterministic hydrology diagnostic preview layers"
     for (std::size_t layer = 0; layer < layers.size(); ++layer) {
         for (std::size_t z = 0; z < 20; ++z) {
             for (std::size_t x = 0; x < 12; ++x) {
-                CHECK(left_layers[layer]->at(x, z) ==
-                      layers[layer]->at(x, z));
-                CHECK(right_layers[layer]->at(x, z) ==
-                      layers[layer]->at(x + 12, z));
+                const auto& combined_left = layers[layer]->at(x, z);
+                const auto& split_left = left_layers[layer]->at(x, z);
+                const auto& combined_right = layers[layer]->at(x + 12, z);
+                const auto& split_right = right_layers[layer]->at(x, z);
+                CHECK(split_left.r == combined_left.r);
+                CHECK(split_left.g == combined_left.g);
+                CHECK(split_left.b == combined_left.b);
+                CHECK(split_left.a == combined_left.a);
+                CHECK(split_right.r == combined_right.r);
+                CHECK(split_right.g == combined_right.g);
+                CHECK(split_right.b == combined_right.b);
+                CHECK(split_right.a == combined_right.a);
             }
         }
     }
