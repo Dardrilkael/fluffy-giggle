@@ -876,6 +876,7 @@ struct HydrologyGrid {
     std::vector<double> elevation_offsets;
     double maximum_accumulation = 0.0;
     double maximum_lake_depth_m = 0.0;
+    double maximum_erosion_offset = 0.0;
     bool valid = false;
 };
 
@@ -944,6 +945,9 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     grid.elevation_offsets.resize(count, 0.0);
     for (std::size_t i = 0; i < count; ++i) {
         grid.elevation_offsets[i] = elevation[i] - original_elevation[i];
+        grid.maximum_erosion_offset = std::max(
+            grid.maximum_erosion_offset,
+            std::abs(grid.elevation_offsets[i]));
         ocean[i] = elevation[i] <= plan.sea_level_fraction;
         if (ocean[i]) {
             precipitation[i] = 0.0;
@@ -1333,6 +1337,8 @@ RgbaImage WorldSampler::generate_rgba_region(
             hydrology_diagnostics->lake_depth, width, depth);
         initialize_diagnostic_image(
             hydrology_diagnostics->lake_basins, width, depth);
+        initialize_diagnostic_image(
+            hydrology_diagnostics->erosion_delta, width, depth);
     }
 
     const double height_span =
@@ -1486,6 +1492,21 @@ RgbaImage WorldSampler::generate_rgba_region(
                 hydrology_diagnostics->lake_basins.pixels[index] =
                     hydro.lake ? Rgba8{40, 120, 255, 255}
                                : Rgba8{0, 0, 0, 255};
+
+                const double erosion_intensity =
+                    hydrology_grid.valid &&
+                    hydrology_grid.maximum_erosion_offset > 0.0
+                    ? clamp01(std::abs(erosion_offset) /
+                              hydrology_grid.maximum_erosion_offset)
+                    : 0.0;
+                const std::uint8_t erosion_channel =
+                    diagnostic_gray(erosion_intensity);
+                hydrology_diagnostics->erosion_delta.pixels[index] =
+                    erosion_offset < 0.0
+                        ? Rgba8{erosion_channel, 0, 0, 255}
+                        : (erosion_offset > 0.0
+                            ? Rgba8{0, 0, erosion_channel, 255}
+                            : Rgba8{0, 0, 0, 255});
             }
 
             const double surface_elevation = sample_at.is_lake
@@ -1529,6 +1550,7 @@ RgbaImage WorldSampler::generate_rgba_region(
         hydrology_diagnostics->drainage_direction.validate();
         hydrology_diagnostics->lake_depth.validate();
         hydrology_diagnostics->lake_basins.validate();
+        hydrology_diagnostics->erosion_delta.validate();
     }
     return image;
 }
