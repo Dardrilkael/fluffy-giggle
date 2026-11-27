@@ -275,6 +275,25 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
     const auto repeated = eroded.generate_rgba_region(0, 0, 96, 96, settings);
     const auto un_eroded = baseline.generate_rgba_region(0, 0, 96, 96, settings);
     REQUIRE(terrain.pixels.size() == 96u * 96u);
+
+    // Land-only erosion offsets must not leak through bilinear interpolation
+    // into ocean pixels along the coastline.
+    std::size_t ocean_pixels = 0;
+    for (std::size_t i = 0; i < un_eroded.pixels.size(); ++i) {
+        const auto& base_pixel = un_eroded.pixels[i];
+        const double base_elevation =
+            (static_cast<double>(base_pixel.r) * 256.0 + base_pixel.g) /
+            65535.0;
+        if (base_elevation <= baseline.plan().sea_level_fraction) {
+            ++ocean_pixels;
+            const auto& delta = erosion_diagnostics.erosion_delta.pixels[i];
+            CHECK(delta.r == 0u);
+            CHECK(delta.g == 0u);
+            CHECK(delta.b == 0u);
+        }
+    }
+    CHECK(ocean_pixels > 0u);
+
     std::size_t changed_heights = 0;
     for (std::size_t i = 0; i < terrain.pixels.size(); ++i) {
         CHECK(terrain.pixels[i].r == repeated.pixels[i].r);
