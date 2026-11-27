@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -137,7 +138,8 @@ void generate_channel_preview_png(const MapFiles& files) {
   }
   const auto& source = *loaded;
   if (source.width == 0 || source.height == 0 ||
-      source.width > UINT32_MAX / 2u || source.height > UINT32_MAX / 2u) {
+      source.width > std::numeric_limits<std::uint32_t>::max() / 2u ||
+      source.height > std::numeric_limits<std::uint32_t>::max() / 2u) {
     throw std::runtime_error("saved terrain PNG dimensions cannot be previewed");
   }
 

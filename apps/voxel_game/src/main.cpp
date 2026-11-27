@@ -297,8 +297,7 @@ class VoxelApp final : public ws::ui::App {
           if (!validation.exact_match()) {
             throw std::runtime_error(
                 std::format("optional voxel artifact does not exactly match PNG + metadata "
-                "(mismatched voxels: {0})", validation.mismatched_voxels));          }
-          ws::core::info(
+                "(mismatched voxels: {0})", validation.mismatched_voxels));          }          ws::core::info(
               "voxel: optional voxel artifact validated ({0} voxels)",
               validation.compared_voxels);
         }
@@ -597,8 +596,7 @@ class VoxelApp final : public ws::ui::App {
     const auto phys_t0 = std::chrono::steady_clock::now();
     player_.tick(move, frame_dt, world_.collision_grid());
     if (audio_ok_) {
-      const Vec3 listener = player_.eye_position();
-      const Vec3 forward = player_.look_direction();
+      const Vec3 listener = player_.eye_position();      const Vec3 forward = player_.look_direction();
       (void)audio_.set_listener_position(listener.x, listener.y, listener.z);
       (void)audio_.set_listener_orientation(
           forward.x, forward.y, forward.z, 0.0f, 1.0f, 0.0f);
@@ -897,8 +895,7 @@ class VoxelApp final : public ws::ui::App {
 
   void poll_world_generation() {
     if (!generation_in_progress_ || !generation_job_.valid()) return;
-    if (generation_job_.wait_for(std::chrono::seconds(0)) !=
-        std::future_status::ready) {
+    if (generation_job_.wait_for(std::chrono::seconds(0)) !=        std::future_status::ready) {
       return;
     }
 
@@ -952,7 +949,7 @@ class VoxelApp final : public ws::ui::App {
                              exception.what();
       }
     } else if (!generation_in_progress_ &&
-               world_loaded_ &&
+               entry_preview_loaded_ &&
                entry_hit(buttons[2], mouse_x_, mouse_y_)) {
       enter_current_world();
     } else if (!generation_in_progress_ &&
@@ -996,12 +993,6 @@ class VoxelApp final : public ws::ui::App {
     (void)r2d::draw_text(panel.x + (panel.w - title_width) * 0.5f,
                          panel.y + 22.0f, title, font_,
                          r2d::rgba(239, 247, 225));
-    (void)r2d::draw_text(panel.x + 26.0f, panel.y + 94.0f,
-                         "WORLD SEED", font_, r2d::rgba(181, 194, 178));
-    char seed_text[48]{};
-    std::snprintf(seed_text, sizeof(seed_text), "%u", world_seed_);
-    (void)r2d::draw_text(panel.x + 150.0f, panel.y + 94.0f,
-                         seed_text, font_, r2d::rgba(220, 226, 210));
     const auto controls = entry_seed_controls(frame);
     r2d::draw_rounded_quad(controls[0].x, controls[0].y,
                            controls[0].w, controls[0].h, 6.0f,
@@ -1197,8 +1188,7 @@ class VoxelApp final : public ws::ui::App {
     const Vec3 p = player_.position();
     std::snprintf(stats, sizeof(stats),
                   "fps %u   pos %.1f %.1f %.1f   %s\n"
-                  "cpu %.2fms (phys %.2f mesh %.2f upload %.2f submit %.2f)\n"
-                  "%s   cpu p50/p95/p99 %.2f/%.2f/%.2fms  "
+                  "cpu %.2fms (phys %.2f mesh %.2f upload %.2f submit %.2f)\n"                  "%s   cpu p50/p95/p99 %.2f/%.2f/%.2fms  "
                   "upload %.1f KB  mesh jobs %u  draws %u tris %u",
                   fps_, p.x, p.y, p.z,
                   player_.grounded() ? "ground" : "air", last_timings_.total_ms,
