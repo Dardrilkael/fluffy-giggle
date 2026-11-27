@@ -60,8 +60,6 @@
 #include <ws/ui/renderer3d.hpp>
 #include <ws/rgba_terrain_core/metadata.hpp>
 #include <ws/rgba_terrain_core/rgba_terrain.hpp>
-#include <ws/rgba_terrain_core/voxel_file.hpp>
-#include <ws/rgba_terrain_core/voxel_validation.hpp>
 
 #include "menu.hpp"
 #include "hotbar.hpp"
