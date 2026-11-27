@@ -223,7 +223,10 @@ WorldSample WorldSampler::sample(std::int64_t world_x,
     }
 
     const double maximum_elevation_m = plan_.climate.maximum_elevation_m;
-    const double elevation_m = elevation * maximum_elevation_m;
+    const double above_sea_fraction = clamp01(
+        (elevation - plan_.sea_level_fraction) /
+        (1.0 - plan_.sea_level_fraction));
+    const double elevation_m = above_sea_fraction * maximum_elevation_m;
     const double latitude = plan_.depth <= 1
         ? 0.0
         : std::abs((z / static_cast<double>(plan_.depth - 1)) * 2.0 - 1.0);

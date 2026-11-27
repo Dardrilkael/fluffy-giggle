@@ -111,6 +111,21 @@ TEST_CASE("RGBA regions stitch exactly when generated as separate chunks") {
             CHECK(c.a == d.a);
         }
     }
+
+    ChannelLayout layout;
+    layout.channels = {
+        ChannelRole::Height16Msb,
+        ChannelRole::Height16Lsb,
+        ChannelRole::MaterialId,
+        ChannelRole::BiomeWaterFlags,
+    };
+    const auto columns = generate_columns(combined, layout, settings);
+    CHECK(columns.width == 8);
+    CHECK(columns.depth == 6);
+    const auto volume = generate_voxel_volume(columns, settings);
+    CHECK(volume.width == 8);
+    CHECK(volume.depth == 6);
+    CHECK(volume.height == settings.volume_height);
 }
 
 TEST_CASE("sampler can generate a small region near the edge of a huge world") {
