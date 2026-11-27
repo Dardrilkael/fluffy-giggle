@@ -40,3 +40,16 @@ The sound adapter (`voxel_audio.hpp`) is deliberately the boundary between the t
 - Frustum visibility is computed once per chunk per frame and reused by every material mesh belonging to that chunk.
 - Chunk meshing classifies exposed faces and tile IDs in one voxel traversal; greedy sweeps consume the cached face/tile data without rechecking neighbors or rescanning by block type.
 - This is a structural performance design, not a measured benchmark claim. Build, test, and FPS comparison are still required on the target machine.
+
+## RGBA terrain import
+
+The app owns the only adapter between `ws::rgba_terrain_core`'s generic
+voxel IDs and this game's `Block`/`Biome` vocabulary. The reusable terrain
+library does not depend on the game. The fixed world is 256x256x64 (16x16
+chunks), matching the current 256x256 data-map resolution without resampling.
+
+The import preflights dimensions, voxel kinds, supported material IDs, biome
+IDs and column-consistent feature metadata before clearing the world. Generic
+material IDs are explicitly mapped in `terrain_import.cpp`; biome and feature
+flags are retained in per-column metadata, not discarded or misrepresented as
+block types. The renderer remains unchanged and consumes the same World API.
