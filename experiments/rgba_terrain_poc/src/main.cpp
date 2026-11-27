@@ -3,6 +3,7 @@
 #include "rgba_terrain/rgba_terrain.hpp"
 
 #include <ws/image/image.hpp>
+#include <ws/core/log.hpp>
 
 #include <algorithm>
 #include <array>
@@ -11,7 +12,6 @@
 #include <fstream>
 #include <functional>
 #include <utility>
-#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -119,18 +119,14 @@ void print_map_report(const rgba_terrain::RgbaImage& image,
         mountain_pixels += (p.a & 0x10u) != 0 ? 1u : 0u;
         river_pixels += (p.a & 0x20u) != 0 ? 1u : 0u;
     }
-    std::cout << "RGBA data map: " << image.width << "x" << image.height
-              << "\n"
-              << "  R/G: packed 16-bit height range " << min_height
-              << ".." << max_height << "\n"
-              << "  B: material ID; A: biome + feature flags\n"
-              << "  water: " << water_pixels << ", forest: " << forest_pixels
-              << ", mountain: " << mountain_pixels << ", river: "
-              << river_pixels << "\n"
-              << "Voxel volume: " << volume.width << "x" << volume.depth
-              << "x" << volume.height << ", " << volume.voxels.size()
-              << " voxels, " << volume.voxels.size() * 5u
-              << " bytes of voxel payload\n";
+    ws::core::info("rgba_terrain: data map {}x{}", image.width, image.height);
+    ws::core::info("rgba_terrain: packed 16-bit height range {}..{}", min_height, max_height);
+    ws::core::info("rgba_terrain: channels B=material ID, A=biome + feature flags");
+    ws::core::info("rgba_terrain: feature columns water={}, forest={}, mountain={}, river={}",
+                   water_pixels, forest_pixels, mountain_pixels, river_pixels);
+    ws::core::info("rgba_terrain: voxel volume {}x{}x{} ({} voxels, {} payload bytes)",
+                   volume.width, volume.depth, volume.height, volume.voxels.size(),
+                   volume.voxels.size() * 5u);
 }
 
 void print_distribution(const char* label,
@@ -142,23 +138,19 @@ void print_distribution(const char* label,
         }
     }
     std::sort(sorted.begin(), sorted.end(), std::greater<>());
-    std::cout << "  " << label << ":";
-    if (sorted.empty()) {
-        std::cout << " none";
-    }
+    std::string summary = std::string(label) + ":";
+    if (sorted.empty()) summary += " none";
     const std::size_t limit = std::min<std::size_t>(sorted.size(), 10);
-    for (std::size_t i = 0; i < limit; ++i) {
-        std::cout << " " << sorted[i].second << "=" << sorted[i].first;
-    }
-    if (sorted.size() > limit) {
-        std::cout << " (+" << sorted.size() - limit << " more)";
-    }
-    std::cout << "\n";
+    for (std::size_t i = 0; i < limit; ++i)
+        summary += std::format(" {}={}", sorted[i].second, sorted[i].first);
+    if (sorted.size() > limit)
+        summary += std::format(" (+{} more)", sorted.size() - limit);
+    ws::core::info("rgba_terrain: {}", summary);
 }
 
 int inspect_command(int argc, char** argv) {
     if (argc != 4) {
-        std::cerr << "Usage: rgba_terrain_poc inspect <input.png> <input.rgba-terrain>\n";
+        ws::core::warn("rgba_terrain: usage: rgba_terrain_poc inspect <input.png> <input.rgba-terrain>");
         return 2;
     }
 
@@ -172,44 +164,34 @@ int inspect_command(int argc, char** argv) {
         return pixels > 0.0 ? 100.0 * static_cast<double>(count) / pixels : 0.0;
     };
 
-    std::cout << "Terrain data-map inspection\n"
-              << "  dimensions: " << analysis.width << "x" << analysis.depth
-              << " (" << static_cast<std::uint64_t>(pixels) << " columns)\n"
-              << "  encoded elevation (0.." << analysis.height_encoding_max << "): min=" << analysis.min_height
-              << " max=" << analysis.max_height
-              << " distinct=" << analysis.distinct_heights
-              << " mean=" << analysis.mean_height
-              << " stddev=" << analysis.standard_deviation << "\n"
-              << "  horizontal neighbor step: mean="
-              << analysis.mean_horizontal_step
-              << " max=" << analysis.max_horizontal_step
-              << " across " << analysis.horizontal_edges << " edges\n"
-              << "  vertical neighbor step: mean="
-              << analysis.mean_vertical_step
-              << " max=" << analysis.max_vertical_step
-              << " across " << analysis.vertical_edges << " edges\n";
+    ws::core::info("rgba_terrain: terrain data-map inspection");
+    ws::core::info("rgba_terrain: dimensions {}x{} ({} columns)",
+                   analysis.width, analysis.depth, static_cast<std::uint64_t>(pixels));
+    ws::core::info("rgba_terrain: encoded elevation (0..{}): min={} max={} distinct={} mean={:.3f} stddev={:.3f}",
+                   analysis.height_encoding_max, analysis.min_height, analysis.max_height,
+                   analysis.distinct_heights, analysis.mean_height, analysis.standard_deviation);
+    ws::core::info("rgba_terrain: horizontal neighbor step: mean={:.3f} max={} across {} edges",
+                   analysis.mean_horizontal_step, analysis.max_horizontal_step, analysis.horizontal_edges);
+    ws::core::info("rgba_terrain: vertical neighbor step: mean={:.3f} max={} across {} edges",
+                   analysis.mean_vertical_step, analysis.max_vertical_step, analysis.vertical_edges);
     print_distribution("surface materials", analysis.materials);
     print_distribution("biomes", analysis.biomes);
-    std::cout << "  feature coverage:\n"
-              << "    water: " << analysis.water_columns << " ("
-              << percentage(analysis.water_columns) << "%)\n"
-              << "    forest: " << analysis.forest_columns << " ("
-              << percentage(analysis.forest_columns) << "%)\n"
-              << "    mountain: " << analysis.mountain_columns << " ("
-              << percentage(analysis.mountain_columns) << "%)\n"
-              << "    river: " << analysis.river_columns << " ("
-              << percentage(analysis.river_columns) << "%)\n"
-              << "    reserved alpha bit: " << analysis.reserved_flag_columns
-              << " ("
-              << percentage(analysis.reserved_flag_columns) << "%)\n";
+    ws::core::info("rgba_terrain: feature coverage water={} ({:.3f}%)",
+                   analysis.water_columns, percentage(analysis.water_columns));
+    ws::core::info("rgba_terrain: feature coverage forest={} ({:.3f}%)",
+                   analysis.forest_columns, percentage(analysis.forest_columns));
+    ws::core::info("rgba_terrain: feature coverage mountain={} ({:.3f}%)",
+                   analysis.mountain_columns, percentage(analysis.mountain_columns));
+    ws::core::info("rgba_terrain: feature coverage river={} ({:.3f}%)",
+                   analysis.river_columns, percentage(analysis.river_columns));
+    ws::core::info("rgba_terrain: reserved alpha bit={} ({:.3f}%)",
+                   analysis.reserved_flag_columns, percentage(analysis.reserved_flag_columns));
     return 0;
 }
 
 int generate_command(int argc, char** argv) {
     if (argc != 8) {
-        std::cerr
-            << "Usage: rgba_terrain_poc generate <width> <depth> <seed> "
-               "<output.png> <output.rgba-terrain> <output.rgba-voxels>\n";
+        ws::core::warn("rgba_terrain: usage: rgba_terrain_poc generate <width> <depth> <seed> <output.png> <output.rgba-terrain> <output.rgba-voxels>");
         return 2;
     }
 
@@ -278,17 +260,15 @@ int generate_command(int argc, char** argv) {
         decoded_image, decoded_metadata.layout, decoded_metadata.settings);
     write_voxel_file(volume, argv[7]);
     print_map_report(decoded_image, volume);
-    std::cout << "Wrote data PNG: " << argv[5] << "\n"
-              << "Wrote metadata: " << argv[6] << "\n"
-              << "Wrote voxels: " << argv[7] << "\n";
+    ws::core::info("rgba_terrain: wrote data PNG '{}'", argv[5]);
+    ws::core::info("rgba_terrain: wrote metadata '{}'", argv[6]);
+    ws::core::info("rgba_terrain: wrote voxel volume '{}'", argv[7]);
     return 0;
 }
 
 int convert_command(int argc, char** argv) {
     if (argc != 5) {
-        std::cerr
-            << "Usage: rgba_terrain_poc convert <input.png> "
-               "<input.rgba-terrain> <output.rgba-voxels>\n";
+        ws::core::warn("rgba_terrain: usage: rgba_terrain_poc convert <input.png> <input.rgba-terrain> <output.rgba-voxels>");
         return 2;
     }
     const auto metadata = rgba_terrain::load_metadata(argv[3]);
@@ -313,15 +293,13 @@ int main(int argc, char** argv) {
         if (argc >= 2 && std::string(argv[1]) == "inspect") {
             return inspect_command(argc, argv);
         }
-        std::cerr
-            << "RGBA terrain generator\n"
-            << "  generate <width> <depth> <seed> <out.png> <out.meta> <out.voxels>\n"
-            << "  convert <input.png> <input.meta> <out.voxels>\n"
-            << "  inspect <input.png> <input.meta>\n";
+        ws::core::info("rgba_terrain: RGBA terrain generator");
+        ws::core::info("rgba_terrain: commands: generate <width> <depth> <seed> <out.png> <out.meta> <out.voxels>");
+        ws::core::info("rgba_terrain:          convert <input.png> <input.meta> <out.voxels>");
+        ws::core::info("rgba_terrain:          inspect <input.png> <input.meta>");
         return 2;
     } catch (const std::exception& exception) {
-        std::cerr << "RGBA terrain generation failed: " << exception.what()
-                  << "\n";
+        ws::core::error("rgba_terrain: {}", exception.what());
         return 1;
     }
 }
