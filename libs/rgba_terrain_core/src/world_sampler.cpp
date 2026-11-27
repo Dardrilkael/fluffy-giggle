@@ -223,8 +223,8 @@ struct HydrologyField {
     bool lake = false;
 };
 
-constexpr std::array<int, 8> drainage_dx{-1, 0, 1, 1, 1, 0, -1, -1};
-constexpr std::array<int, 8> drainage_dz{-1, -1, -1, 0, 1, 1, 1, 0};
+constexpr std::array<int, 8> drainage_dx{0, 1, 1, 1, 0, -1, -1, -1};
+constexpr std::array<int, 8> drainage_dz{-1, -1, 0, 1, 1, 1, 0, -1};
 
 double terrain_at_grid(const WorldPlan& plan, std::int64_t gx,
                        std::int64_t gz) {
@@ -246,7 +246,7 @@ std::pair<DrainageDirection, double> route_grid_cell(
     for (std::size_t i = 0; i < drainage_dx.size(); ++i) {
         const double neighbor = terrain_at_grid(
             plan, gx + drainage_dx[i], gz + drainage_dz[i]);
-        const double distance = (i % 2 == 0) ? 1.41421356237 : 1.0;
+        const double distance = (i % 2 == 1) ? 1.41421356237 : 1.0;
         const double drop = (elevation - neighbor) / distance;
         if (drop > best_drop) {
             best_drop = drop;
@@ -267,8 +267,6 @@ HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
     const double scale = plan.hydrology.routing_cell_scale;
     const auto gx = static_cast<std::int64_t>(std::floor(x / scale));
     const auto gz = static_cast<std::int64_t>(std::floor(z / scale));
-    const double cell_x = (static_cast<double>(gx) + 0.5) * scale;
-    const double cell_z = (static_cast<double>(gz) + 0.5) * scale;
     const double cell_elevation = terrain_at_grid(plan, gx, gz);
     const auto [direction, drop] =
         route_grid_cell(plan, gx, gz, cell_elevation);
@@ -346,8 +344,6 @@ HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
         (result.accumulation - threshold) / (threshold * 2.5));
     result.river = !result.lake && result.accumulation >= threshold &&
                    !local_sink;
-    (void)cell_x;
-    (void)cell_z;
     return result;
 }
 
