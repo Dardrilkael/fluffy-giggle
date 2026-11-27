@@ -3,6 +3,8 @@
 #include <ws/rgba_terrain_core/rgba_terrain.hpp>
 #include <ws/rgba_terrain_core/voxel_file.hpp>
 #include <ws/rgba_terrain_core/voxel_validation.hpp>
+#include <ws/rgba_terrain_core/world_plan.hpp>
+#include <ws/rgba_terrain_core/world_sampler.hpp>
 
 #include <ws/image/image.hpp>
 #include <ws/core/log.hpp>
@@ -87,6 +89,7 @@ void print_map_report(const ws::rgba_terrain_core::RgbaImage& image,
     std::size_t forest_pixels = 0;
     std::size_t mountain_pixels = 0;
     std::size_t river_pixels = 0;
+    std::size_t lake_pixels = 0;
     for (const auto& p : image.pixels) {
         const std::uint32_t height =
             (static_cast<std::uint32_t>(p.r) << 8u) | p.g;
@@ -96,12 +99,14 @@ void print_map_report(const ws::rgba_terrain_core::RgbaImage& image,
         forest_pixels += (p.a & 0x08u) != 0 ? 1u : 0u;
         mountain_pixels += (p.a & 0x10u) != 0 ? 1u : 0u;
         river_pixels += (p.a & 0x20u) != 0 ? 1u : 0u;
+        lake_pixels += (p.a & 0x40u) != 0 ? 1u : 0u;
     }
     ws::core::info("rgba_terrain: data map {}x{}", image.width, image.height);
     ws::core::info("rgba_terrain: packed 16-bit height range {}..{}", min_height, max_height);
     ws::core::info("rgba_terrain: channels B=material ID, A=biome + feature flags");
-    ws::core::info("rgba_terrain: feature columns water={}, forest={}, mountain={}, river={}",
-                   water_pixels, forest_pixels, mountain_pixels, river_pixels);
+    ws::core::info("rgba_terrain: feature columns water={}, forest={}, mountain={}, river={}, lake={}",
+                   water_pixels, forest_pixels, mountain_pixels, river_pixels,
+                   lake_pixels);
     ws::core::info("rgba_terrain: voxel volume {}x{}x{} ({} voxels, {} payload bytes)",
                    volume.width, volume.depth, volume.height, volume.voxels.size(),
                    volume.voxels.size() * 5u);
@@ -248,6 +253,75 @@ int generate_command(int argc, char** argv) {
     return 0;
 }
 
+int generate_world_command(int argc, char** argv) {
+    if (argc != 8) {
+        ws::core::warn("rgba_terrain: usage: rgba_terrain_poc generate-world <width> <depth> <seed> <output.png> <output.rgba-terrain> <output.rgba-voxels>");
+        return 2;
+    }
+    const std::size_t width = parse_size(argv[2], "width");
+    const std::size_t depth = parse_size(argv[3], "depth");
+    constexpr std::size_t max_voxels = 64u * 1024u * 1024u;
+    if (width > std::numeric_limits<std::size_t>::max() / depth ||
+        width * depth > max_voxels / 64u) {
+        throw std::runtime_error("requested terrain volume exceeds the 64-million-voxel POC limit");
+    }
+    const std::uint32_t seed = parse_seed(argv[4]);
+    ws::rgba_terrain_core::TerrainSettings settings;
+    settings.min_height = 0.0f;
+    settings.max_height = 56.0f;
+    settings.volume_height = 64;
+    settings.sea_level = 12;
+    settings.subsurface_depth = 4;
+
+    auto plan = ws::rgba_terrain_core::make_default_world_plan(
+        static_cast<std::int64_t>(width), static_cast<std::int64_t>(depth), seed);
+    const double span = static_cast<double>(std::max(width, depth));
+    plan.scales.continent_scale = std::max(16.0, span * 0.52);
+    plan.scales.province_scale = std::max(8.0, span * 0.23);
+    plan.scales.ecosystem_scale = std::max(4.0, span * 0.12);
+    plan.scales.sub_biome_scale = std::max(2.0, span * 0.045);
+    plan.scales.habitat_scale = std::max(1.0, span * 0.015);
+    plan.hydrology.routing_cell_scale = std::max(1.0, span / 32.0);
+    plan.validate();
+
+    const ws::rgba_terrain_core::WorldSampler sampler(std::move(plan));
+    const auto image = sampler.generate_rgba_region(0, 0, width, depth, settings);
+    const auto bytes = flatten_rgba(image);
+    const auto written = ws::image::write_rgba8_png_file(
+        argv[5], checked_u32(width, "width"), checked_u32(depth, "depth"), bytes);
+    if (!written) throw std::runtime_error("PNG write failed: " + written.error().message);
+
+    const std::string metadata =
+        "# RGBA terrain data map v1\n"
+        "channel.r=height16_msb\nchannel.g=height16_lsb\n"
+        "channel.b=material_id\nchannel.a=biome_water_flags\n"
+        "min_height=0\nmax_height=56\nvolume_height=64\nsea_level=12\n"
+        "subsurface_depth=4\nwater_threshold=128\ndefault_material=1\n"
+        "subsurface_material=2\ndeep_material=3\nwater_material=6\n"
+        "default_biome=0\nsolid_density=255\n";
+    {
+        std::ofstream out(argv[6]);
+        if (!out) throw std::runtime_error("cannot create metadata output");
+        out << metadata;
+        if (!out) throw std::runtime_error("failed writing metadata output");
+    }
+    const auto decoded_metadata = ws::rgba_terrain_core::load_metadata(argv[6]);
+    const auto decoded_image = ws::rgba_terrain_core::load_rgba_image(argv[5]);
+    const auto volume = ws::rgba_terrain_core::generate_voxel_volume(
+        decoded_image, decoded_metadata.layout, decoded_metadata.settings);
+    const auto voxel_write = ws::rgba_terrain_core::write_voxel_file(argv[7], volume);
+    if (!voxel_write) {
+        ws::core::log_error(voxel_write.error());
+        return 1;
+    }
+    print_map_report(decoded_image, volume);
+    ws::core::info("rgba_terrain: generated with WorldSampler + hydrology");
+    ws::core::info("rgba_terrain: wrote data PNG '{}'", argv[5]);
+    ws::core::info("rgba_terrain: wrote metadata '{}'", argv[6]);
+    ws::core::info("rgba_terrain: wrote voxel volume '{}'", argv[7]);
+    return 0;
+}
+
 int convert_command(int argc, char** argv) {
     if (argc != 5) {
         ws::core::warn("rgba_terrain: usage: rgba_terrain_poc convert <input.png> <input.rgba-terrain> <output.rgba-voxels>");
@@ -332,6 +406,9 @@ int main(int argc, char** argv) {
         if (argc >= 2 && std::string(argv[1]) == "generate") {
             return generate_command(argc, argv);
         }
+        if (argc >= 2 && std::string(argv[1]) == "generate-world") {
+            return generate_world_command(argc, argv);
+        }
         if (argc >= 2 && std::string(argv[1]) == "convert") {
             return convert_command(argc, argv);
         }
@@ -343,6 +420,7 @@ int main(int argc, char** argv) {
         }
         ws::core::info("rgba_terrain: RGBA terrain generator");
         ws::core::info("rgba_terrain: commands: generate <width> <depth> <seed> <out.png> <out.meta> <out.voxels>");
+        ws::core::info("rgba_terrain:          generate-world <width> <depth> <seed> <out.png> <out.meta> <out.voxels>");
         ws::core::info("rgba_terrain:          convert <input.png> <input.meta> <out.voxels>");
         ws::core::info("rgba_terrain:          inspect <input.png> <input.meta>");
         ws::core::info("rgba_terrain:          validate <input.png> <input.meta> <input.voxels>");
