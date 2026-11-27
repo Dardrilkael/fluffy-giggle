@@ -2106,6 +2106,8 @@ RgbaImage WorldSampler::generate_rgba_region(
         initialize_diagnostic_image(
             hydrology_diagnostics->stream_order, width, depth);
         initialize_diagnostic_image(
+            hydrology_diagnostics->river_class, width, depth);
+        initialize_diagnostic_image(
             hydrology_diagnostics->watershed_basins, width, depth);
         initialize_diagnostic_image(
             hydrology_diagnostics->river_influence, width, depth);
@@ -2338,6 +2340,9 @@ RgbaImage WorldSampler::generate_rgba_region(
                 hydrology_diagnostics->stream_order.pixels[index] =
                     diagnostic_pixel(
                         static_cast<double>(hydro.stream_order) / 8.0);
+                hydrology_diagnostics->river_class.pixels[index] =
+                    diagnostic_pixel(
+                        static_cast<double>(hydro.river_class) / 3.0);
 
                 const std::uint64_t basin_hash =
                     mix_bits(static_cast<std::uint64_t>(hydro.watershed_id));
@@ -2460,6 +2465,7 @@ RgbaImage WorldSampler::generate_rgba_region(
         hydrology_diagnostics->lake_depth.validate();
         hydrology_diagnostics->lake_basins.validate();
         hydrology_diagnostics->stream_order.validate();
+        hydrology_diagnostics->river_class.validate();
         hydrology_diagnostics->watershed_basins.validate();
         hydrology_diagnostics->river_influence.validate();
         hydrology_diagnostics->mountain_peak_distance.validate();
