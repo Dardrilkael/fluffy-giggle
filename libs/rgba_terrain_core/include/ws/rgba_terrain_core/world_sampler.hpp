@@ -74,8 +74,10 @@ struct WorldSample {
     double rain_shadow = 0.0;
     double ocean_moisture = 0.0;
 
-    // Hydrology diagnostics. Accumulation is a bounded, precipitation-weighted
-    // contributing-area estimate in source-cell equivalents.
+    // Hydrology diagnostics. Accumulation is precipitation-derived runoff,
+    // including temperature-dependent rain and snowmelt, in source-cell
+    // equivalents. Watershed IDs are populated by whole-world generation;
+    // the bounded point-sample fallback may leave them zero.
     DrainageDirection drainage_direction = DrainageDirection::Sink;
     double watershed_accumulation = 0.0;
     double river_strength = 0.0;
