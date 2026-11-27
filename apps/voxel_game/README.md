@@ -47,6 +47,13 @@ the original material and biome/flag fields. New production code should
 construct a `WorldSampler` and use `generate_rgba_region()` with the v2
 `MaterialFeatureFlags` / `BiomeId` layout.
 
+The production sampler runs deterministic stream-power hydraulic incision
+and thermal talus relaxation over the complete finite routing grid before
+final D8 flow accumulation. The resulting elevation offsets are interpolated
+into the RGBA map, so independently generated chunks share the same eroded
+surface. Set `WorldHydrologySettings::erosion_enabled = false` only for
+baseline comparisons or intentionally un-eroded test maps.
+
 The voxel-only detail pass is deliberately separate from 2D world generation:
 caves, ores, and vegetation are gameplay details, not competing sources for
 the production terrain surface, climate, or river network. The older
