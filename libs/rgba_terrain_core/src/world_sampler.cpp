@@ -1149,44 +1149,44 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     const double threshold = plan.hydrology.river_accumulation_threshold;
 
     {
-    // The baseline hydrology uses the same priority-flood/D8 graph as
-    // erosion and final post-erosion hydrology. Keep these cells for exact
-    // baseline ocean classification at output-pixel resolution.
-    const DrainageRouting original_routing =
-        build_drainage_routing(original_elevation, ocean, grid.width, grid.height);
-    if (original_routing.direction.size() != count ||
-        original_routing.upstream_order.size() != count) {
-        return grid;
-    }
-    std::vector<double> original_accumulation = accumulation;
-    for (const std::size_t i : original_routing.upstream_order) {
-        const std::size_t downstream = drainage_downstream_index(
-            i, original_routing.direction[i], grid.width, grid.height);
-        if (downstream != count) {
-            original_accumulation[downstream] += original_accumulation[i];
+        // The baseline hydrology uses the same priority-flood/D8 graph as
+        // erosion and final post-erosion hydrology. Keep these cells for exact
+        // baseline ocean classification at output-pixel resolution.
+        const DrainageRouting original_routing =
+            build_drainage_routing(original_elevation, ocean, grid.width, grid.height);
+        if (original_routing.direction.size() != count ||
+            original_routing.upstream_order.size() != count) {
+            return grid;
         }
-    }
+        std::vector<double> original_accumulation = accumulation;
+        for (const std::size_t i : original_routing.upstream_order) {
+            const std::size_t downstream = drainage_downstream_index(
+                i, original_routing.direction[i], grid.width, grid.height);
+            if (downstream != count) {
+                original_accumulation[downstream] += original_accumulation[i];
+            }
+        }
 
-    grid.original_cells.resize(count);
-    for (std::size_t i = 0; i < count; ++i) {
-        HydrologyField& cell = grid.original_cells[i];
-        cell.direction = original_routing.direction[i];
-        cell.accumulation = original_accumulation[i];
-        cell.river_strength = clamp01(
-            (original_accumulation[i] - threshold) / (threshold * 2.5));
-        cell.lake_depth_m = std::max(
-            0.0, original_routing.filled_elevation[i] - original_elevation[i]) *
-            plan.climate.maximum_elevation_m;
-        cell.lake = !ocean[i] &&
-            cell.lake_depth_m >= plan.hydrology.lake_minimum_depth_m &&
-            original_accumulation[i] >=
-                plan.hydrology.lake_minimum_accumulation &&
-            precipitation[i] >= plan.hydrology.lake_minimum_precipitation;
-        cell.lake_surface_elevation = original_routing.filled_elevation[i];
-        cell.river = !cell.lake &&
-            original_routing.direction[i] != DrainageDirection::Sink &&
-            original_accumulation[i] >= threshold;
-    }
+        grid.original_cells.resize(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            HydrologyField& cell = grid.original_cells[i];
+            cell.direction = original_routing.direction[i];
+            cell.accumulation = original_accumulation[i];
+            cell.river_strength = clamp01(
+                (original_accumulation[i] - threshold) / (threshold * 2.5));
+            cell.lake_depth_m = std::max(
+                0.0, original_routing.filled_elevation[i] - original_elevation[i]) *
+                plan.climate.maximum_elevation_m;
+            cell.lake = !ocean[i] &&
+                cell.lake_depth_m >= plan.hydrology.lake_minimum_depth_m &&
+                original_accumulation[i] >=
+                    plan.hydrology.lake_minimum_accumulation &&
+                precipitation[i] >= plan.hydrology.lake_minimum_precipitation;
+            cell.lake_surface_elevation = original_routing.filled_elevation[i];
+            cell.river = !cell.lake &&
+                original_routing.direction[i] != DrainageDirection::Sink &&
+                original_accumulation[i] >= threshold;
+        }
 
     }
 
