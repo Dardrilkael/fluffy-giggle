@@ -446,6 +446,10 @@ double terrain_at_grid(const WorldPlan& plan, std::int64_t gx,
 // erosion and final hydrology. Every non-outlet edge points to a strictly
 // earlier (filled elevation, visit order) key, so the graph is acyclic even
 // when steepest-downhill edges and depression-spill parent edges meet.
+std::size_t drainage_downstream_index(
+    std::size_t source, DrainageDirection direction,
+    std::size_t width, std::size_t height);
+
 struct DrainageRouting {
     std::vector<double> filled_elevation;
     std::vector<std::size_t> upstream_order;
