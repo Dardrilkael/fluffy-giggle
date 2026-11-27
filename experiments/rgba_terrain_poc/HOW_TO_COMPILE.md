@@ -28,9 +28,10 @@ Run these commands from the repository root:
 
 The executable is written to build/rgba-terrain-poc/bin. Invoke it with:
 
-    rgba_terrain_poc input.png input.rgba-terrain output.voxcols
+    rgba_terrain_poc input.png input.rgba-terrain output.rgba-voxels
 
 The input must be an 8-bit RGBA PNG. The loader verifies that the encoded
 source has four channels; it does not silently convert RGB or grayscale
 images into RGBA data maps. Pixel coordinates and channel byte values are
-preserved in row-major order.
+preserved in row-major order. The output is a dense voxel volume using the
+RGAVOX01 format described in README.md.
