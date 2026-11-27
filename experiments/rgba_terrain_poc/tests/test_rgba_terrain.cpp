@@ -154,14 +154,14 @@ int main() {
     {
         std::ofstream metadata_file(metadata_path);
         metadata_file
-            << "channel.r=height16_msb\\n"
-            << "channel.g=height16_lsb\\n"
-            << "channel.b=material_id\\n"
-            << "channel.a=biome_water_flags\\n"
-            << "min_height=0\\n"
-            << "max_height=56\\n"
-            << "volume_height=64\\n"
-            << "sea_level=12\\n";
+            << "channel.r=height16_msb\n"
+            << "channel.g=height16_lsb\n"
+            << "channel.b=material_id\n"
+            << "channel.a=biome_water_flags\n"
+            << "min_height=0\n"
+            << "max_height=56\n"
+            << "volume_height=64\n"
+            << "sea_level=12\n";
         assert(static_cast<bool>(metadata_file));
     }
     const auto parsed_metadata = load_metadata(metadata_path.string());
