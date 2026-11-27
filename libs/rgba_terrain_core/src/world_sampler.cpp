@@ -991,6 +991,9 @@ void apply_fluvial_terrain_shaping(
         if (river_source < count) {
             const HydrologyField& river = cells[river_source];
             const auto radii = river_radii(river, scale, threshold);
+            cells[i].river_influence = radii[2] > 0.0
+                ? 1.0 - smoothstep(0.0, radii[2], distance)
+                : 0.0;
             const double channel_radius = radii[0];
             const double bank_radius = radii[1];
             const double floodplain_radius = radii[2];
