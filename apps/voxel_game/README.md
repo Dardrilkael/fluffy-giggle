@@ -87,10 +87,11 @@ not participate in world loading:
 - `drainage-direction.png` (eight distinct colors for D8 directions; black
   represents a sink)
 - `lake-depth.png`, `lake-basins.png`
+- `erosion-delta.png` (red = incision, blue = sediment deposition)
 
-The accumulation and lake-depth previews use normalization across the entire
-routing grid, so their values remain visually consistent when the same world
-is generated in separate regions. A separate
+The accumulation, lake-depth, and erosion-delta previews use normalization
+across the entire routing grid, so their values remain visually consistent
+when the same world is generated in separate regions. A separate
 `.rgba-voxels` file is not required. Generation stays on a worker thread;
 the PNG import and GPU chunk-mesh upload happen on the main/render thread.
 
