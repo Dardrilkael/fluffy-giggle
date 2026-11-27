@@ -251,17 +251,21 @@ class VoxelApp final : public ws::ui::App {
     const char* terrain_png = std::getenv("WS_VOXEL_TERRAIN_PNG");
     const char* terrain_meta = std::getenv("WS_VOXEL_TERRAIN_META");
     const char* terrain_voxels = std::getenv("WS_VOXEL_TERRAIN_VOXELS");
+    const bool has_terrain_png = terrain_png != nullptr && terrain_png[0] != '\0';
+    const bool has_terrain_meta =
+        terrain_meta != nullptr && terrain_meta[0] != '\0';
+    const bool has_terrain_voxels =
+        terrain_voxels != nullptr && terrain_voxels[0] != '\0';
     const bool terrain_requested =
-        terrain_png != nullptr || terrain_meta != nullptr ||
-        terrain_voxels != nullptr;
+        has_terrain_png || has_terrain_meta || has_terrain_voxels;
     if (!terrain_requested) {
       world_.generate(kSeed);
     } else {
-      if (terrain_png == nullptr || terrain_meta == nullptr ||
-          terrain_voxels == nullptr) {
+      if (!has_terrain_png || !has_terrain_meta) {
         ws::core::error(
-            "voxel: RGBA terrain import requires WS_VOXEL_TERRAIN_PNG, "
-            "WS_VOXEL_TERRAIN_META and WS_VOXEL_TERRAIN_VOXELS");
+            "voxel: RGBA terrain import requires "
+            "WS_VOXEL_TERRAIN_PNG and WS_VOXEL_TERRAIN_META; "
+            "WS_VOXEL_TERRAIN_VOXELS is optional for validation");
         dead_ = true;
         return;
       }
@@ -270,26 +274,38 @@ class VoxelApp final : public ws::ui::App {
             ws::rgba_terrain_core::load_metadata(terrain_meta);
         const auto image =
             ws::rgba_terrain_core::load_rgba_image(terrain_png);
-        const auto expected = ws::rgba_terrain_core::generate_voxel_volume(
+        const auto terrain = ws::rgba_terrain_core::generate_voxel_volume(
             image, metadata.layout, metadata.settings);
-        const auto stored =
-            ws::rgba_terrain_core::read_voxel_file(terrain_voxels);
-        if (!stored) {
-          throw std::runtime_error(stored.error().message);
+
+        // PNG + metadata are authoritative. The persisted voxel file is
+        // only an optional validation artifact; it never supplies the world.
+        if (has_terrain_voxels) {
+          const auto stored =
+              ws::rgba_terrain_core::read_voxel_file(terrain_voxels);
+          if (!stored) {
+            throw std::runtime_error(stored.error().message);
+          }
+          const auto validation =
+              ws::rgba_terrain_core::compare_voxel_volumes(terrain, *stored);
+          if (!validation.exact_match()) {
+            throw std::runtime_error(
+                "optional voxel artifact does not exactly match PNG + metadata "
+                "(mismatched voxels: " +
+                std::to_string(validation.mismatched_voxels) + ")");
+          }
+          ws::core::info(
+              "voxel: optional voxel artifact validated ({} voxels)",
+              validation.compared_voxels);
         }
-        const auto validation =
-            ws::rgba_terrain_core::compare_voxel_volumes(expected, *stored);
-        if (!validation.exact_match()) {
-          throw std::runtime_error(
-              "saved voxel volume does not exactly match PNG + metadata");
-        }
-        const auto imported = voxel::import_terrain_volume(world_, *stored);
+
+        const auto imported = voxel::import_terrain_volume(world_, terrain);
         if (!imported) {
           throw std::runtime_error(imported.error().message);
         }
         ws::core::info(
-            "voxel: imported RGBA terrain {}x{}x{} ({} voxels, {} columns)",
-            stored->width, stored->depth, stored->height,
+            "voxel: reconstructed and imported RGBA terrain {}x{}x{} "
+            "from PNG + metadata ({} voxels, {} columns)",
+            terrain.width, terrain.depth, terrain.height,
             imported->voxel_count, imported->column_count);
         ws::core::info(
             "voxel: imported biomes plains={} forest={} desert={} mountain={}",
