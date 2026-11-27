@@ -33,7 +33,7 @@ struct TerrainMapAnalysis {
     std::uint64_t forest_columns = 0;
     std::uint64_t mountain_columns = 0;
     std::uint64_t river_columns = 0;
-    std::uint64_t reserved_flag_columns = 0;
+    std::uint64_t lake_columns = 0;
 };
 
 // Elevation statistics and neighbor differences use the original encoded
