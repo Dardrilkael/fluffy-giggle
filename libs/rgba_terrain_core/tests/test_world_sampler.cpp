@@ -50,9 +50,9 @@ TEST_CASE("world sampler is deterministic at global coordinates") {
 
 TEST_CASE("world sampler rejects coordinates outside finite world bounds") {
     WorldSampler sampler(make_default_world_plan(256, 128, 42));
-    CHECK_THROWS_AS(sampler.sample(-1, 0), std::out_of_range);
-    CHECK_THROWS_AS(sampler.sample(256, 0), std::out_of_range);
-    CHECK_THROWS_AS(sampler.sample(0, 128), std::out_of_range);
+    CHECK_THROWS_AS((void)sampler.sample(-1, 0), std::out_of_range);
+    CHECK_THROWS_AS((void)sampler.sample(256, 0), std::out_of_range);
+    CHECK_THROWS_AS((void)sampler.sample(0, 128), std::out_of_range);
 }
 
 TEST_CASE("world regions softly influence temperature, elevation and ecosystems") {
@@ -240,8 +240,10 @@ TEST_CASE("hydrology diagnostics are deterministic and bounded") {
             CHECK(first.river_strength >= 0.0);
             CHECK(first.river_strength <= 1.0);
             CHECK(first.lake_depth_m >= 0.0);
-            CHECK(static_cast<std::uint8_t>(first.drainage_direction) <= 7 ||
-                  first.drainage_direction == DrainageDirection::Sink);
+            bool valid_drainage =
+                  static_cast<std::uint8_t>(first.drainage_direction) <= 7 ||
+                  first.drainage_direction == DrainageDirection::Sink;
+            CHECK(valid_drainage);
             CHECK(!(first.is_river && first.is_lake));
             found_land = true;
             break;

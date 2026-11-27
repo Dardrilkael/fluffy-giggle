@@ -1,4 +1,5 @@
 // apps/voxel_game - a first-person voxel sandbox on the ws stack.
+#define _CRT_SECURE_NO_WARNINGS
 //
 // THE COMPOSITION (bounce's shape, four libs deep):
 //   ws::ui      - the App shell (window, Vulkan, r2d/r3d), the HUD's
@@ -60,6 +61,8 @@
 #include <ws/ui/renderer3d.hpp>
 #include <ws/rgba_terrain_core/metadata.hpp>
 #include <ws/rgba_terrain_core/rgba_terrain.hpp>
+#include <ws/rgba_terrain_core/voxel_file.hpp>
+#include <ws/rgba_terrain_core/voxel_validation.hpp>
 
 #include "menu.hpp"
 #include "hotbar.hpp"
@@ -287,12 +290,11 @@ class VoxelApp final : public ws::ui::App {
               ws::rgba_terrain_core::compare_voxel_volumes(terrain, *stored);
           if (!validation.exact_match()) {
             throw std::runtime_error(
-                "optional voxel artifact does not exactly match PNG + metadata "
-                "(mismatched voxels: " +
-                std::to_string(validation.mismatched_voxels) + ")");
+                std::format("optional voxel artifact does not exactly match PNG + metadata "
+                "(mismatched voxels: {0})", validation.mismatched_voxels));
           }
           ws::core::info(
-              "voxel: optional voxel artifact validated ({} voxels)",
+              "voxel: optional voxel artifact validated ({0} voxels)",
               validation.compared_voxels);
         }
 
@@ -301,12 +303,12 @@ class VoxelApp final : public ws::ui::App {
           throw std::runtime_error(imported.error().message);
         }
         ws::core::info(
-            "voxel: reconstructed and imported RGBA terrain {}x{}x{} "
-            "from PNG + metadata ({} voxels, {} columns)",
+            "voxel: reconstructed and imported RGBA terrain {0}x{1}x{2} "
+            "from PNG + metadata ({3} voxels, {4} columns)",
             terrain.width, terrain.depth, terrain.height,
             imported->voxel_count, imported->column_count);
         ws::core::info(
-            "voxel: imported biomes plains={} forest={} desert={} mountain={}",
+            "voxel: imported biomes plains={0} forest={1} desert={2} mountain={3}",
             imported->biome_columns[static_cast<std::size_t>(voxel::Biome::plains)],
             imported->biome_columns[static_cast<std::size_t>(voxel::Biome::forest)],
             imported->biome_columns[static_cast<std::size_t>(voxel::Biome::desert)],

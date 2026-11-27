@@ -30,6 +30,55 @@ std::uint32_t checked_u32(std::size_t value, const char* field) {
     return static_cast<std::uint32_t>(value);
 }
 
+std::size_t parse_size(const std::string& str, const char* field) {
+    std::size_t value = 0;
+    for (char c : str) {
+        if (c < '0' || c > '9') {
+            throw std::runtime_error(std::string(field) + " must be a positive integer");
+        }
+        value = value * 10 + (c - '0');
+    }
+    if (value == 0) {
+        throw std::runtime_error(std::string(field) + " must be greater than zero");
+    }
+    return value;
+}
+
+std::uint32_t parse_seed(const std::string& str) {
+    std::uint32_t value = 0;
+    std::size_t pos = 0;
+    if (str.size() >= 2 && str[0] == '0' && (str[1] == 'x' || str[1] == 'X')) {
+        pos = 2;
+        for (std::size_t i = 2; i < str.size(); ++i) {
+            char c = str[i];
+            if (c >= '0' && c <= '9') value = value * 16 + (c - '0');
+            else if (c >= 'a' && c <= 'f') value = value * 16 + (c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') value = value * 16 + (c - 'A' + 10);
+            else throw std::runtime_error("seed must be a valid integer (decimal or 0x hex)");
+        }
+    } else {
+        for (char c : str) {
+            if (c < '0' || c > '9') {
+                throw std::runtime_error("seed must be a non-negative integer");
+            }
+            value = value * 10 + (c - '0');
+        }
+    }
+    return value;
+}
+
+std::vector<std::uint8_t> flatten_rgba(const ws::rgba_terrain_core::RgbaImage& image) {
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(image.pixels.size() * 4);
+    for (const auto& p : image.pixels) {
+        bytes.push_back(p.r);
+        bytes.push_back(p.g);
+        bytes.push_back(p.b);
+        bytes.push_back(p.a);
+    }
+    return bytes;
+}
+
 void print_map_report(const ws::rgba_terrain_core::RgbaImage& image,
                       const ws::rgba_terrain_core::VoxelVolume& volume) {
     std::uint32_t min_height = 65535;

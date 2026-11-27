@@ -374,7 +374,6 @@ WorldSample WorldSampler::sample(std::int64_t world_x,
 
     const double x = static_cast<double>(world_x);
     const double z = static_cast<double>(world_z);
-    const double continent_scale = plan_.scales.continent_scale;
     const double province_scale = plan_.scales.province_scale;
 
     const RegionalInfluences regions = evaluate_regions(plan_, x, z);

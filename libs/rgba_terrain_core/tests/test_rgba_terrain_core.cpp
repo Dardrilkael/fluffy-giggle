@@ -29,7 +29,8 @@ TEST_CASE("RGBA terrain image decoding and voxel reconstruction") {
     settings.sea_level = 5;
     settings.subsurface_depth = 2;
     const auto columns = generate_columns(image, layout, settings);
-    CHECK(columns.width == 2 && columns.depth == 1);
+    CHECK(columns.width == 2);
+    CHECK(columns.depth == 1);
     CHECK(columns.columns.size() == 2);
     CHECK(columns.columns[0].height == 10);
     CHECK(columns.columns[0].material_id == 7);
@@ -40,7 +41,9 @@ TEST_CASE("RGBA terrain image decoding and voxel reconstruction") {
     // First column: top material at y=10, subsurface y=8..9, deep below.
     // Second column: only its y=0 surface is solid; no water is requested.
     const auto volume = generate_voxel_volume(columns, settings);
-    CHECK(volume.width == 2 && volume.depth == 1 && volume.height == 16);
+    CHECK(volume.width == 2);
+    CHECK(volume.depth == 1);
+    CHECK(volume.height == 16);
     CHECK(volume.voxels.size() == 32);
     CHECK(volume.at(0, 10, 0).kind == VoxelKind::Solid);
     CHECK(volume.at(0, 10, 0).material_id == 7);
@@ -116,7 +119,10 @@ TEST_CASE("RGBA terrain image decoding and voxel reconstruction") {
     for (std::size_t i = 0; i < generated.pixels.size(); ++i) {
         const auto& pixel = generated.pixels[i];
         const auto& same = generated_again.pixels[i];
-        CHECK(pixel.r == same.r && pixel.g == same.g && pixel.b == same.b && pixel.a == same.a);
+        CHECK(pixel.r == same.r);
+        CHECK(pixel.g == same.g);
+        CHECK(pixel.b == same.b);
+        CHECK(pixel.a == same.a);
         const auto h = (static_cast<unsigned>(pixel.r) << 8u) | pixel.g;
         has_multiple_heights = has_multiple_heights || h != first_height;
         has_water = has_water || (pixel.a & 0x80u) != 0;
@@ -132,9 +138,13 @@ TEST_CASE("RGBA terrain image decoding and voxel reconstruction") {
             CHECK(world_height <= static_cast<float>(generated_settings.sea_level));
         }
     }
-    CHECK(has_multiple_heights && has_water && has_river);
-    CHECK(river_columns > 0 && river_columns < generated.pixels.size());
-    CHECK(mountain_columns > 0 && mountain_columns < generated.pixels.size());
+    CHECK(has_multiple_heights);
+    CHECK(has_water);
+    CHECK(has_river);
+    CHECK(river_columns > 0);
+    CHECK(river_columns < generated.pixels.size());
+    CHECK(mountain_columns > 0);
+    CHECK(mountain_columns < generated.pixels.size());
 
     const auto generated_columns = generate_columns(generated, packed_layout, generated_settings);
     CHECK(generated_columns.columns.size() == generated.pixels.size());
@@ -216,7 +226,8 @@ TEST_CASE("RGBA terrain image decoding and voxel reconstruction") {
     CHECK(sixteen_bit_analysis.max_height == 0x8000u);
     const auto analysis = analyze_map(
         generated, packed_layout, generated_settings);
-    CHECK(analysis.width == 64 && analysis.depth == 64);
+    CHECK(analysis.width == 64);
+    CHECK(analysis.depth == 64);
     CHECK(analysis.min_height <= analysis.max_height);
     CHECK(analysis.distinct_heights > 57);
     CHECK(analysis.max_height > 255);
