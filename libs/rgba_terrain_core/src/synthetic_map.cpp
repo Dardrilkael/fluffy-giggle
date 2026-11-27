@@ -144,7 +144,7 @@ RgbaImage generate_synthetic_map(std::size_t width, std::size_t depth,
                 0.02f, 0.55f, mountain_region) *
                 smoothstep(0.12f, 0.58f, continental);
 
-            const float broad = smoothstep(0.0f, 1.0f, landmass);
+            const float broad = landmass;
             const float hill = remap01(hills);
             const float foothills = mountain * (0.10f + ridge * 0.18f);
             const float terrain = std::clamp(
