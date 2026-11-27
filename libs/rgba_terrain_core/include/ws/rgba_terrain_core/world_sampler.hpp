@@ -13,8 +13,14 @@ struct WorldSample {
     double elevation_m = 0.0;
     double continentalness = 0.0;
     double temperature_c = 0.0;
+    // Normalized moisture-availability index in [0,1], not relative humidity.
     double humidity = 0.0;
     double precipitation = 0.0;
+
+    // Climate diagnostics from the deterministic prevailing-wind fetch.
+    double orographic_lift = 0.0;
+    double rain_shadow = 0.0;
+    double ocean_moisture = 0.0;
 
     std::uint8_t ecosystem_id = 0;
     std::uint8_t biome_id = 0;
