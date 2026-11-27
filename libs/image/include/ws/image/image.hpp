@@ -26,6 +26,7 @@ enum class ErrorCode : std::int32_t {
     unsupported_channels = 4,
     not_rgba = 5,
     unsupported_bit_depth = 6,
+    encode_failed = 7,
 };
 
 // Tightly packed, interleaved, top-to-bottom pixels. channels is the decoded
@@ -59,5 +60,11 @@ struct LoadOptions {
 [[nodiscard]] ws::core::Result<Image> load_rgba8_file(std::string_view path);
 [[nodiscard]] ws::core::Result<Image> load_rgba8_memory(
     std::span<const std::uint8_t> encoded);
+
+// Write exact interleaved RGBA8 bytes to a lossless PNG. No color conversion,
+// resampling, channel rearrangement, or alpha premultiplication is performed.
+[[nodiscard]] ws::core::Status write_rgba8_png_file(
+    std::string_view path, std::uint32_t width, std::uint32_t height,
+    std::span<const std::uint8_t> pixels);
 
 }  // namespace ws::image
