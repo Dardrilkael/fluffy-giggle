@@ -74,7 +74,7 @@ MapFiles generated_map_files() {
   const auto directory =
       std::filesystem::path("worlds") / "generated-world";
   return {directory / "terrain.png", directory / "terrain.rgba-terrain",
-          directory / "terrain.channels.png"};
+          directory / "terrain.channels.png", directory / "terrain.rgb.png"};
 }
 
 void generate_png_map(const MapFiles& files, std::uint32_t seed) {
@@ -173,6 +173,41 @@ void generate_channel_preview_png(const MapFiles& files) {
       files.channel_preview.string(), width, height, preview);
   if (!written) {
     throw std::runtime_error("could not write terrain channel preview: " +
+                             written.error().message);
+  }
+}
+
+void generate_combined_rgb_preview_png(const MapFiles& files) {
+  if (files.png.empty() || files.rgb_preview.empty()) {
+    throw std::invalid_argument("terrain RGB preview paths must not be empty");
+  }
+
+  const auto loaded = ws::image::load_rgba8_file(files.png.string());
+  if (!loaded) {
+    throw std::runtime_error("could not decode saved terrain PNG for RGB preview: " +
+                             loaded.error().message);
+  }
+  const auto& source = *loaded;
+  if (source.width == 0 || source.height == 0) {
+    throw std::runtime_error("saved terrain PNG has invalid dimensions");
+  }
+
+  // Direct channel composition: no palette, scaling, normalization or
+  // reinterpretation. Alpha is opaque only in this display derivative;
+  // the original alpha byte (biome ID) remains in terrain.png and the RGBA view.
+  std::vector<std::uint8_t> preview(source.pixels.size(), 255u);
+  for (std::size_t i = 0; i < source.pixels.size(); i += 4u) {
+    preview[i + 0u] = source.pixels[i + 0u];
+    preview[i + 1u] = source.pixels[i + 1u];
+    preview[i + 2u] = source.pixels[i + 2u];
+    preview[i + 3u] = 255u;
+  }
+
+  std::filesystem::create_directories(files.rgb_preview.parent_path());
+  const auto written = ws::image::write_rgba8_png_file(
+      files.rgb_preview.string(), source.width, source.height, preview);
+  if (!written) {
+    throw std::runtime_error("could not write terrain RGB preview: " +
                              written.error().message);
   }
 }

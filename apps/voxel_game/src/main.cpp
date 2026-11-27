@@ -864,20 +864,29 @@ class VoxelApp final : public ws::ui::App {
     set_cursor_mode(ws::ui::CursorMode::hidden);
   }
 
-  void load_saved_png_preview() {
+  void refresh_terrain_preview_texture() {
     const auto files = voxel::terrain_world_io::generated_map_files();
-    voxel::terrain_world_io::generate_channel_preview_png(files);
-    const std::string preview_path = files.channel_preview.string();
+    const auto& selected_path = combined_rgb_preview_
+        ? files.rgb_preview : files.channel_preview;
+    const std::string preview_path = selected_path.string();
     const auto new_texture = r2d::load_texture(preview_path.c_str());
     if (new_texture.id == 0) {
-      throw std::runtime_error("could not upload raw RGBA channel preview texture");
+      throw std::runtime_error("could not upload selected terrain preview texture");
     }
     if (terrain_preview_texture_.id != 0) {
       r2d::destroy_texture(terrain_preview_texture_);
     }
     terrain_preview_texture_ = new_texture;
+  }
+
+  void load_saved_png_preview() {
+    const auto files = voxel::terrain_world_io::generated_map_files();
+    voxel::terrain_world_io::generate_channel_preview_png(files);
+    voxel::terrain_world_io::generate_combined_rgb_preview_png(files);
+    refresh_terrain_preview_texture();
     entry_preview_loaded_ = true;
-    ws::core::info("voxel: showing raw RGBA channels from '{}'",
+    ws::core::info("voxel: showing {} preview from '{}'",
+                   combined_rgb_preview_ ? "combined RGB" : "raw RGBA channels",
                    files.png.string());
   }
 
@@ -920,6 +929,30 @@ class VoxelApp final : public ws::ui::App {
   void entry_menu_action(const r2d::FrameSize& frame) {
     if (!clicked_) return;
     clicked_ = false;
+
+    const UiRect panel = entry_panel(frame);
+    const UiRect raw_tab{panel.x + 28.0f, panel.y + 82.0f, 132.0f, 28.0f};
+    const UiRect rgb_tab{panel.x + 166.0f, panel.y + 82.0f, 132.0f, 28.0f};
+    if (entry_hit(raw_tab, mouse_x_, mouse_y_)) {
+      combined_rgb_preview_ = false;
+      if (entry_preview_loaded_) {
+        try { refresh_terrain_preview_texture(); }
+        catch (const std::exception& exception) {
+          generation_status_ = std::string("Preview switch failed: ") + exception.what();
+        }
+      }
+      return;
+    }
+    if (entry_hit(rgb_tab, mouse_x_, mouse_y_)) {
+      combined_rgb_preview_ = true;
+      if (entry_preview_loaded_) {
+        try { refresh_terrain_preview_texture(); }
+        catch (const std::exception& exception) {
+          generation_status_ = std::string("Preview switch failed: ") + exception.what();
+        }
+      }
+      return;
+    }
 
     const auto seed_controls = entry_seed_controls(frame);
     if (!generation_in_progress_ && entry_hit(
@@ -1005,8 +1038,18 @@ class VoxelApp final : public ws::ui::App {
     const float preview_x = panel.x + 28.0f;
     const float preview_y = panel.y + 118.0f;
     constexpr float preview_size = 512.0f;
-    (void)r2d::draw_text(preview_x, panel.y + 88.0f, "RAW RGBA CHANNELS",
-                         font_, r2d::rgba(181, 194, 178));
+    const UiRect raw_tab{panel.x + 28.0f, panel.y + 82.0f, 132.0f, 28.0f};
+    const UiRect rgb_tab{panel.x + 166.0f, panel.y + 82.0f, 132.0f, 28.0f};
+    r2d::draw_rounded_quad(raw_tab.x, raw_tab.y, raw_tab.w, raw_tab.h, 5.0f,
+        combined_rgb_preview_ ? r2d::rgba(43, 51, 50, 255)
+                              : r2d::rgba(91, 119, 72, 255));
+    r2d::draw_rounded_quad(rgb_tab.x, rgb_tab.y, rgb_tab.w, rgb_tab.h, 5.0f,
+        combined_rgb_preview_ ? r2d::rgba(91, 119, 72, 255)
+                              : r2d::rgba(43, 51, 50, 255));
+    (void)r2d::draw_text(raw_tab.x + 13.0f, raw_tab.y + 7.0f, "RAW RGBA",
+                         font_, r2d::rgba(239, 243, 229));
+    (void)r2d::draw_text(rgb_tab.x + 13.0f, rgb_tab.y + 7.0f, "COMBINED RGB",
+                         font_, r2d::rgba(239, 243, 229));
     r2d::draw_rounded_quad(preview_x - 3.0f, preview_y - 3.0f,
                            preview_size + 6.0f, preview_size + 6.0f, 5.0f,
                            r2d::rgba(8, 11, 13, 255));
@@ -1029,12 +1072,24 @@ class VoxelApp final : public ws::ui::App {
     std::snprintf(seed_text, sizeof(seed_text), "%u", world_seed_);
     (void)r2d::draw_text(controls_x + 130.0f, panel.y + 94.0f,
                          seed_text, font_, r2d::rgba(220, 226, 210));
-    (void)r2d::draw_text(controls_x, panel.y + 190.0f,
-                         "R: height MSB    G: height LSB", font_,
-                         r2d::rgba(190, 201, 186));
-    (void)r2d::draw_text(controls_x, panel.y + 208.0f,
-                         "B: material/flags    A: biome ID", font_,
-                         r2d::rgba(190, 201, 186));
+    if (combined_rgb_preview_) {
+      (void)r2d::draw_text(controls_x, panel.y + 190.0f,
+                           "RGB uses source R, G and B bytes directly.", font_,
+                           r2d::rgba(190, 201, 186));
+      (void)r2d::draw_text(controls_x, panel.y + 208.0f,
+                           "No palette, scaling or channel remapping.", font_,
+                           r2d::rgba(190, 201, 186));
+      (void)r2d::draw_text(controls_x, panel.y + 226.0f,
+                           "Biome ID remains available in RAW RGBA.", font_,
+                           r2d::rgba(190, 201, 186));
+    } else {
+      (void)r2d::draw_text(controls_x, panel.y + 190.0f,
+                           "R: height MSB    G: height LSB", font_,
+                           r2d::rgba(190, 201, 186));
+      (void)r2d::draw_text(controls_x, panel.y + 208.0f,
+                           "B: material/flags    A: biome ID", font_,
+                           r2d::rgba(190, 201, 186));
+    }
     const auto controls = entry_seed_controls(frame);
     for (const auto& control : controls) {
       r2d::draw_rounded_quad(control.x, control.y, control.w, control.h,
@@ -1572,6 +1627,7 @@ class VoxelApp final : public ws::ui::App {
   bool world_loaded_ = false;
   bool entry_preview_loaded_ = false;
   r2d::Texture terrain_preview_texture_{};
+  bool combined_rgb_preview_ = false;
   std::uint32_t world_seed_ = kSeed;
   bool generation_in_progress_ = false;
   std::future<void> generation_job_{};

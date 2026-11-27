@@ -11,6 +11,7 @@ struct MapFiles {
   std::filesystem::path png;
   std::filesystem::path metadata;
   std::filesystem::path channel_preview;
+  std::filesystem::path rgb_preview;
 };
 
 // Stable app-data location used by the title screen's Generate/Load actions.
@@ -24,6 +25,10 @@ void generate_png_map(const MapFiles& files, std::uint32_t seed);
 // Writes a display-only 2x2 grayscale sheet of the PNG's exact R, G, B and A
 // bytes. The authoritative terrain PNG and its encoded pixels are untouched.
 void generate_channel_preview_png(const MapFiles& files);
+
+// Writes a display-only RGB image using the original R, G and B bytes
+// unchanged as visible color channels; source PNG and alpha data are untouched.
+void generate_combined_rgb_preview_png(const MapFiles& files);
 
 // Reconstructs voxels from PNG + sidecar and imports them into the game.
 // The .rgba-voxels file is intentionally not required or written here.
