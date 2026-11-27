@@ -685,6 +685,8 @@ struct HydrologyGrid {
     std::size_t width = 0;
     std::size_t height = 0;
     std::vector<HydrologyField> cells;
+    double maximum_accumulation = 0.0;
+    double maximum_lake_depth_m = 0.0;
     bool valid = false;
 };
 
@@ -855,6 +857,8 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
         HydrologyField& cell = grid.cells[i];
         cell.direction = direction[i];
         cell.accumulation = accumulation[i];
+        grid.maximum_accumulation = std::max(
+            grid.maximum_accumulation, accumulation[i]);
         cell.river_strength = clamp01(
             (accumulation[i] - threshold) / (threshold * 2.5));
         cell.lake_depth_m = std::max(0.0, filled[i] - elevation[i]) *
@@ -864,6 +868,8 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
             accumulation[i] >= plan.hydrology.lake_minimum_accumulation &&
             precipitation[i] >= plan.hydrology.lake_minimum_precipitation;
         cell.lake_surface_elevation = filled[i];
+        grid.maximum_lake_depth_m = std::max(
+            grid.maximum_lake_depth_m, cell.lake_depth_m);
         cell.river = !cell.lake && direction[i] != DrainageDirection::Sink &&
                      accumulation[i] >= threshold;
     }
@@ -1094,6 +1100,19 @@ RgbaImage WorldSampler::generate_rgba_region(
         throw std::out_of_range("RGBA region lies outside the finite world");
     }
 
+    if (hydrology_diagnostics != nullptr) {
+        initialize_diagnostic_image(
+            hydrology_diagnostics->flow_accumulation, width, depth);
+        initialize_diagnostic_image(
+            hydrology_diagnostics->river_strength, width, depth);
+        initialize_diagnostic_image(
+            hydrology_diagnostics->drainage_direction, width, depth);
+        initialize_diagnostic_image(
+            hydrology_diagnostics->lake_depth, width, depth);
+        initialize_diagnostic_image(
+            hydrology_diagnostics->lake_basins, width, depth);
+    }
+
     const double height_span =
         static_cast<double>(settings.max_height) - settings.min_height;
     const double encoded_sea_level =
@@ -1184,6 +1203,63 @@ RgbaImage WorldSampler::generate_rgba_region(
                 climate_diagnostics->ocean_moisture.pixels[index] =
                     diagnostic_pixel(sample_at.ocean_moisture);
             }
+            if (hydrology_diagnostics != nullptr) {
+                const std::size_t index = z * width + x;
+                HydrologyField hydro;
+                if (hydrology_grid.valid && !sample_at.is_ocean) {
+                    hydro = hydrology_at(
+                        hydrology_grid, plan_,
+                        origin_x + static_cast<std::int64_t>(x),
+                        origin_z + static_cast<std::int64_t>(z));
+                } else if (!hydrology_grid.valid) {
+                    hydro.direction = sample_at.drainage_direction;
+                    hydro.accumulation = sample_at.watershed_accumulation;
+                    hydro.river_strength = sample_at.river_strength;
+                    hydro.lake_depth_m = sample_at.lake_depth_m;
+                    hydro.river = sample_at.is_river;
+                    hydro.lake = sample_at.is_lake;
+                }
+
+                const double accumulation_normalized =
+                    hydrology_grid.valid &&
+                    hydrology_grid.maximum_accumulation > 0.0
+                    ? std::log1p(hydro.accumulation) /
+                      std::log1p(hydrology_grid.maximum_accumulation)
+                    : clamp01(hydro.accumulation /
+                        std::max(1.0, plan_.hydrology.river_accumulation_threshold * 8.0));
+                hydrology_diagnostics->flow_accumulation.pixels[index] =
+                    diagnostic_pixel(accumulation_normalized);
+                hydrology_diagnostics->river_strength.pixels[index] =
+                    diagnostic_pixel(hydro.river_strength);
+
+                Rgba8 direction_pixel{0, 0, 0, 255};
+                constexpr std::array<Rgba8, 8> direction_colors{{
+                    {40, 110, 255, 255}, {40, 210, 255, 255},
+                    {40, 230, 120, 255}, {180, 240, 50, 255},
+                    {255, 190, 40, 255}, {255, 110, 40, 255},
+                    {230, 50, 80, 255}, {180, 60, 230, 255},
+                }};
+                const auto direction_value =
+                    static_cast<std::uint8_t>(hydro.direction);
+                if (direction_value < direction_colors.size()) {
+                    direction_pixel = direction_colors[direction_value];
+                }
+                hydrology_diagnostics->drainage_direction.pixels[index] =
+                    direction_pixel;
+
+                const double lake_depth_normalized =
+                    hydrology_grid.valid &&
+                    hydrology_grid.maximum_lake_depth_m > 0.0
+                    ? hydro.lake_depth_m / hydrology_grid.maximum_lake_depth_m
+                    : clamp01(hydro.lake_depth_m /
+                        std::max(1.0, plan_.hydrology.lake_minimum_depth_m * 4.0));
+                hydrology_diagnostics->lake_depth.pixels[index] =
+                    diagnostic_pixel(lake_depth_normalized);
+                hydrology_diagnostics->lake_basins.pixels[index] =
+                    hydro.lake ? Rgba8{40, 120, 255, 255}
+                               : Rgba8{0, 0, 0, 255};
+            }
+
             const double surface_elevation = sample_at.is_lake
                 ? sample_at.lake_surface_elevation
                 : sample_at.normalized_elevation;
@@ -1218,6 +1294,13 @@ RgbaImage WorldSampler::generate_rgba_region(
         climate_diagnostics->orographic_lift.validate();
         climate_diagnostics->rain_shadow.validate();
         climate_diagnostics->ocean_moisture.validate();
+    }
+    if (hydrology_diagnostics != nullptr) {
+        hydrology_diagnostics->flow_accumulation.validate();
+        hydrology_diagnostics->river_strength.validate();
+        hydrology_diagnostics->drainage_direction.validate();
+        hydrology_diagnostics->lake_depth.validate();
+        hydrology_diagnostics->lake_basins.validate();
     }
     return image;
 }
