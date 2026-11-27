@@ -28,6 +28,14 @@ float smooth(float t) {
     return t * t * (3.0f - 2.0f * t);
 }
 
+float smoothstep(float edge0, float edge1, float value) {
+    if (edge1 <= edge0) {
+        return value < edge0 ? 0.0f : 1.0f;
+    }
+    return smooth(std::clamp((value - edge0) / (edge1 - edge0),
+                             0.0f, 1.0f));
+}
+
 float value_noise(float x, float z, std::uint32_t seed) {
     const auto ix = static_cast<std::int32_t>(std::floor(x));
     const auto iz = static_cast<std::int32_t>(std::floor(z));
@@ -121,16 +129,26 @@ RgbaImage generate_synthetic_map(std::size_t width, std::size_t depth,
             const bool forest = moisture > 0.18f && temperature > -0.35f;
             const bool mountains = mountain > 0.45f && ridge > 0.28f;
 
-            // A broad, gently meandering river corridor. This is a deliberately
-            // simple synthetic mask, not a simulated drainage network.
+            // A gently meandering synthetic river. The center channel is
+            // lowered to a bed below sea level, while a smooth distance
+            // profile blends that cut into the surrounding terrain. The
+            // water mask remains narrower than the carved bank region.
             const float river_axis = 0.52f +
                 0.10f * std::sin(nx * 8.0f + fbm(nx * 2.0f, nz * 2.0f,
                                                   seed ^ 0xC0FFEE11u, 2));
-            const bool river = std::abs(nz - river_axis) < 0.018f &&
+            const float river_distance = std::abs(nz - river_axis);
+            constexpr float river_half_width = 0.012f;
+            constexpr float river_bank_width = 0.040f;
+            const bool river = river_distance <= river_half_width &&
                                !mountains;
-            if (river) {
-                world_height = std::min(
-                    world_height, std::max(settings.min_height, sea - 1.0f));
+            if (!mountains && river_distance < river_bank_width) {
+                const float channel_strength =
+                    1.0f - smoothstep(0.0f, river_bank_width,
+                                      river_distance);
+                const float river_bed = std::max(
+                    settings.min_height, sea - 2.0f);
+                world_height += (river_bed - world_height) *
+                                channel_strength;
             }
             const bool water = world_height <= sea || river;
             const float normalized_height = height_span > 0.0f
