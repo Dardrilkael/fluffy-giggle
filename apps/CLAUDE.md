@@ -310,3 +310,25 @@ CMakeLists only wire ws libraries together.
   the automatic Window menu, toolbar, docking with draggable splitters,
   palette, toasts, recents, autosave/crash recovery, session restore,
   the ordered shutdown - is the shell's.
+
+
+## voxel_game RGBA terrain import
+
+`apps/voxel_game/src/terrain_import.cpp` is the game-owned adapter between
+`ws::rgba_terrain_core` generic voxel/material/biome IDs and the game's
+`Block` and `Biome` enums. Do not move this mapping into the reusable
+terrain library. The game world is 256x256x64 (16x16 chunks) to preserve the
+current 256x256 source map without resampling.
+
+At startup the import is opt-in via all three environment variables:
+`WS_VOXEL_TERRAIN_PNG`, `WS_VOXEL_TERRAIN_META`, and
+`WS_VOXEL_TERRAIN_VOXELS`. The app rebuilds the expected volume from PNG +
+metadata and requires an exact RGAVOX02 match before importing. If any one
+variable is set, all three are required; an invalid import stops startup
+rather than silently falling back to procedural terrain.
+
+The adapter preflights the full source before replacing world data. It
+preserves X/Z coordinates, per-column biome and feature flags, and accepts
+only fully occupied solid/water voxels and empty air because the current
+game block model has no partial-density representation. Unknown material,
+biome, kind or density values are rejected explicitly.
