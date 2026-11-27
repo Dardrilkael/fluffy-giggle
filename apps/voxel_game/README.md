@@ -46,7 +46,22 @@ worlds/generated-world/terrain.rgba-terrain
 
 The PNG uses RGBA terrain v2: R/G are 16-bit height, B stores the surface
 material and feature flags, and A stores the full biome ID. The game rebuilds
-the voxel volume from those two files and imports it directly. A separate
+the voxel volume from those two files and imports it directly.
+
+Each generated world also writes diagnostic preview PNGs under
+`worlds/generated-world/diagnostics/`. These are display-only outputs and do
+not participate in world loading:
+
+- `temperature.png`, `humidity.png`, `precipitation.png`
+- `orographic-lift.png`, `rain-shadow.png`, `ocean-moisture.png`
+- `flow-accumulation.png`, `river-strength.png`
+- `drainage-direction.png` (eight distinct colors for D8 directions; black
+  represents a sink)
+- `lake-depth.png`, `lake-basins.png`
+
+The accumulation and lake-depth previews use normalization across the entire
+routing grid, so their values remain visually consistent when the same world
+is generated in separate regions. A separate
 `.rgba-voxels` file is not required. Generation stays on a worker thread;
 the PNG import and GPU chunk-mesh upload happen on the main/render thread.
 
