@@ -290,6 +290,18 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
             CHECK(delta.r == 0u);
             CHECK(delta.g == 0u);
             CHECK(delta.b == 0u);
+            const auto& hydraulic =
+                erosion_diagnostics.hydraulic_erosion_delta.pixels[i];
+            const auto& thermal =
+                erosion_diagnostics.thermal_erosion_delta.pixels[i];
+            const auto& fluvial =
+                erosion_diagnostics.fluvial_terrain_delta.pixels[i];
+            CHECK(hydraulic.r == 0u);
+            CHECK(hydraulic.b == 0u);
+            CHECK(thermal.r == 0u);
+            CHECK(thermal.b == 0u);
+            CHECK(fluvial.r == 0u);
+            CHECK(fluvial.b == 0u);
         }
     }
     CHECK(ocean_pixels > 0u);
