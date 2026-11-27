@@ -378,8 +378,16 @@ TerrainDiagnosticImages make_diagnostic_images(
             result.slope.pixels[index] =
                 rgba(slope_gray, slope_gray, slope_gray);
 
-            result.biome.pixels[index] =
-                biome_palette[column.biome_id & 0x07u];
+            if (column.biome_id < biome_palette.size()) {
+                result.biome.pixels[index] = biome_palette[column.biome_id];
+            } else {
+                const std::uint32_t hash =
+                    static_cast<std::uint32_t>(column.biome_id) * 2246822519u;
+                result.biome.pixels[index] = rgba(
+                    static_cast<std::uint8_t>(64u + ((hash >> 16u) & 0xBFu)),
+                    static_cast<std::uint8_t>(64u + ((hash >> 8u) & 0xBFu)),
+                    static_cast<std::uint8_t>(64u + (hash & 0xBFu)));
+            }
             const std::uint8_t material_id = column.material_id;
             if (material_id < material_palette.size()) {
                 result.material.pixels[index] =
