@@ -717,7 +717,7 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     std::vector<std::size_t> order(count);
     for (std::size_t i = 0; i < count; ++i) order[i] = i;
     std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
-        if (filled[a] != filled[b]) return filled[a] > filled[b];
+        if (elevation[a] != elevation[b]) return elevation[a] > elevation[b];
         return visit_order[a] > visit_order[b];
     });
     for (const std::size_t i : order) {
@@ -813,6 +813,12 @@ WorldSampler::WorldSampler(WorldPlan plan) : plan_(std::move(plan)) {
 
 WorldSample WorldSampler::sample(std::int64_t world_x,
                                  std::int64_t world_z) const {
+    return sample_impl(world_x, world_z, true);
+}
+
+WorldSample WorldSampler::sample_impl(std::int64_t world_x,
+                                      std::int64_t world_z,
+                                      bool include_local_hydrology) const {
     if (world_x < 0 || world_x >= plan_.width ||
         world_z < 0 || world_z >= plan_.depth) {
         throw std::out_of_range("world sample coordinate is outside the finite world");
@@ -1141,7 +1147,7 @@ RgbaImage WorldSampler::generate_rgba_region(
 
     for (std::size_t z = 0; z < depth; ++z) {
         for (std::size_t x = 0; x < width; ++x) {
-            WorldSample sample_at = sample(
+            WorldSample sample_at = sample_impl(
                 origin_x + static_cast<std::int64_t>(x),
                 origin_z + static_cast<std::int64_t>(z),
                 !hydrology_grid.valid);
