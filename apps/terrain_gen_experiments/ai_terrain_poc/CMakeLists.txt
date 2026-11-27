@@ -22,6 +22,7 @@ add_library(ai_terrain_core STATIC
     src/fuzzy_controller.cpp
     src/region_simulation.cpp
     src/test_terrain.cpp
+    src/experiment_output.cpp
 )
 target_include_directories(ai_terrain_core PUBLIC include)
 target_compile_features(ai_terrain_core PUBLIC cxx_std_20)
