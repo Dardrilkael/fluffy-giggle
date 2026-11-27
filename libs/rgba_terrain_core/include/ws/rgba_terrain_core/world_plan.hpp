@@ -35,6 +35,21 @@ struct WorldClimateSettings {
     double prevailing_wind_z = 0.0;
 };
 
+struct WorldHydrologySettings {
+    // The local D8 routing grid is evaluated at this absolute world-unit
+    // spacing. It is independent of world dimensions and chunk boundaries.
+    double routing_cell_scale = 1200.0;
+
+    // Accumulation is precipitation-weighted contributing source cells in a
+    // bounded routing neighborhood, not a global cell-count raster.
+    double river_accumulation_threshold = 2.6;
+    double river_channel_depth_fraction = 0.018;
+
+    double lake_minimum_depth_m = 40.0;
+    double lake_minimum_accumulation = 1.2;
+    double lake_minimum_precipitation = 0.18;
+};
+
 struct EcosystemDefinition {
     std::uint8_t id = 0;
     double temperature_optimum_c = 15.0;
@@ -59,8 +74,9 @@ struct BiomeDefinition {
     double weight = 1.0;
     std::uint8_t material_id = 1;
 
-    // Feature bits use the existing packed-alpha convention: forest=0x08,
-    // mountain=0x10, river=0x20. The water bit (0x80) is generated separately.
+    // Feature bits use the packed-alpha convention: forest=0x08,
+    // mountain=0x10, river=0x20, lake=0x40. The water bit (0x80)
+    // is generated separately for ocean and inland water columns.
     std::uint8_t feature_flags = 0;
 };
 
@@ -99,6 +115,7 @@ struct WorldPlan {
 
     WorldScales scales;
     WorldClimateSettings climate;
+    WorldHydrologySettings hydrology;
     std::vector<EcosystemDefinition> ecosystems;
     std::vector<BiomeDefinition> biomes;
     std::vector<WorldRegion> regions;
