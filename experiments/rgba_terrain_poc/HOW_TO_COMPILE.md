@@ -50,3 +50,12 @@ building a voxel volume.
 
 The input must be a lossless 8-bit RGBA PNG. See README.md for channel packing
 and output format details.
+
+
+## Validate a reconstructed voxel file
+
+    rgba_terrain_poc validate terrain.png terrain.rgba-terrain terrain.rgba-voxels
+
+Exit code 0 means every voxel field matches a fresh reconstruction. Exit code
+3 means the file is readable but differs; exit code 1 indicates an input or
+file error.
