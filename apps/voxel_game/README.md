@@ -15,7 +15,7 @@ Jolt behind `ws::physics3d`, OpenAL Soft behind `ws::audio`.
   clustered 3D noise creates coal/iron ore veins, and tree density varies
   with forest climate. All fields are deterministic per seed
   (default seed `0xC0FFEE`) and continuous across chunk boundaries.
-- **World entry screen**: choose a seed, increment/decrement it or randomize it, then select **Generate New World / Play**. Terrain sampling runs in the background so the menu stays responsive. When generation completes, the game saves and imports the RGBA PNG and starts the game automatically. **Load Saved PNG World** reloads the last generated map, and **Play Current World** starts the built-in fallback world.
+- **World entry screen**: a fresh launch starts with no terrain world generated or loaded. Choose a seed, increment/decrement it or randomize it, then select **Generate / Regenerate PNG**. Terrain sampling runs in the background and writes the authoritative RGBA PNG plus metadata. The result is loaded as a preview behind the menu; it does not enter gameplay. **Load Saved PNG / Preview** loads the previous map without starting the game. **Play World** is enabled only after a map has been previewed and is the only menu action that enters gameplay.
 - **A first-person player**: WASD movement, mouse look, space jump
   (~1.5 m apex — clears a full block with margin), shift sprint. The
   player uses a backend-independent swept-AABB character controller
