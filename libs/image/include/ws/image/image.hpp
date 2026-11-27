@@ -25,7 +25,8 @@ enum class ErrorCode : std::int32_t {
     invalid_dimensions = 3,
     unsupported_channels = 4,
     not_rgba = 5,
-    unsupported_bit_depth = 6;
+    unsupported_bit_depth = 6,
+};
 };
 
 // Tightly packed, interleaved, top-to-bottom pixels. channels is the decoded
