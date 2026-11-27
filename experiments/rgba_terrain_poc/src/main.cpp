@@ -1,4 +1,5 @@
 #include "rgba_terrain/metadata.hpp"
+#include "rgba_terrain/map_analysis.hpp"
 #include "rgba_terrain/rgba_terrain.hpp"
 
 #include <ws/image/image.hpp>
@@ -129,6 +130,78 @@ void print_map_report(const rgba_terrain::RgbaImage& image,
               << " bytes of voxel payload\n";
 }
 
+void print_distribution(const char* label,
+                         const std::array<std::uint64_t, 256>& counts) {
+    std::vector<std::pair<std::uint64_t, unsigned>> sorted;
+    for (unsigned value = 0; value < counts.size(); ++value) {
+        if (counts[value] != 0) {
+            sorted.emplace_back(counts[value], value);
+        }
+    }
+    std::sort(sorted.begin(), sorted.end(), std::greater<>());
+    std::cout << "  " << label << ":";
+    if (sorted.empty()) {
+        std::cout << " none";
+    }
+    const std::size_t limit = std::min<std::size_t>(sorted.size(), 10);
+    for (std::size_t i = 0; i < limit; ++i) {
+        std::cout << " " << sorted[i].second << "=" << sorted[i].first;
+    }
+    if (sorted.size() > limit) {
+        std::cout << " (+" << sorted.size() - limit << " more)";
+    }
+    std::cout << "\n";
+}
+
+int inspect_command(int argc, char** argv) {
+    if (argc != 4) {
+        std::cerr << "Usage: rgba_terrain_poc inspect <input.png> <input.rgba-terrain>\n";
+        return 2;
+    }
+
+    const auto metadata = rgba_terrain::load_metadata(argv[3]);
+    const auto image = rgba_terrain::load_rgba_image(argv[2]);
+    const auto analysis = rgba_terrain::analyze_map(
+        image, metadata.layout, metadata.settings);
+    const double pixels = static_cast<double>(analysis.width) *
+                          static_cast<double>(analysis.depth);
+    const auto percentage = [pixels](std::uint64_t count) {
+        return pixels > 0.0 ? 100.0 * static_cast<double>(count) / pixels : 0.0;
+    };
+
+    std::cout << "Terrain data-map inspection\n"
+              << "  dimensions: " << analysis.width << "x" << analysis.depth
+              << " (" << static_cast<std::uint64_t>(pixels) << " columns)\n"
+              << "  elevation: min=" << analysis.min_height
+              << " max=" << analysis.max_height
+              << " distinct=" << analysis.distinct_heights
+              << " mean=" << analysis.mean_height
+              << " stddev=" << analysis.standard_deviation << "\n"
+              << "  horizontal neighbor step: mean="
+              << analysis.mean_horizontal_step
+              << " max=" << analysis.max_horizontal_step
+              << " across " << analysis.horizontal_edges << " edges\n"
+              << "  vertical neighbor step: mean="
+              << analysis.mean_vertical_step
+              << " max=" << analysis.max_vertical_step
+              << " across " << analysis.vertical_edges << " edges\n";
+    print_distribution("surface materials", analysis.materials);
+    print_distribution("biomes", analysis.biomes);
+    std::cout << "  feature coverage:\n"
+              << "    water: " << analysis.water_columns << " ("
+              << percentage(analysis.water_columns) << "%)\n"
+              << "    forest: " << analysis.forest_columns << " ("
+              << percentage(analysis.forest_columns) << "%)\n"
+              << "    mountain: " << analysis.mountain_columns << " ("
+              << percentage(analysis.mountain_columns) << "%)\n"
+              << "    river: " << analysis.river_columns << " ("
+              << percentage(analysis.river_columns) << "%)\n"
+              << "    reserved alpha bit: " << analysis.reserved_flag_columns
+              << " ("
+              << percentage(analysis.reserved_flag_columns) << "%)\n";
+    return 0;
+}
+
 int generate_command(int argc, char** argv) {
     if (argc != 8) {
         std::cerr
@@ -234,10 +307,14 @@ int main(int argc, char** argv) {
         if (argc >= 2 && std::string(argv[1]) == "convert") {
             return convert_command(argc, argv);
         }
+        if (argc >= 2 && std::string(argv[1]) == "inspect") {
+            return inspect_command(argc, argv);
+        }
         std::cerr
             << "RGBA terrain generator\n"
             << "  generate <width> <depth> <seed> <out.png> <out.meta> <out.voxels>\n"
-            << "  convert <input.png> <input.meta> <out.voxels>\n";
+            << "  convert <input.png> <input.meta> <out.voxels>\n"
+            << "  inspect <input.png> <input.meta>\n";
         return 2;
     } catch (const std::exception& exception) {
         std::cerr << "RGBA terrain generation failed: " << exception.what()
