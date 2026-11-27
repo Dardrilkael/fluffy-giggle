@@ -510,6 +510,7 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
     CHECK(marked_erosion_cells > 0u);
 
     std::size_t nonzero_stream_order = 0;
+    std::array<std::size_t, 4> river_class_counts{};
     std::size_t nonzero_river_influence = 0;
     std::size_t nonzero_hydraulic_delta = 0;
     std::size_t nonzero_thermal_delta = 0;
@@ -517,6 +518,11 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
     for (std::size_t i = 0; i < erosion_diagnostics.stream_order.pixels.size(); ++i) {
         nonzero_stream_order +=
             erosion_diagnostics.stream_order.pixels[i].r > 0u ? 1u : 0u;
+        const std::uint8_t encoded_class =
+            erosion_diagnostics.river_class.pixels[i].r;
+        const std::size_t river_class = static_cast<std::size_t>(
+            std::lround(static_cast<double>(encoded_class) * 3.0 / 255.0));
+        river_class_counts[std::min<std::size_t>(river_class, 3u)]++;
         nonzero_river_influence +=
             erosion_diagnostics.river_influence.pixels[i].r > 0u ? 1u : 0u;
         nonzero_hydraulic_delta +=
@@ -530,6 +536,8 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
              erosion_diagnostics.fluvial_terrain_delta.pixels[i].b > 0u) ? 1u : 0u;
     }
     CHECK(nonzero_stream_order > 0u);
+    CHECK(river_class_counts[1] + river_class_counts[2] +
+          river_class_counts[3] > 0u);
     CHECK(nonzero_river_influence > 0u);
     CHECK(nonzero_hydraulic_delta > 0u);
     CHECK(nonzero_thermal_delta > 0u);
@@ -921,6 +929,7 @@ TEST_CASE("generate full 256x256 terrain with erosion and save output files") {
     CHECK(save_image("terrain_output/lake-basins.png", hydrology_diagnostics.lake_basins));
     CHECK(save_image("terrain_output/drainage-direction.png", hydrology_diagnostics.drainage_direction));
     CHECK(save_image("terrain_output/stream-order.png", hydrology_diagnostics.stream_order));
+    CHECK(save_image("terrain_output/river-class.png", hydrology_diagnostics.river_class));
     CHECK(save_image("terrain_output/watershed-basins.png", hydrology_diagnostics.watershed_basins));
     CHECK(save_image("terrain_output/river-influence.png", hydrology_diagnostics.river_influence));
     CHECK(save_image("terrain_output/mountain-peak-distance.png", hydrology_diagnostics.mountain_peak_distance));
