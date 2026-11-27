@@ -66,6 +66,8 @@ TEST_CASE("terrain import: maps generic IDs and preserves X/Z and column metadat
   CHECK(world.column_metadata(15, 20).feature_flags == 0x08);
   CHECK(world.column_metadata(16, 20).biome == voxel::Biome::desert);
   CHECK(world.column_metadata(16, 20).feature_flags == 0x10);
+  CHECK(world.column_metadata(17, 20).biome == voxel::Biome::mountain);
+  CHECK(world.column_metadata(17, 20).feature_flags == 0x20);
   CHECK(imported->column_count == 256u * 256u);
   CHECK(imported->voxel_count == 256u * 256u * 64u);
   CHECK(imported->block_counts[static_cast<std::size_t>(voxel::Block::grass)] == 1);
@@ -110,4 +112,20 @@ TEST_CASE("terrain import: rejects wrong dimensions and inconsistent column meta
   CHECK_FALSE(mixed_column.has_value());
   CHECK(mixed_column.error().code == static_cast<std::int32_t>(
       voxel::TerrainImportError::inconsistent_column_metadata));
+}
+
+TEST_CASE("terrain import: rejects partial density because game blocks are binary") {
+  using ws::rgba_terrain_core::VoxelKind;
+  auto volume = make_empty_game_volume();
+  volume.at(12, 7, 14) = {VoxelKind::Solid, 1, 0, 127, 0};
+
+  voxel::World world;
+  world.generate(321u);
+  const voxel::Block before = world.block_at(12, 7, 14);
+  const auto imported = voxel::import_terrain_volume(world, volume);
+
+  CHECK_FALSE(imported.has_value());
+  CHECK(imported.error().code == static_cast<std::int32_t>(
+      voxel::TerrainImportError::unsupported_density));
+  CHECK(world.block_at(12, 7, 14) == before);
 }
