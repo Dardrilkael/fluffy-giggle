@@ -36,12 +36,13 @@ struct WorldClimateSettings {
 };
 
 struct WorldHydrologySettings {
-    // The local D8 routing grid is evaluated at this absolute world-unit
-    // spacing. It is independent of world dimensions and chunk boundaries.
+    // The D8 routing grid is evaluated at this absolute world-unit spacing.
+    // RGBA region generation builds it over the finite world, independently
+    // of requested chunk dimensions and generation order.
     double routing_cell_scale = 1200.0;
 
-    // Accumulation is precipitation-weighted contributing source cells in a
-    // bounded routing neighborhood, not a global cell-count raster.
+    // Accumulation is precipitation-weighted contributing routing cells.
+    // Its magnitude therefore depends on routing_cell_scale and climate.
     double river_accumulation_threshold = 2.6;
     double river_channel_depth_fraction = 0.018;
 
