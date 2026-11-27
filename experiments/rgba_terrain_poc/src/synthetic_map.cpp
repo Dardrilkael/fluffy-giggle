@@ -61,14 +61,6 @@ float remap01(float value) {
     return std::clamp(value * 0.5f + 0.5f, 0.0f, 1.0f);
 }
 
-std::uint8_t quantize_height(float value, float minimum, float maximum) {
-    const float normalized = maximum > minimum
-        ? std::clamp((value - minimum) / (maximum - minimum), 0.0f, 1.0f)
-        : 0.0f;
-    return static_cast<std::uint8_t>(
-        std::clamp(std::lround(normalized * 65535.0f), 0l, 65535l));
-}
-
 }  // namespace
 
 RgbaImage generate_synthetic_map(std::size_t width, std::size_t depth,
