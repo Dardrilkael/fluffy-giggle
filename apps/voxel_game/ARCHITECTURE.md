@@ -55,18 +55,28 @@ flags are retained in per-column metadata, not discarded or misrepresented as
 block types. The renderer remains unchanged and consumes the same World API.
 
 
-To opt into a validated data-map world at startup, set all three variables
+To load a data-map world at startup, set the two authoritative inputs
 before launching `voxel_game`:
 
 ```powershell
 $env:WS_VOXEL_TERRAIN_PNG = "C:\terrain\terrain.png"
 $env:WS_VOXEL_TERRAIN_META = "C:\terrain\terrain.meta"
+```
+
+The app decodes the PNG, reconstructs the voxel volume from its pixels and
+metadata, and imports that in-memory volume directly. No persisted voxel file
+is required. With none of the terrain variables set, the original seeded
+procedural world remains the default.
+
+An optional persisted voxel artifact can be checked against a fresh
+reconstruction for debugging or regression validation:
+
+```powershell
 $env:WS_VOXEL_TERRAIN_VOXELS = "C:\terrain\terrain.rgba-voxels"
 ```
 
-The app reconstructs the expected volume from the PNG and metadata and checks
-the persisted voxel file byte-field-for-byte-field before import. With none of
-the variables set, the original seeded procedural world remains the default.
+When supplied alongside PNG and metadata, the artifact is validated field by
+field but is never used as the source of the imported world.
 
 
 The adapter's headless acceptance suite is `test_voxel_terrain_import`. It
