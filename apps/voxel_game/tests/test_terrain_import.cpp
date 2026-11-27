@@ -56,8 +56,8 @@ TEST_CASE("terrain import: maps generic IDs and preserves X/Z and column metadat
   CHECK(world.column_metadata(15, 20).feature_flags == 0x08);
   CHECK(world.column_metadata(16, 20).biome == voxel::Biome::desert);
   CHECK(world.column_metadata(16, 20).feature_flags == 0x10);
-  CHECK(imported->column_count == 128u * 128u);
-  CHECK(imported->voxel_count == 128u * 128u * 64u);
+  CHECK(imported->column_count == 256u * 256u);
+  CHECK(imported->voxel_count == 256u * 256u * 64u);
   CHECK(imported->block_counts[static_cast<std::size_t>(voxel::Block::grass)] == 1);
   CHECK(imported->block_counts[static_cast<std::size_t>(voxel::Block::dirt)] == 1);
   CHECK(imported->block_counts[static_cast<std::size_t>(voxel::Block::stone)] == 2);
