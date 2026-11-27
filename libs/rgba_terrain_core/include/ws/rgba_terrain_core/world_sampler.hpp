@@ -94,8 +94,11 @@ public:
 
     [[nodiscard]] const WorldPlan& plan() const noexcept { return plan_; }
 
-    // Samples one global X/Z coordinate. Coordinates outside the finite world
-    // are rejected; adjacent chunks must pass their true global coordinates.
+    // Samples the analytical point field at one global X/Z coordinate.
+    // This lightweight query uses bounded local hydrology; whole-world
+    // erosion is applied by generate_rgba_region(), which has the finite
+    // routing context needed to keep erosion continuous across chunks.
+    // Coordinates outside the finite world are rejected.
     [[nodiscard]] WorldSample sample(
         std::int64_t world_x, std::int64_t world_z) const;
 
