@@ -895,6 +895,19 @@ struct HydrologyGrid {
     std::size_t height = 0;
     std::vector<HydrologyField> cells;
     std::vector<double> elevation_offsets;
+    // Pre-erosion elevation at grid cell centers. Used to determine ocean
+    // classification at pixel resolution by bilinear interpolation and
+    // comparison with sea_level_fraction, matching the baseline terrain's
+    // per-pixel ocean check.
+    std::vector<double> original_elevation;
+    // Pre-erosion hydrology at grid cell centers (rivers, lakes, etc.).
+    // Used for ocean classification to match the baseline terrain's
+    // grid-resolution hydrology (which includes river channel cuts).
+    std::vector<HydrologyField> original_cells;
+    // Pre-erosion ocean classification (original analytical terrain mask).
+    // Kept for backwards compatibility and potential future use.
+    // Stored as uint8_t (0 or 1) for efficient sampling.
+    std::vector<std::uint8_t> original_ocean;
     double maximum_accumulation = 0.0;
     double maximum_lake_depth_m = 0.0;
     double maximum_erosion_offset = 0.0;
@@ -959,6 +972,161 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     }
 
     const std::vector<double> original_elevation = elevation;
+    // Store pre-erosion elevation for pixel-level ocean classification.
+    // This allows bilinear interpolation of elevation at output pixel resolution
+    // and comparison with sea_level_fraction, matching the baseline terrain's
+    // per-pixel ocean check.
+    grid.original_elevation = original_elevation;
+    // Store pre-erosion ocean classification (original analytical terrain mask).
+    // Kept for backwards compatibility.
+    grid.original_ocean.resize(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        grid.original_ocean[i] = ocean[i] ? 1 : 0;
+    }
+
+    // River threshold is used for both pre- and post-erosion hydrology.
+    const double threshold = plan.hydrology.river_accumulation_threshold;
+
+    // Compute and store pre-erosion hydrology cells (rivers, lakes, etc.)
+    // for ocean classification that matches the baseline terrain's
+    // grid-resolution hydrology (which includes river channel cuts).
+    // This mirrors the post-erosion computation below but uses pre-erosion data.
+    std::vector<DrainageDirection> original_direction(count, DrainageDirection::Sink);
+    std::vector<double> original_accumulation = accumulation;
+    std::vector<double> original_filled(count);
+    std::vector<std::size_t> original_parent(count, count);
+    std::vector<std::size_t> original_visit_order(count, count);
+    std::size_t original_sequence = 0;
+    // We'll reuse the priority-flood approach for consistency
+    using FloodNode = std::pair<double, std::size_t>;
+    std::priority_queue<FloodNode, std::vector<FloodNode>,
+                        std::greater<FloodNode>> original_frontier;
+    std::vector<bool> original_visited(count, false);
+    const auto original_seed_boundary = [&](std::size_t x, std::size_t z) {
+        const std::size_t i = index(x, z);
+        if (original_visit_order[i] != count) return;
+        original_visit_order[i] = original_sequence++;
+        original_filled[i] = original_elevation[i];
+        original_frontier.emplace(original_filled[i], i);
+    };
+    for (std::size_t x = 0; x < grid.width; ++x) {
+        original_seed_boundary(x, 0);
+        original_seed_boundary(x, grid.height - 1);
+    }
+    for (std::size_t z = 0; z < grid.height; ++z) {
+        original_seed_boundary(0, z);
+        original_seed_boundary(grid.width - 1, z);
+    }
+    // Mark boundary as visited
+    for (std::size_t x = 0; x < grid.width; ++x) {
+        original_visited[index(x, 0)] = true;
+        original_visited[index(x, grid.height - 1)] = true;
+    }
+    for (std::size_t z = 0; z < grid.height; ++z) {
+        original_visited[index(0, z)] = true;
+        original_visited[index(grid.width - 1, z)] = true;
+    }
+    while (!original_frontier.empty()) {
+        const auto [level, current] = original_frontier.top();
+        original_frontier.pop();
+        const std::size_t x = current % grid.width;
+        const std::size_t z = current / grid.width;
+        for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
+            const auto nx_signed = static_cast<std::int64_t>(x) + drainage_dx[d];
+            const auto nz_signed = static_cast<std::int64_t>(z) + drainage_dz[d];
+            if (nx_signed < 0 || nz_signed < 0 ||
+                nx_signed >= static_cast<std::int64_t>(grid.width) ||
+                nz_signed >= static_cast<std::int64_t>(grid.height)) continue;
+            const std::size_t next = index(
+                static_cast<std::size_t>(nx_signed),
+                static_cast<std::size_t>(nz_signed));
+            if (original_visited[next]) continue;
+            original_visited[next] = true;
+            original_parent[next] = current;
+            original_filled[next] = std::max(original_elevation[next], level);
+            original_visit_order[next] = original_sequence++;
+            original_frontier.emplace(original_filled[next], next);
+        }
+    }
+
+    // D8 routing on pre-erosion elevation
+    for (std::size_t z = 0; z < grid.height; ++z) {
+        for (std::size_t x = 0; x < grid.width; ++x) {
+            const std::size_t i = index(x, z);
+            if (ocean[i]) {
+                original_direction[i] = DrainageDirection::Sink;
+                continue;
+            }
+            double best_drop = 0.0;
+            for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
+                const auto nx = static_cast<std::int64_t>(x) + drainage_dx[d];
+                const auto nz = static_cast<std::int64_t>(z) + drainage_dz[d];
+                if (nx < 0 || nz < 0 ||
+                    nx >= static_cast<std::int64_t>(grid.width) ||
+                    nz >= static_cast<std::int64_t>(grid.height)) continue;
+                const std::size_t next = index(
+                    static_cast<std::size_t>(nx), static_cast<std::size_t>(nz));
+                const double distance = (d % 2 == 1) ? 1.41421356237 : 1.0;
+                const double drop = (original_elevation[i] - original_elevation[next]) / distance;
+                if (drop > best_drop) {
+                    best_drop = drop;
+                    original_direction[i] = static_cast<DrainageDirection>(d);
+                }
+            }
+            if (best_drop <= 0.0 && original_parent[i] != count) {
+                const auto px = static_cast<std::int64_t>(original_parent[i] % grid.width);
+                const auto pz = static_cast<std::int64_t>(original_parent[i] / grid.width);
+                const auto dx = px - static_cast<std::int64_t>(x);
+                const auto dz = pz - static_cast<std::int64_t>(z);
+                for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
+                    if (drainage_dx[d] == dx && drainage_dz[d] == dz) {
+                        original_direction[i] = static_cast<DrainageDirection>(d);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Accumulation on pre-erosion elevation
+    std::vector<std::size_t> original_order(count);
+    for (std::size_t i = 0; i < count; ++i) original_order[i] = i;
+    std::sort(original_order.begin(), original_order.end(), [&](std::size_t a, std::size_t b) {
+        if (original_filled[a] != original_filled[b]) return original_filled[a] > original_filled[b];
+        return original_visit_order[a] > original_visit_order[b];
+    });
+    for (const std::size_t i : original_order) {
+        const auto d = original_direction[i];
+        if (d == DrainageDirection::Sink) continue;
+        const std::size_t di = static_cast<std::size_t>(d);
+        const auto x = static_cast<std::int64_t>(i % grid.width) + drainage_dx[di];
+        const auto z = static_cast<std::int64_t>(i / grid.width) + drainage_dz[di];
+        if (x < 0 || z < 0 ||
+            x >= static_cast<std::int64_t>(grid.width) ||
+            z >= static_cast<std::int64_t>(grid.height)) continue;
+        original_accumulation[index(static_cast<std::size_t>(x),
+                           static_cast<std::size_t>(z))] += original_accumulation[i];
+    }
+
+    // Build pre-erosion hydrology cells
+    grid.original_cells.resize(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        HydrologyField& cell = grid.original_cells[i];
+        cell.direction = original_direction[i];
+        cell.accumulation = original_accumulation[i];
+        cell.river_strength = clamp01(
+            (original_accumulation[i] - threshold) / (threshold * 2.5));
+        cell.lake_depth_m = std::max(0.0, original_filled[i] - original_elevation[i]) *
+                            plan.climate.maximum_elevation_m;
+        cell.lake = !ocean[i] &&
+            cell.lake_depth_m >= plan.hydrology.lake_minimum_depth_m &&
+            original_accumulation[i] >= plan.hydrology.lake_minimum_accumulation &&
+            precipitation[i] >= plan.hydrology.lake_minimum_precipitation;
+        cell.lake_surface_elevation = original_filled[i];
+        cell.river = !cell.lake && original_direction[i] != DrainageDirection::Sink &&
+                     original_accumulation[i] >= threshold;
+    }
+
     if (plan.hydrology.erosion_enabled) {
         erode_terrain(elevation, precipitation, ocean, grid.width, grid.height,
                       plan.sea_level_fraction);
@@ -1095,7 +1263,6 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     }
 
     grid.cells.resize(count);
-    const double threshold = plan.hydrology.river_accumulation_threshold;
     for (std::size_t i = 0; i < count; ++i) {
         HydrologyField& cell = grid.cells[i];
         cell.direction = direction[i];
@@ -1118,6 +1285,64 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     }
     grid.valid = true;
     return grid;
+}
+
+// Compute the base terrain elevation at the exact world coordinate,
+// matching the logic in sample_impl for the baseline terrain (no erosion).
+// This includes regional influences, climate (for precipitation), lake
+// surface elevation, and river channel cuts. Returns true if the final
+// elevation <= sea_level_fraction.
+//
+// The comparison accounts for the uint16 packing precision used in the
+// baseline terrain's pixel output (packed_height / 65535.0), which rounds
+// to nearest. We simulate the exact pack/unpack cycle to match the test.
+bool sample_original_ocean(const WorldPlan& plan,
+                           double world_x, double world_z) {
+    const double x = world_x;
+    const double z = world_z;
+
+    // Evaluate regional influences (same as sample_impl).
+    const RegionalInfluences regions = evaluate_regions(plan, x, z);
+    const double region_blend = std::min(1.0, regions.weight_sum);
+    const double regional_elevation_bias = regions.weight_sum > 0.0
+        ? (regions.elevation_sum / regions.weight_sum) * region_blend
+        : 0.0;
+
+    // Evaluate base terrain (same as sample_impl, without erosion offset).
+    const TerrainField terrain = evaluate_terrain(
+        plan, x, z, regional_elevation_bias);
+    const double normalized_elevation = terrain.normalized_elevation;
+
+    // Evaluate climate for precipitation (same as sample_impl).
+    const ClimateField climate = evaluate_climate(
+        plan, x, z, regions, terrain);
+
+    // Evaluate hydrology at this coordinate for river/lake info
+    // (same as sample_impl with include_local_hydrology = true).
+    const HydrologyField hydrology = evaluate_hydrology(
+        plan, x, z, normalized_elevation, climate.precipitation);
+
+    // Compute surface elevation (lake surface or terrain elevation).
+    const double surface_elevation = hydrology.lake
+        ? hydrology.lake_surface_elevation
+        : normalized_elevation;
+
+    // Apply river channel cut (same as pixel packing code).
+    const double channel_cut = hydrology.river
+        ? plan.hydrology.river_channel_depth_fraction * hydrology.river_strength
+        : 0.0;
+
+    const double final_elevation = std::max(0.0, surface_elevation - channel_cut);
+
+    // Simulate the exact pack/unpack cycle used in the baseline terrain:
+    // packed_height = lround(final_elevation * 65535.0), clamped to [0, 65535]
+    // unpacked = packed_height / 65535.0
+    // Ocean if unpacked <= sea_level_fraction
+    const long packed_height = std::lround(final_elevation * 65535.0);
+    const std::uint16_t clamped = static_cast<std::uint16_t>(
+        std::clamp(packed_height, 0l, 65535l));
+    const double unpacked_elevation = static_cast<double>(clamped) / 65535.0;
+    return unpacked_elevation <= plan.sea_level_fraction;
 }
 
 const HydrologyField& hydrology_at(
@@ -1347,6 +1572,16 @@ RgbaImage WorldSampler::generate_rgba_region(
         throw std::out_of_range("RGBA region lies outside the finite world");
     }
 
+    // Build a hydrology grid with erosion_enabled = false to exactly match
+    // the baseline terrain's hydrology for ocean classification.
+    // This ensures the erosion_delta diagnostic has zero values at ocean pixels.
+    WorldPlan baseline_plan = plan_;
+    baseline_plan.hydrology.erosion_enabled = false;
+    const HydrologyGrid baseline_hydrology = build_hydrology_grid(baseline_plan);
+
+    // Build the eroded terrain's hydrology grid (with erosion enabled)
+    const HydrologyGrid hydrology_grid = build_hydrology_grid(plan_);
+
     if (hydrology_diagnostics != nullptr) {
         initialize_diagnostic_image(
             hydrology_diagnostics->flow_accumulation, width, depth);
@@ -1372,8 +1607,6 @@ RgbaImage WorldSampler::generate_rgba_region(
         throw std::invalid_argument(
             "TerrainSettings sea_level does not match the world-plan sea level");
     }
-
-    const HydrologyGrid hydrology_grid = build_hydrology_grid(plan_);
 
     RgbaImage image;
     image.width = width;
@@ -1417,12 +1650,63 @@ RgbaImage WorldSampler::generate_rgba_region(
         for (std::size_t x = 0; x < width; ++x) {
             const auto world_x = origin_x + static_cast<std::int64_t>(x);
             const auto world_z = origin_z + static_cast<std::int64_t>(z);
+
             // Erosion is simulated only on land routing cells. Do not let
             // bilinear interpolation blend neighboring land offsets into
-            // analytical ocean pixels at the coastline.
-            const bool base_terrain_is_ocean = terrain_is_ocean_at(
-                plan_, static_cast<double>(world_x),
-                static_cast<double>(world_z));
+            // ocean pixels. Use the baseline terrain's hydrology grid (built
+            // with erosion_enabled = false) for river/lake classification,
+            // and compute the exact per-pixel base terrain elevation to match
+            // the baseline terrain's per-pixel ocean check.
+            const bool base_terrain_is_ocean =
+                baseline_hydrology.valid &&
+                [&]() {
+                    const double scale = plan_.hydrology.routing_cell_scale;
+                    const auto gx = std::min(
+                        baseline_hydrology.width - 1,
+                        static_cast<std::size_t>(world_x / scale));
+                    const auto gz = std::min(
+                        baseline_hydrology.height - 1,
+                        static_cast<std::size_t>(world_z / scale));
+                    const auto& hydro = baseline_hydrology.cells[gz * baseline_hydrology.width + gx];
+
+                    // Compute base terrain elevation at exact world coordinate (same as sample_impl
+                    // with erosion_offset = 0). This matches the baseline terrain's per-pixel
+                    // elevation computation which uses evaluate_terrain at the exact coordinate.
+                    const double x = static_cast<double>(world_x);
+                    const double z = static_cast<double>(world_z);
+                    const RegionalInfluences regions = evaluate_regions(plan_, x, z);
+                    const double region_blend = std::min(1.0, regions.weight_sum);
+                    const double regional_elevation_bias = regions.weight_sum > 0.0
+                        ? (regions.elevation_sum / regions.weight_sum) * region_blend
+                        : 0.0;
+                    const TerrainField terrain = evaluate_terrain(
+                        plan_, x, z, regional_elevation_bias);
+                    const double normalized_elevation = terrain.normalized_elevation;
+
+                    // Compute surface elevation (lake surface or terrain elevation)
+                    // using river/lake info from baseline hydrology grid (grid resolution)
+                    const double surface_elevation = hydro.lake
+                        ? hydro.lake_surface_elevation
+                        : normalized_elevation;
+
+                    // Apply river channel cut (same as pixel packing code)
+                    const double channel_cut = hydro.river
+                        ? plan_.hydrology.river_channel_depth_fraction * hydro.river_strength
+                        : 0.0;
+
+                    const double final_elevation = std::max(0.0, surface_elevation - channel_cut);
+
+                    // Simulate the exact pack/unpack cycle used in the baseline terrain:
+                    // packed_height = lround(final_elevation * 65535.0), clamped to [0, 65535]
+                    // unpacked = packed_height / 65535.0
+                    // Ocean if unpacked <= sea_level_fraction
+                    const long packed_height = std::lround(final_elevation * 65535.0);
+                    const std::uint16_t clamped = static_cast<std::uint16_t>(
+                        std::clamp(packed_height, 0l, 65535l));
+                    const double unpacked_elevation = static_cast<double>(clamped) / 65535.0;
+                    return unpacked_elevation <= plan_.sea_level_fraction;
+                }();
+
             const double erosion_offset =
                 hydrology_grid.valid && !base_terrain_is_ocean
                 ? sample_elevation_offset(
@@ -1430,6 +1714,7 @@ RgbaImage WorldSampler::generate_rgba_region(
                     hydrology_grid.width, hydrology_grid.height,
                     plan_.hydrology.routing_cell_scale, world_x, world_z)
                 : 0.0;
+
             WorldSample sample_at = sample_impl(
                 world_x, world_z, !hydrology_grid.valid, erosion_offset);
             if (hydrology_grid.valid && !sample_at.is_ocean) {
