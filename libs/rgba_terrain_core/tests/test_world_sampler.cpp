@@ -478,6 +478,33 @@ TEST_CASE("world region emits deterministic hydrology diagnostic preview layers"
             CHECK(pixel.a == 255);
         }
     }
+
+    WorldHydrologyDiagnosticImages left_diagnostics;
+    WorldHydrologyDiagnosticImages right_diagnostics;
+    (void)sampler.generate_rgba_region(
+        16, 16, 12, 20, settings, nullptr, &left_diagnostics);
+    (void)sampler.generate_rgba_region(
+        28, 16, 12, 20, settings, nullptr, &right_diagnostics);
+    const std::array<const RgbaImage*, 5> left_layers{
+        &left_diagnostics.flow_accumulation,
+        &left_diagnostics.river_strength,
+        &left_diagnostics.drainage_direction,
+        &left_diagnostics.lake_depth, &left_diagnostics.lake_basins};
+    const std::array<const RgbaImage*, 5> right_layers{
+        &right_diagnostics.flow_accumulation,
+        &right_diagnostics.river_strength,
+        &right_diagnostics.drainage_direction,
+        &right_diagnostics.lake_depth, &right_diagnostics.lake_basins};
+    for (std::size_t layer = 0; layer < layers.size(); ++layer) {
+        for (std::size_t z = 0; z < 20; ++z) {
+            for (std::size_t x = 0; x < 12; ++x) {
+                CHECK(left_layers[layer]->at(x, z) ==
+                      layers[layer]->at(x, z));
+                CHECK(right_layers[layer]->at(x, z) ==
+                      layers[layer]->at(x + 12, z));
+            }
+        }
+    }
 }
 
 TEST_CASE("world plan exposes detailed biome definitions and v2 material packing") {
