@@ -5,7 +5,9 @@
 #include <climits>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <span>
 
 #include "text/default_font.h"
 #include "text/font.h"
