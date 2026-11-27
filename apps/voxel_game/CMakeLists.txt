@@ -16,9 +16,9 @@ target_link_libraries(voxel_game PRIVATE Threads::Threads)
 # world.cpp, which includes ws/ui headers), and DEPENDS carries the rest
 # (ws_add_test's LINK is SINGLE-value).
 ws_add_test(voxel_logic
-  SOURCES src/world.cpp src/terrain_import.cpp tests/test_voxel_logic.cpp
+  SOURCES src/world.cpp tests/test_voxel_logic.cpp
   LINK ws::ui
-  DEPENDS ws::physics ws::audio ws::gameplay ws::rgba_terrain_core)
+  DEPENDS ws::physics ws::audio ws::gameplay)
 if(TARGET test_voxel_logic)
   # The suite uses the public VoxelGrid3D API; add the physics include
   # path explicitly because LINK is link-only for non-library consumers.
