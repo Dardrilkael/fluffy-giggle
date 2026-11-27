@@ -110,10 +110,8 @@ RgbaImage generate_synthetic_map(std::size_t width, std::size_t depth,
                 0.12f + broad * 0.40f + hill * 0.12f +
                     mountain * ridge * 0.36f,
                 0.0f, 1.0f);
-            const float world_height = settings.min_height +
-                                       terrain * height_span;
-            const auto packed_height = static_cast<std::uint16_t>(
-                std::clamp(std::lround(terrain * 65535.0f), 0l, 65535l));
+            float world_height = settings.min_height +
+                                 terrain * height_span;
 
             const float temperature = fbm(nx * 3.7f, nz * 3.7f,
                                            seed ^ 0xB5297A4Du, 3);
@@ -130,7 +128,17 @@ RgbaImage generate_synthetic_map(std::size_t width, std::size_t depth,
                                                   seed ^ 0xC0FFEE11u, 2));
             const bool river = std::abs(nz - river_axis) < 0.018f &&
                                !mountains;
+            if (river) {
+                world_height = std::min(
+                    world_height, std::max(settings.min_height, sea - 1.0f));
+            }
             const bool water = world_height <= sea || river;
+            const float normalized_height = height_span > 0.0f
+                ? (world_height - settings.min_height) / height_span
+                : 0.0f;
+            const auto packed_height = static_cast<std::uint16_t>(
+                std::clamp(std::lround(normalized_height * 65535.0f),
+                           0l, 65535l));
 
             std::uint8_t biome = 0;
             if (desert) biome = 2;
