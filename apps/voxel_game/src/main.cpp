@@ -33,10 +33,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <future>
 #include <numbers>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #ifdef __ANDROID__
@@ -74,6 +77,7 @@
 #include "renderer.hpp"
 #include "world.hpp"
 #include "terrain_import.hpp"
+#include "terrain_world_io.hpp"
 #include "voxel_audio.hpp"
 
 namespace {
@@ -213,7 +217,7 @@ class VoxelApp final : public ws::ui::App {
     ws::input::EventDispatcher d{e};
     (void)d.dispatch<ws::input::MouseMovedEvent>(
         [this](const ws::input::MouseMovedEvent& ev) {
-          if (!paused_ && !inventory_open_ && !crafting_open_ && !settings_open_ && have_last_mouse_) {
+          if (!entry_menu_ && !paused_ && !inventory_open_ && !crafting_open_ && !settings_open_ && have_last_mouse_) {
             look_dx_ += ev.x - last_mouse_x_;
             look_dy_ += ev.y - last_mouse_y_;
           }
@@ -229,7 +233,7 @@ class VoxelApp final : public ws::ui::App {
     // break/place pass never sees it.
     (void)d.dispatch<ws::input::MouseButtonPressedEvent>(
         [this](const ws::input::MouseButtonPressedEvent& ev) {
-          if (paused_ || inventory_open_ || crafting_open_ || settings_open_) {
+          if (entry_menu_ || paused_ || inventory_open_ || crafting_open_ || settings_open_) {
             clicked_ = ev.button == 0;
             if (clicked_) return true;  // modal UI owns this click
           }
@@ -259,6 +263,8 @@ class VoxelApp final : public ws::ui::App {
         terrain_voxels != nullptr && terrain_voxels[0] != '\0';
     const bool terrain_requested =
         has_terrain_png || has_terrain_meta || has_terrain_voxels;
+    const float bench_seconds = voxel::bench::bench_seconds_from_env();
+    entry_menu_ = !terrain_requested && bench_seconds <= 0.0f;
     if (!terrain_requested) {
       world_.generate(kSeed);
     } else {
@@ -307,12 +313,12 @@ class VoxelApp final : public ws::ui::App {
             "from PNG + metadata ({3} voxels, {4} columns)",
             terrain.width, terrain.depth, terrain.height,
             imported->voxel_count, imported->column_count);
+        const auto populated_biome_types = std::count_if(
+            imported->biome_columns.begin(), imported->biome_columns.end(),
+            [](std::uint64_t columns) { return columns != 0; });
         ws::core::info(
-            "voxel: imported biomes plains={0} forest={1} desert={2} mountain={3}",
-            imported->biome_columns[static_cast<std::size_t>(voxel::Biome::plains)],
-            imported->biome_columns[static_cast<std::size_t>(voxel::Biome::forest)],
-            imported->biome_columns[static_cast<std::size_t>(voxel::Biome::desert)],
-            imported->biome_columns[static_cast<std::size_t>(voxel::Biome::mountain)]);
+            "voxel: imported {0} populated biome types",
+            populated_biome_types);
       } catch (const std::exception& exception) {
         ws::core::error("voxel: RGBA terrain import failed: {}",
                         exception.what());
@@ -390,12 +396,12 @@ class VoxelApp final : public ws::ui::App {
     // The mouse-look grab: the OS pointer vanishes and motion arrives as
     // raw deltas (never a cursor pinned at a screen edge). ESC's pause
     // menu is the one place that hands the visible pointer back.
-    set_cursor_mode(ws::ui::CursorMode::hidden);
+    set_cursor_mode(entry_menu_ ? ws::ui::CursorMode::normal
+                                : ws::ui::CursorMode::hidden);
 
     // The scripted benchmark (WS_VOXEL_BENCH=<seconds>): the frame loop
     // feeds perf.hpp's counters and bench.hpp prints one CSV line per
     // second; request_stop lands at the end of the run.
-    const float bench_seconds = voxel::bench::bench_seconds_from_env();
     if (bench_seconds > 0.0f) {
       benchmark_shadow_flags_ =
           voxel::bench::bench_shadow_flags_from_env();
@@ -425,6 +431,7 @@ class VoxelApp final : public ws::ui::App {
     if (dead_) {
       return;
     }
+    poll_world_generation();
     const auto now = std::chrono::steady_clock::now();
     const float dt =
         last_time_.has_value()
@@ -454,6 +461,12 @@ class VoxelApp final : public ws::ui::App {
 
     const ws::input::InputFrame& input = ws::input::frame_input();
     const r2d::FrameSize frame = r2d::frame_size();
+
+    if (entry_menu_) {
+      entry_menu_action(frame);
+      draw_entry_menu_frame(frame);
+      return;
+    }
 
     // --- esc opens/closes the pause menu ------------------------------------
     // The old esc-quit is gone: the game keeps running until the menu's
@@ -704,7 +717,327 @@ class VoxelApp final : public ws::ui::App {
     }
   }
 
+  [[nodiscard]] bool wants_frame() const override {
+    return generation_in_progress_;
+  }
+
  private:
+  using UiRect = ws::ui::layout::Rect;
+
+  [[nodiscard]] static bool entry_hit(
+      const UiRect& rect, float x, float y) noexcept {
+    return x >= rect.x && x < rect.x + rect.w &&
+           y >= rect.y && y < rect.y + rect.h;
+  }
+
+  [[nodiscard]] UiRect entry_panel(const r2d::FrameSize& frame) const {
+    const float width = std::min(560.0f, std::max(288.0f, frame.width - 24.0f));
+    return {(frame.width - width) * 0.5f,
+            (frame.height - 490.0f) * 0.5f, width, 490.0f};
+  }
+
+  [[nodiscard]] std::array<UiRect, 3> entry_seed_controls(
+      const r2d::FrameSize& frame) const {
+    const UiRect panel = entry_panel(frame);
+    const float y = panel.y + 142.0f;
+    return {{{panel.x + 80.0f, y, 46.0f, 34.0f},
+             {panel.x + 136.0f, y, 46.0f, 34.0f},
+             {panel.x + 194.0f, y, panel.w - 214.0f, 34.0f}}};
+  }
+
+  [[nodiscard]] std::array<UiRect, 4> entry_buttons(
+      const r2d::FrameSize& frame) const {
+    const UiRect panel = entry_panel(frame);
+    const float width = panel.w - 112.0f;
+    const float x = panel.x + 56.0f;
+    return {{{x, panel.y + 206.0f, width, 48.0f},
+             {x, panel.y + 264.0f, width, 48.0f},
+             {x, panel.y + 322.0f, width, 48.0f},
+             {x, panel.y + 380.0f, width, 48.0f}}};
+  }
+
+  [[nodiscard]] bool saved_map_available() const {
+    const auto files = voxel::terrain_world_io::generated_map_files();
+    std::error_code error;
+    const bool png = std::filesystem::is_regular_file(files.png, error);
+    if (error || !png) return false;
+    error.clear();
+    return std::filesystem::is_regular_file(files.metadata, error) && !error;
+  }
+
+  void spawn_at_world_center() {
+    const int origin_x = voxel::kWorldSizeX / 2;
+    const int origin_z = voxel::kWorldSizeZ / 2;
+    int spawn_x = -1;
+    int spawn_z = -1;
+    int surface = -1;
+
+    // Search outward in deterministic square rings. Water is walk-through
+    // in this game but has no swimming yet, so prefer the nearest dry column.
+    const auto try_column = [&](int x, int z) {
+      if (x < 0 || x >= voxel::kWorldSizeX ||
+          z < 0 || z >= voxel::kWorldSizeZ) {
+        return false;
+      }
+      const int candidate_surface = world_.surface_height(x, z);
+      if (candidate_surface < 0 ||
+          candidate_surface + 1 >= voxel::kChunkSizeY ||
+          world_.block_at(x, candidate_surface + 1, z) == voxel::Block::water) {
+        return false;
+      }
+      spawn_x = x;
+      spawn_z = z;
+      surface = candidate_surface;
+      return true;
+    };
+
+    const int max_radius = voxel::kWorldSizeX + voxel::kWorldSizeZ;
+    for (int radius = 0; radius < max_radius && spawn_x < 0; ++radius) {
+      for (int dx = -radius; dx <= radius && spawn_x < 0; ++dx) {
+        if (try_column(origin_x + dx, origin_z - radius)) break;
+        if (radius != 0 &&
+            try_column(origin_x + dx, origin_z + radius)) break;
+      }
+      for (int dz = -radius + 1; dz < radius && spawn_x < 0; ++dz) {
+        if (try_column(origin_x - radius, origin_z + dz)) break;
+        if (radius != 0 &&
+            try_column(origin_x + radius, origin_z + dz)) break;
+      }
+    }
+
+    // An all-water map is unusual but still playable: fall back to the
+    // center's solid seabed rather than refusing to start the world.
+    if (spawn_x < 0) {
+      spawn_x = origin_x;
+      spawn_z = origin_z;
+      surface = world_.surface_height(spawn_x, spawn_z);
+    }
+    if (surface < 0 || surface + 1 >= voxel::kChunkSizeY) {
+      throw std::runtime_error("the generated world has no solid spawn surface");
+    }
+
+    const Vec3 spawn{static_cast<float>(spawn_x) + 0.5f,
+                     static_cast<float>(surface) + 1.0f +
+                         player_.tuning_half_height(),
+                     static_cast<float>(spawn_z) + 0.5f};
+    if (!player_.spawn(spawn)) {
+      throw std::runtime_error("could not place the player in the generated world");
+    }
+    target_hit_ = {};
+    look_dx_ = 0.0f;
+    look_dy_ = 0.0f;
+    have_last_mouse_ = false;
+  }
+
+  void enter_current_world() {
+    spawn_at_world_center();
+    entry_menu_ = false;
+    clicked_ = false;
+    set_cursor_mode(ws::ui::CursorMode::hidden);
+  }
+
+  void load_saved_world_and_play() {
+    const auto files = voxel::terrain_world_io::generated_map_files();
+    const auto report = voxel::terrain_world_io::import_png_map(world_, files);
+    (void)report;
+    spawn_at_world_center();
+    voxel::perf::FrameTimings rebuild_metrics{};
+    voxel_renderer_.rebuild_all(world_, &rebuild_metrics);
+    entry_menu_ = false;
+    clicked_ = false;
+    set_cursor_mode(ws::ui::CursorMode::hidden);
+    ws::core::info("voxel: loaded saved RGBA PNG world from '{}'",
+                   files.png.string());
+  }
+
+  void start_world_generation() {
+    if (generation_in_progress_) return;
+    const auto files = voxel::terrain_world_io::generated_map_files();
+    const std::uint32_t seed = world_seed_;
+    generation_status_ = "Generating 256 x 256 world data...";
+    generation_in_progress_ = true;
+    try {
+      generation_job_ = std::async(std::launch::async, [files, seed]() {
+        voxel::terrain_world_io::generate_png_map(files, seed);
+      });
+    } catch (const std::exception& exception) {
+      generation_in_progress_ = false;
+      generation_status_ = std::string("Could not start generation: ") +
+                           exception.what();
+    }
+  }
+
+  void poll_world_generation() {
+    if (!generation_in_progress_ || !generation_job_.valid()) return;
+    if (generation_job_.wait_for(std::chrono::seconds(0)) !=
+        std::future_status::ready) {
+      return;
+    }
+
+    generation_in_progress_ = false;
+    try {
+      generation_job_.get();
+      load_saved_world_and_play();
+      generation_status_ = "Generated PNG saved and loaded. Have fun!";
+    } catch (const std::exception& exception) {
+      generation_status_ = std::string("Generation/load failed: ") +
+                           exception.what();
+      ws::core::error("voxel: {}", generation_status_);
+    }
+  }
+
+  void entry_menu_action(const r2d::FrameSize& frame) {
+    if (!clicked_) return;
+    clicked_ = false;
+
+    const auto seed_controls = entry_seed_controls(frame);
+    if (!generation_in_progress_ && entry_hit(
+            seed_controls[0], mouse_x_, mouse_y_)) {
+      --world_seed_;
+      return;
+    }
+    if (!generation_in_progress_ && entry_hit(
+            seed_controls[1], mouse_x_, mouse_y_)) {
+      ++world_seed_;
+      return;
+    }
+    if (!generation_in_progress_ && entry_hit(
+            seed_controls[2], mouse_x_, mouse_y_)) {
+      const auto ticks = std::chrono::steady_clock::now()
+                             .time_since_epoch().count();
+      world_seed_ = static_cast<std::uint32_t>(
+          static_cast<std::uint64_t>(ticks) ^
+          (static_cast<std::uint64_t>(ticks) >> 32u) ^
+          (static_cast<std::uint64_t>(world_seed_) * 0x9E3779B97F4A7C15ull));
+      return;
+    }
+
+    const auto buttons = entry_buttons(frame);
+    if (entry_hit(buttons[0], mouse_x_, mouse_y_)) {
+      start_world_generation();
+    } else if (!generation_in_progress_ &&
+               entry_hit(buttons[1], mouse_x_, mouse_y_)) {
+      enter_current_world();
+    } else if (!generation_in_progress_ &&
+               entry_hit(buttons[2], mouse_x_, mouse_y_)) {
+      try {
+        load_saved_world_and_play();
+        generation_status_ = "Loaded the saved PNG world.";
+      } catch (const std::exception& exception) {
+        generation_status_ = std::string("Could not load saved map: ") +
+                             exception.what();
+      }
+    } else if (!generation_in_progress_ &&
+               entry_hit(buttons[3], mouse_x_, mouse_y_)) {
+      request_stop();
+    }
+  }
+
+  void draw_entry_button(
+      const UiRect& bounds, const char* label, bool hovered,
+      bool disabled = false) {
+    const auto fill = disabled ? r2d::rgba(39, 43, 48, 210)
+        : hovered ? r2d::rgba(87, 116, 68, 255)
+                  : r2d::rgba(47, 61, 49, 245);
+    r2d::draw_rounded_quad(bounds.x, bounds.y, bounds.w, bounds.h, 8.0f, fill);
+    const float text_width =
+        r2d::draw_text(-1000.0f, -1000.0f, label, font_);
+    (void)r2d::draw_text(
+        bounds.x + (bounds.w - text_width) * 0.5f,
+        bounds.y + (bounds.h - 16.0f) * 0.5f,
+        label, font_, disabled ? r2d::rgba(130, 137, 137)
+                               : r2d::rgba(239, 243, 229));
+  }
+
+  void draw_entry_menu(const r2d::FrameSize& frame) {
+    if (font_.empty()) return;
+    const UiRect panel = entry_panel(frame);
+    r2d::draw_quad(0.0f, 0.0f, frame.width, frame.height,
+                   r2d::rgba(8, 12, 17, 170));
+    r2d::draw_rounded_quad(panel.x, panel.y + 7.0f, panel.w, panel.h,
+                           16.0f, r2d::rgba(0, 0, 0, 130));
+    r2d::draw_rounded_quad(panel.x, panel.y, panel.w, panel.h,
+                           16.0f, r2d::rgba(22, 29, 34, 248));
+    r2d::draw_rounded_quad(panel.x + 2.0f, panel.y + 2.0f,
+                           panel.w - 4.0f, 66.0f, 14.0f,
+                           r2d::rgba(39, 54, 47, 255));
+
+    const char* title = "VOXEL WORLDS";
+    const float title_width =
+        r2d::draw_text(-1000.0f, -1000.0f, title, font_);
+    (void)r2d::draw_text(panel.x + (panel.w - title_width) * 0.5f,
+                         panel.y + 22.0f, title, font_,
+                         r2d::rgba(239, 247, 225));
+    (void)r2d::draw_text(panel.x + 26.0f, panel.y + 94.0f,
+                         "WORLD SEED", font_, r2d::rgba(181, 194, 178));
+    char seed_text[48]{};
+    std::snprintf(seed_text, sizeof(seed_text), "%u", world_seed_);
+    (void)r2d::draw_text(panel.x + 150.0f, panel.y + 94.0f,
+                         seed_text, font_, r2d::rgba(220, 226, 210));
+    const auto controls = entry_seed_controls(frame);
+    r2d::draw_rounded_quad(controls[0].x, controls[0].y,
+                           controls[0].w, controls[0].h, 6.0f,
+                           r2d::rgba(54, 63, 59, 255));
+    r2d::draw_rounded_quad(controls[1].x, controls[1].y,
+                           controls[1].w, controls[1].h, 6.0f,
+                           r2d::rgba(54, 63, 59, 255));
+    r2d::draw_rounded_quad(controls[2].x, controls[2].y,
+                           controls[2].w, controls[2].h, 6.0f,
+                           r2d::rgba(54, 63, 59, 255));
+    (void)r2d::draw_text(controls[0].x + 17.0f, controls[0].y + 9.0f,
+                         "-", font_, r2d::rgba(245, 245, 235));
+    (void)r2d::draw_text(controls[1].x + 17.0f, controls[1].y + 9.0f,
+                         "+", font_, r2d::rgba(245, 245, 235));
+    (void)r2d::draw_text(controls[2].x + 12.0f, controls[2].y + 9.0f,
+                         "randomize", font_, r2d::rgba(225, 233, 218));
+    const auto buttons = entry_buttons(frame);
+    const bool saved = saved_map_available();
+    const char* labels[4] = {
+        generation_in_progress_ ? "GENERATING WORLD..." : "GENERATE NEW WORLD  /  PLAY",
+        "PLAY CURRENT WORLD",
+        "LOAD SAVED PNG WORLD",
+        "QUIT GAME"};
+    for (std::size_t i = 0; i < buttons.size(); ++i) {
+      const bool disabled = (generation_in_progress_ && i != 0u) ||
+                            (i == 2u && !saved);
+      const bool hovered = !disabled &&
+          entry_hit(buttons[i], mouse_x_, mouse_y_);
+      draw_entry_button(buttons[i], labels[i], hovered, disabled);
+    }
+
+    (void)r2d::draw_text(
+        panel.x + 28.0f, panel.y + 445.0f,
+        "256 x 256 terrain  |  PNG + metadata saved in worlds/generated-world/",
+        font_, r2d::rgba(155, 170, 160));
+    if (!generation_status_.empty()) {
+      (void)r2d::draw_text(panel.x + 28.0f, panel.y + 466.0f,
+                           generation_status_.c_str(), font_,
+                           r2d::rgba(194, 211, 179));
+    }
+  }
+
+  void draw_entry_menu_frame(const r2d::FrameSize& frame) {
+    r2d::begin();
+    r2d::set_layer(0);
+    r2d::draw_quad(0.0f, 0.0f, frame.width, frame.height,
+                   r2d::rgba(135, 196, 250));
+    r2d::end();
+
+    const auto camera = voxel::begin_scene(
+        player_, settings_.fov_degrees, settings_.render_distance,
+        benchmark_shadow_flags_.cast);
+    voxel::draw_world(voxel_renderer_, tile_textures_, camera,
+                      frame.width / frame.height, nullptr,
+                      benchmark_shadow_flags_.cast,
+                      benchmark_shadow_flags_.receive);
+    r2d::end();
+
+    r2d::begin();
+    r2d::set_layer(10);
+    draw_entry_menu(frame);
+    r2d::end();
+  }
+
   [[nodiscard]] bool overlaps_player(int x, int y, int z) const {
     const auto box = player_.bounds();
     const ws::physics3d::Aabb block{
@@ -1187,6 +1520,12 @@ class VoxelApp final : public ws::ui::App {
   // the menu hit-tests it; clicked_ is the frame's menu click,
   // consumed by the frame that reads it.
   bool paused_ = false;
+  // The title screen owns generation/loading until the player selects a world.
+  bool entry_menu_ = false;
+  std::uint32_t world_seed_ = kSeed;
+  bool generation_in_progress_ = false;
+  std::future<void> generation_job_{};
+  std::string generation_status_ = "Choose a seed, generate a map, then play.";
   float mouse_x_ = 0.0f;
   float mouse_y_ = 0.0f;
   bool clicked_ = false;

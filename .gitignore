@@ -25,5 +25,8 @@ Thumbs.db
 # Tools
 tools/downloads/
 
+# Locally generated voxel worlds (the game writes these when using its title screen)
+worlds/generated-world/
+
 # Runtime state (ImGui window layout, written by playground runs)
 imgui.ini

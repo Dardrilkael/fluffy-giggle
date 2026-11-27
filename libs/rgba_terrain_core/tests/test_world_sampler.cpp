@@ -45,7 +45,7 @@ TEST_CASE("world sampler is deterministic at global coordinates") {
     CHECK(first.humidity <= 1.0);
     CHECK(first.precipitation >= 0.0);
     CHECK(first.precipitation <= 1.0);
-    CHECK(first.biome_id <= 20);
+    CHECK(first.biome_id == 0 || (first.biome_id >= 8 && first.biome_id <= 27));
     CHECK(first.ecosystem_id != 0);
 }
 
@@ -332,7 +332,7 @@ TEST_CASE("world plan exposes detailed biome definitions and v2 material packing
     const auto plan = make_default_world_plan(256, 256, 0xB10BEu);
     CHECK(plan.biomes.size() == 21);
     CHECK(plan.biomes.front().id == 0);
-    CHECK(plan.biomes.back().id == 20);
+    CHECK(plan.biomes.back().id == 27);
     CHECK_NOTHROW(plan.validate());
 
     const WorldSampler sampler(plan);
@@ -349,7 +349,7 @@ TEST_CASE("world plan exposes detailed biome definitions and v2 material packing
     const auto columns = generate_columns(image, layout, settings);
     REQUIRE(columns.columns.size() == 32u * 32u);
     for (const auto& column : columns.columns) {
-        CHECK(column.biome_id <= 20);
+        CHECK(column.biome_id == 0 || (column.biome_id >= 8 && column.biome_id <= 27));
         CHECK(column.material_id <= 15);
         CHECK((column.feature_flags & 0x87u) == 0);
     }

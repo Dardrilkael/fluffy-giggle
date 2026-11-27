@@ -9,7 +9,10 @@ bits. Existing v1 metadata remains supported.
 ## v2 (plan-based generator)
 B bits 0..3 store one of 15 surface materials. B bits 4..7 store forest,
 mountain, river and lake flags. A stores the full 8-bit biome ID. The default
-world plan defines 21 biome types and 15 surface materials.
+world plan uses ID 0 for ocean and IDs 8..27 for its 20 detailed land biomes.
+IDs 1..7 are deliberately left untouched for the legacy v1 biome meanings,
+so previously saved maps remain semantically compatible. The plan therefore
+defines 21 biome types and 15 surface materials.
 
 Logical feature flags restored into voxel metadata remain 0x08, 0x10, 0x20
 and 0x40. Ocean water is inferred from biome ID 0; inland water is inferred

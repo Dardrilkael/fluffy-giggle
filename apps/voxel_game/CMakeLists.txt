@@ -4,8 +4,8 @@
 # supplies the generic RGBA voxel format. The app-owned terrain adapter
 # translates generic voxel IDs into this game's block and biome vocabulary.
 find_package(Threads REQUIRED)
-ws_add_app(voxel_game DEPENDS ws::ui ws::physics ws::audio ws::gameplay ws::rgba_terrain_core)
-target_sources(voxel_game PRIVATE src/terrain_import.cpp)
+ws_add_app(voxel_game DEPENDS ws::ui ws::physics ws::audio ws::gameplay ws::rgba_terrain_core ws::image)
+target_sources(voxel_game PRIVATE src/terrain_import.cpp src/terrain_world_io.cpp)
 target_link_libraries(voxel_game PRIVATE Threads::Threads)
 
 # The headless logic suite: worldgen determinism, independent frustum

@@ -32,13 +32,23 @@ using ws::rgba_terrain_core::VoxelVolume;
 }
 
 [[nodiscard]] bool map_biome(std::uint8_t biome, Biome& result) noexcept {
-  // Preserve the detailed biome identity in the game metadata. The
-  // original four broad values remain stable for old v1 maps.
-  if (biome > 20) return false;
-  // Keep the original broad IDs 0..3 stable for existing game content.
-  // Detailed generator biomes occupy the appended enum range 4..23.
-  result = static_cast<Biome>(biome == 0 ? 0 : biome + 3);
-  return true;
+  // Preserve the legacy v1 biome meanings (IDs 0..7). The v2 generator
+  // deliberately starts detailed land biomes at ID 8 so old PNGs never
+  // acquire a different biome simply because the vocabulary expanded.
+  switch (biome) {
+    case 0: result = Biome::plains; return true;  // ocean
+    case 1: result = Biome::forest; return true;
+    case 2: result = Biome::forest; return true;
+    case 3: result = Biome::forest; return true;
+    case 4: result = Biome::desert; return true;
+    case 5: result = Biome::mountain; return true;
+    case 6: result = Biome::forest; return true;
+    case 7: result = Biome::mountain; return true;
+    default:
+      if (biome < 8 || biome > 27) return false;
+      result = static_cast<Biome>(biome - 4);
+      return true;
+  }
 }
 
 [[nodiscard]] bool map_voxel(const Voxel& voxel, Block& block) noexcept {

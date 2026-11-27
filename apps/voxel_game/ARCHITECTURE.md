@@ -4,6 +4,14 @@ The app is a composition layer. Algorithms and policies that can stand alone
 live in the workspace libraries; the app retains the block vocabulary,
 resource pack, world rules, and rendering composition.
 
+The desktop title screen is app-owned: seed controls and menu hit testing
+stay in `main.cpp`; `terrain_world_io.cpp` owns the game's RGBA v2 map
+generation and PNG import adapter. CPU terrain sampling and PNG/sidecar
+writing run on a background future. The main thread polls its completion,
+reconstructs the voxel volume from the saved PNG + metadata, replaces the
+world, respawns the player and rebuilds GPU chunk meshes. No renderer or
+world-storage object is accessed by the worker.
+
 The voxel world's ownership boundary is CPU-only: `World` owns block storage
 and builds renderer-independent CPU mesh snapshots. `VoxelRenderer` owns GPU
 handles and performs upload/destruction/draw work on the render thread. The
@@ -43,8 +51,10 @@ The sound adapter (`voxel_audio.hpp`) is deliberately the boundary between the t
 
 ## RGBA terrain import
 
-The app owns the only adapter between `ws::rgba_terrain_core`'s generic
-voxel IDs and this game's `Block`/`Biome` vocabulary. The reusable terrain
+The app owns the adapter between `ws::rgba_terrain_core`'s generic
+voxel IDs and this game's `Block`/`Biome` vocabulary. `terrain_world_io.cpp`
+also owns the title screen's saved-map path (`worlds/generated-world/`) and
+writes the generator's RGBA v2 PNG + metadata pair. The reusable terrain
 library does not depend on the game. The fixed world is 256x256x64 (16x16
 chunks), matching the current 256x256 data-map resolution without resampling.
 

@@ -63,11 +63,11 @@ TEST_CASE("terrain import: maps generic IDs and preserves X/Z and column metadat
   CHECK(world.block_at(20, 5, 20) == voxel::Block::water);
   CHECK(world.block_at(20, 4, 20) == voxel::Block::air);
 
-  CHECK(world.column_metadata(15, 20).biome == voxel::Biome::tropical_rainforest);
+  CHECK(world.column_metadata(15, 20).biome == voxel::Biome::forest);
   CHECK(world.column_metadata(15, 20).feature_flags == 0x08);
-  CHECK(world.column_metadata(16, 20).biome == voxel::Biome::tropical_seasonal_forest);
+  CHECK(world.column_metadata(16, 20).biome == voxel::Biome::forest);
   CHECK(world.column_metadata(16, 20).feature_flags == 0x10);
-  CHECK(world.column_metadata(17, 20).biome == voxel::Biome::temperate_deciduous_forest);
+  CHECK(world.column_metadata(17, 20).biome == voxel::Biome::forest);
   CHECK(world.column_metadata(17, 20).feature_flags == 0x20);
   CHECK(imported->column_count == 256u * 256u);
   CHECK(imported->voxel_count == 256u * 256u * 64u);
@@ -78,28 +78,49 @@ TEST_CASE("terrain import: maps generic IDs and preserves X/Z and column metadat
   CHECK(imported->block_counts[static_cast<std::size_t>(voxel::Block::water)] == 1);
 }
 
-TEST_CASE("terrain import: collapses detailed ecological biomes into game visual families") {
+TEST_CASE("terrain import: preserves legacy IDs and maps v2 detailed biomes") {
   auto volume = make_empty_game_volume();
-  constexpr std::array<voxel::Biome, 21> expected{
+  constexpr std::array<voxel::Biome, 8> legacy_expected{
+      voxel::Biome::plains, voxel::Biome::forest,
+      voxel::Biome::forest, voxel::Biome::forest,
+      voxel::Biome::desert, voxel::Biome::mountain,
+      voxel::Biome::forest, voxel::Biome::mountain};
+  constexpr std::array<std::uint8_t, 21> detailed_ids{
+      0, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+      18, 19, 20, 21, 22, 23, 24, 25, 26, 27};
+  constexpr std::array<voxel::Biome, 21> detailed_expected{
       voxel::Biome::plains, voxel::Biome::tropical_rainforest,
-      voxel::Biome::tropical_seasonal_forest, voxel::Biome::temperate_deciduous_forest,
+      voxel::Biome::tropical_seasonal_forest,
+      voxel::Biome::temperate_deciduous_forest,
       voxel::Biome::temperate_grassland, voxel::Biome::hot_desert,
-      voxel::Biome::boreal_forest, voxel::Biome::tundra, voxel::Biome::savanna,
-      voxel::Biome::alpine_meadow, voxel::Biome::alpine_rock, voxel::Biome::wetlands,
+      voxel::Biome::boreal_forest, voxel::Biome::tundra,
+      voxel::Biome::savanna, voxel::Biome::alpine_meadow,
+      voxel::Biome::alpine_rock, voxel::Biome::wetlands,
       voxel::Biome::mangrove, voxel::Biome::mediterranean_woodland,
-      voxel::Biome::shrubland, voxel::Biome::cold_steppe, voxel::Biome::badlands,
-      voxel::Biome::snowy_mountain, voxel::Biome::rocky_plateau,
-      voxel::Biome::temperate_rainforest, voxel::Biome::salt_marsh};
-  for (std::size_t x = 0; x < expected.size(); ++x) {
-    for (std::size_t y = 0; y < volume.height; ++y) {
+      voxel::Biome::shrubland, voxel::Biome::cold_steppe,
+      voxel::Biome::badlands, voxel::Biome::snowy_mountain,
+      voxel::Biome::rocky_plateau, voxel::Biome::temperate_rainforest,
+      voxel::Biome::salt_marsh};
+
+  for (std::size_t x = 0; x < legacy_expected.size(); ++x) {
+    for (std::size_t y = 0; y < volume.height; ++y)
       volume.at(x, y, 0).biome_id = static_cast<std::uint8_t>(x);
-    }
   }
+  for (std::size_t i = 0; i < detailed_expected.size(); ++i) {
+    for (std::size_t y = 0; y < volume.height; ++y)
+      volume.at(i, y, 1).biome_id = detailed_ids[i];
+  }
+
   voxel::World world;
   const auto imported = voxel::import_terrain_volume(world, volume);
   REQUIRE(imported.has_value());
-  for (std::size_t x = 0; x < expected.size(); ++x) {
-    CHECK(world.column_metadata(static_cast<int>(x), 0).biome == expected[x]);
+  for (std::size_t x = 0; x < legacy_expected.size(); ++x) {
+    CHECK(world.column_metadata(static_cast<int>(x), 0).biome ==
+          legacy_expected[x]);
+  }
+  for (std::size_t i = 0; i < detailed_expected.size(); ++i) {
+    CHECK(world.column_metadata(static_cast<int>(i), 1).biome ==
+          detailed_expected[i]);
   }
 }
 

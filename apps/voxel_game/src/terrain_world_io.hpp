@@ -1,0 +1,28 @@
+#pragma once
+
+#include <cstdint>
+#include <filesystem>
+
+#include "terrain_import.hpp"
+
+namespace voxel::terrain_world_io {
+
+struct MapFiles {
+  std::filesystem::path png;
+  std::filesystem::path metadata;
+};
+
+// Stable app-data location used by the title screen's Generate/Load actions.
+// On Android the app changes its working directory to internalDataPath.
+[[nodiscard]] MapFiles generated_map_files();
+
+// Generates the authoritative RGBA v2 PNG and its sidecar. The game has a
+// fixed 256x256x64 volume, so the map is generated at native X/Z resolution.
+void generate_png_map(const MapFiles& files, std::uint32_t seed);
+
+// Reconstructs voxels from PNG + sidecar and imports them into the game.
+// The .rgba-voxels file is intentionally not required or written here.
+[[nodiscard]] TerrainImportReport import_png_map(
+    World& world, const MapFiles& files);
+
+}  // namespace voxel::terrain_world_io

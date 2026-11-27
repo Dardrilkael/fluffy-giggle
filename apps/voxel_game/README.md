@@ -7,14 +7,15 @@ Jolt behind `ws::physics3d`, OpenAL Soft behind `ws::audio`.
 
 ## What you get
 
-- **A procedurally generated 128 × 64 × 128 voxel world** (8×8 chunks of
+- **A procedurally generated 256 × 64 × 256 voxel world** (16×16 chunks of
   16×64×16): multi-field FBM height and climate maps create plains,
-  forests, deserts and rocky mountain regions. A low-frequency
+  forests, deserts, tundra, wetlands, alpine regions and rocky mountain regions. A low-frequency
   field carves winding river channels and sandy banks; water fills low
   ground to the water plane. 3D coherent density carves underground caves,
   clustered 3D noise creates coal/iron ore veins, and tree density varies
   with forest climate. All fields are deterministic per seed
   (default seed `0xC0FFEE`) and continuous across chunk boundaries.
+- **World entry screen**: choose a seed, increment/decrement it or randomize it, then select **Generate New World / Play**. Terrain sampling runs in the background so the menu stays responsive. When generation completes, the game saves and imports the RGBA PNG and starts the game automatically. **Load Saved PNG World** reloads the last generated map, and **Play Current World** starts the built-in fallback world.
 - **A first-person player**: WASD movement, mouse look, space jump
   (~1.5 m apex — clears a full block with margin), shift sprint. The
   player uses a backend-independent swept-AABB character controller
@@ -24,12 +25,34 @@ Jolt behind `ws::physics3d`, OpenAL Soft behind `ws::audio`.
   jump buffering and coyote time. Jolt remains available through
   `ws::physics3d::World3D` for ordinary dynamic objects.
 - **Block interaction**: left mouse breaks and collects drops; right mouse places the selected hotbar stack and consumes one item. The DDA raycast has a 7-block reach and placement cannot entomb the player.
-- **Expanded blocks**: cobblestone, planks, bricks, glass, leaves, coal ore and iron ore join the original terrain palette. Generated trees have leaf crowns and underground stone contains deterministic coal/iron deposits. New variants reuse the closest existing pack textures with distinct tints.
+- **Expanded blocks**: cobblestone, planks, bricks, glass, leaves, coal/iron ore, gravel, clay, snow, ice, sandstone, mud, mossy stone, red sand, basalt and peat. New variants reuse the closest matching resource-pack texture when an exact asset is absent.
 - **Inventory and crafting**: 27 stackable slots, a 9-slot hotbar, stack limit 64, item counts, and a starter recipe book. E opens inventory, C opens crafting, and F1-F6 craft the listed recipes when materials are available.
 - **HUD**: crosshair, a 9-slot item hotbar (keys 1–9), an FPS counter,
   position/grounded readout, and the controls line.
 - **Audio**: synthesized place/break "tock" one-shots (in-memory PCM
   through `ws::audio::SoundDesc` — no asset files).
+
+## Generating and loading worlds
+
+The title screen generates the game's native 256×256 map without an external
+script. The seed is editable with the minus/plus buttons or **randomize**.
+**Generate New World / Play** writes these authoritative files relative to
+the process working directory:
+
+```
+worlds/generated-world/terrain.png
+worlds/generated-world/terrain.rgba-terrain
+```
+
+The PNG uses RGBA terrain v2: R/G are 16-bit height, B stores the surface
+material and feature flags, and A stores the full biome ID. The game rebuilds
+the voxel volume from those two files and imports it directly. A separate
+`.rgba-voxels` file is not required. Generation stays on a worker thread;
+the PNG import and GPU chunk-mesh upload happen on the main/render thread.
+
+On Android, the app's working directory is changed to its private internal
+data directory, so the generated files stay inside app storage. The desktop
+path is relative to the directory from which `voxel_game` is launched.
 
 ## Controls
 
@@ -98,7 +121,7 @@ contract).
 ## The architecture
 
 ```
-src/world.hpp/.cpp    the voxel data model: the block table (8×8 chunks),
+src/world.hpp/.cpp    the voxel data model: the block table (16×16 chunks),
                       seeded biome/climate fields, rivers, caves, ore
                       veins, greedy meshing and a zero-copy VoxelGrid3D
                       view over chunks.
@@ -110,8 +133,9 @@ libs/physics/...      backend-independent VoxelGrid3D: bounded occupancy
                       swept-AABB collision and penetration recovery.
 src/renderer.hpp/.cpp the game→render coordinate bridge: camera and light;
                       draws every chunk mesh.
-src/main.cpp          the VoxelApp: input mapping, block interaction,
-                      chunk mesh rebuilds, HUD, audio and app entry points.
+src/main.cpp          the VoxelApp: title/pause menus, input mapping,
+                      world generation/loading, block interaction, HUD and audio.
+src/terrain_world_io.* the app-owned RGBA v2 PNG writer and PNG-to-world importer.
 ```
 
 Two coordinate frames, spelled once each (see `world.hpp`'s header
@@ -132,6 +156,6 @@ camera builder mirrors the player's pose).
 - Mouse look is free-cursor (window-edge clamped): the shell has no
   pointer-lock seam yet; the deltas are the same, the pointer stays
   visible.
-- No chunk streaming: the 8×8 world exists up front. The new 3D cave
+- No chunk streaming: the 16×16 world exists up front. The new 3D cave
   and ore fields add CPU work during startup generation; terrain is still
   generated once rather than streamed.
