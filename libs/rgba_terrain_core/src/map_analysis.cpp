@@ -147,9 +147,6 @@ double slope_at(const RgbaImage& image, std::size_t x, std::size_t z,
     return std::atan(std::hypot(dx, dz)) * 180.0 / std::numbers::pi;
 }
 
-void set_solid_color(RgbaImage& image, std::size_t index, Rgba8 color) {
-    image.pixels[index] = color;
-}
 
 }  // namespace
 
