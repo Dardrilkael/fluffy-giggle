@@ -17,6 +17,7 @@ enum class ChannelRole : std::uint8_t {
     BiomeId,
     WaterMask,
     Density,
+    // Alpha packing: biome bits 0..2; feature flags bits 3..7.
     BiomeWaterFlags,
 };
 
