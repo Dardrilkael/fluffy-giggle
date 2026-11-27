@@ -673,16 +673,26 @@ RgbaImage WorldSampler::generate_rgba_region(
     image.height = depth;
     image.pixels.resize(width * depth);
 
+    double regional_temperature_min = 0.0;
+    double regional_temperature_max = 0.0;
+    for (const auto& region : plan_.regions) {
+        regional_temperature_min = std::min(
+            regional_temperature_min, region.temperature_bias_c);
+        regional_temperature_max = std::max(
+            regional_temperature_max, region.temperature_bias_c);
+    }
     double temperature_min = std::min(
         plan_.climate.equator_temperature_c,
         plan_.climate.pole_temperature_c) -
-        plan_.climate.regional_temperature_variation_c -
+        plan_.climate.regional_temperature_variation_c +
+        regional_temperature_min -
         plan_.climate.maximum_elevation_m *
             plan_.climate.elevation_lapse_rate_c_per_km / 1000.0;
     double temperature_max = std::max(
         plan_.climate.equator_temperature_c,
         plan_.climate.pole_temperature_c) +
-        plan_.climate.regional_temperature_variation_c;
+        plan_.climate.regional_temperature_variation_c +
+        regional_temperature_max;
     if (temperature_max <= temperature_min) {
         temperature_max = temperature_min + 1.0;
     }
