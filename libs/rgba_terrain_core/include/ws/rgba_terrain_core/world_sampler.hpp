@@ -28,6 +28,7 @@ struct WorldHydrologyDiagnosticImages {
     RgbaImage lake_depth;
     RgbaImage lake_basins;
     RgbaImage stream_order;
+    RgbaImage river_class;
     RgbaImage watershed_basins;
     RgbaImage river_influence;
     RgbaImage mountain_peak_distance;
