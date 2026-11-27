@@ -143,7 +143,7 @@ RgbaImage generate_synthetic_map(std::size_t width, std::size_t depth,
                                !mountains;
             if (!mountains && river_distance < river_bank_width) {
                 const float channel_strength =
-                    1.0f - smoothstep(0.0f, river_bank_width,
+                    1.0f - smoothstep(river_half_width, river_bank_width,
                                       river_distance);
                 const float river_bed = std::max(
                     settings.min_height, sea - 2.0f);
