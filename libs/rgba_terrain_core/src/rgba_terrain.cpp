@@ -270,9 +270,14 @@ VoxelVolume generate_voxel_volume(const TerrainColumns& columns,
                     } else {
                         voxel.material_id = settings.deep_material;
                     }
-                } else if (y <= settings.sea_level &&
-                           (column.water_mask >= settings.water_threshold ||
-                            (column.feature_flags & 0x80u) != 0)) {
+                } else if ((y <= settings.sea_level &&
+                            (column.water_mask >= settings.water_threshold ||
+                             (column.feature_flags & 0x80u) != 0)) ||
+                           (y == column.height + 1 &&
+                            (column.feature_flags & 0x60u) != 0)) {
+                    // Inland rivers and lakes receive a surface-water voxel
+                    // immediately above their carved bed; ocean fill retains
+                    // the existing global sea-level behavior.
                     voxel.kind = VoxelKind::Water;
                     voxel.material_id = settings.water_material;
                     voxel.density = 255;
