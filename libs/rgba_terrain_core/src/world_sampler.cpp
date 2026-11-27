@@ -572,6 +572,210 @@ HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
     return result;
 }
 
+
+// Whole-world coarse drainage context. Building this once per RGBA region keeps
+// flow accumulation continuous across output chunks and avoids reconstructing
+// a 13x13 terrain neighborhood for every output pixel.
+struct HydrologyGrid {
+    std::size_t width = 0;
+    std::size_t height = 0;
+    std::vector<HydrologyField> cells;
+    bool valid = false;
+};
+
+HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
+    HydrologyGrid grid;
+    const double scale = plan.hydrology.routing_cell_scale;
+    const auto grid_dimension = [scale](std::int64_t extent) {
+        return static_cast<std::size_t>(
+            std::ceil(static_cast<double>(extent) / scale));
+    };
+    grid.width = grid_dimension(plan.width);
+    grid.height = grid_dimension(plan.depth);
+    if (grid.width == 0 || grid.height == 0 ||
+        grid.width > std::numeric_limits<std::size_t>::max() / grid.height) {
+        return grid;
+    }
+    const std::size_t count = grid.width * grid.height;
+    // Bound temporary memory for unusually large finite worlds. Point sampling
+    // retains its deterministic bounded-window fallback in that case.
+    constexpr std::size_t maximum_routing_cells = 1'000'000;
+    if (count > maximum_routing_cells) return grid;
+
+    std::vector<double> elevation(count);
+    std::vector<double> filled(count);
+    std::vector<double> accumulation(count);
+    std::vector<std::size_t> parent(count, count);
+    std::vector<std::size_t> visit_order(count, count);
+    std::vector<DrainageDirection> direction(count, DrainageDirection::Sink);
+    const auto index = [&grid](std::size_t x, std::size_t z) {
+        return z * grid.width + x;
+    };
+    const double province_scale = plan.scales.province_scale;
+    for (std::size_t z = 0; z < grid.height; ++z) {
+        for (std::size_t x = 0; x < grid.width; ++x) {
+            const std::size_t i = index(x, z);
+            const double world_x = (static_cast<double>(x) + 0.5) * scale;
+            const double world_z = (static_cast<double>(z) + 0.5) * scale;
+            const auto regions = evaluate_regions(plan, world_x, world_z);
+            const double blend = std::min(1.0, regions.weight_sum);
+            const double bias = regions.weight_sum > 0.0
+                ? regions.elevation_sum / regions.weight_sum * blend : 0.0;
+            elevation[i] = evaluate_terrain(
+                plan, world_x, world_z, bias).normalized_elevation;
+            const double moisture = fbm(
+                world_x / (province_scale * 0.82),
+                world_z / (province_scale * 0.82),
+                plan.seed ^ 0x68E31DA4C2B2AE35ull, 2);
+            accumulation[i] = clamp01(
+                plan.climate.base_humidity * 0.45 + 0.25 +
+                0.30 * (0.5 + 0.5 * moisture));
+        }
+    }
+
+    using FloodNode = std::pair<double, std::size_t>;
+    std::priority_queue<FloodNode, std::vector<FloodNode>,
+                        std::greater<FloodNode>> frontier;
+    std::vector<bool> visited(count, false);
+    std::size_t sequence = 0;
+    const auto seed_boundary = [&](std::size_t x, std::size_t z) {
+        const std::size_t i = index(x, z);
+        if (visited[i]) return;
+        visited[i] = true;
+        filled[i] = elevation[i];
+        visit_order[i] = sequence++;
+        frontier.emplace(filled[i], i);
+    };
+    for (std::size_t x = 0; x < grid.width; ++x) {
+        seed_boundary(x, 0);
+        seed_boundary(x, grid.height - 1);
+    }
+    for (std::size_t z = 0; z < grid.height; ++z) {
+        seed_boundary(0, z);
+        seed_boundary(grid.width - 1, z);
+    }
+
+    while (!frontier.empty()) {
+        const auto [level, current] = frontier.top();
+        frontier.pop();
+        const std::size_t x = current % grid.width;
+        const std::size_t z = current / grid.width;
+        for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
+            const auto nx_signed = static_cast<std::int64_t>(x) + drainage_dx[d];
+            const auto nz_signed = static_cast<std::int64_t>(z) + drainage_dz[d];
+            if (nx_signed < 0 || nz_signed < 0 ||
+                nx_signed >= static_cast<std::int64_t>(grid.width) ||
+                nz_signed >= static_cast<std::int64_t>(grid.height)) continue;
+            const std::size_t next = index(
+                static_cast<std::size_t>(nx_signed),
+                static_cast<std::size_t>(nz_signed));
+            if (visited[next]) continue;
+            visited[next] = true;
+            parent[next] = current;
+            filled[next] = std::max(elevation[next], level);
+            visit_order[next] = sequence++;
+            frontier.emplace(filled[next], next);
+        }
+    }
+
+    for (std::size_t z = 0; z < grid.height; ++z) {
+        for (std::size_t x = 0; x < grid.width; ++x) {
+            const std::size_t i = index(x, z);
+            double best_drop = 0.0;
+            for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
+                const auto nx = static_cast<std::int64_t>(x) + drainage_dx[d];
+                const auto nz = static_cast<std::int64_t>(z) + drainage_dz[d];
+                if (nx < 0 || nz < 0 ||
+                    nx >= static_cast<std::int64_t>(grid.width) ||
+                    nz >= static_cast<std::int64_t>(grid.height)) continue;
+                const std::size_t next = index(
+                    static_cast<std::size_t>(nx), static_cast<std::size_t>(nz));
+                const double distance = (d % 2 == 1) ? 1.41421356237 : 1.0;
+                const double drop = (elevation[i] - elevation[next]) / distance;
+                if (drop > best_drop) {
+                    best_drop = drop;
+                    direction[i] = static_cast<DrainageDirection>(d);
+                }
+            }
+            // In flats/depressions, follow the priority-flood parent. Parent
+            // links always point to an earlier visited cell, so cannot cycle.
+            if (best_drop <= 0.0 && parent[i] != count) {
+                const auto px = static_cast<std::int64_t>(parent[i] % grid.width);
+                const auto pz = static_cast<std::int64_t>(parent[i] / grid.width);
+                const auto dx = px - static_cast<std::int64_t>(x);
+                const auto dz = pz - static_cast<std::int64_t>(z);
+                for (std::size_t d = 0; d < drainage_dx.size(); ++d) {
+                    if (drainage_dx[d] == dx && drainage_dz[d] == dz) {
+                        direction[i] = static_cast<DrainageDirection>(d);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    std::vector<std::size_t> order(count);
+    for (std::size_t i = 0; i < count; ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        if (filled[a] != filled[b]) return filled[a] > filled[b];
+        return visit_order[a] > visit_order[b];
+    });
+    for (const std::size_t i : order) {
+        const auto d = direction[i];
+        if (d == DrainageDirection::Sink) continue;
+        const std::size_t di = static_cast<std::size_t>(d);
+        const auto x = static_cast<std::int64_t>(i % grid.width) + drainage_dx[di];
+        const auto z = static_cast<std::int64_t>(i / grid.width) + drainage_dz[di];
+        if (x < 0 || z < 0 ||
+            x >= static_cast<std::int64_t>(grid.width) ||
+            z >= static_cast<std::int64_t>(grid.height)) continue;
+        accumulation[index(static_cast<std::size_t>(x),
+                           static_cast<std::size_t>(z))] += accumulation[i];
+    }
+
+    grid.cells.resize(count);
+    const double threshold = plan.hydrology.river_accumulation_threshold;
+    for (std::size_t i = 0; i < count; ++i) {
+        HydrologyField& cell = grid.cells[i];
+        cell.direction = direction[i];
+        cell.accumulation = accumulation[i];
+        cell.river_strength = clamp01(
+            (accumulation[i] - threshold) / (threshold * 2.5));
+        cell.lake_depth_m = std::max(0.0, filled[i] - elevation[i]) *
+                            plan.climate.maximum_elevation_m;
+        const double world_x =
+            (static_cast<double>(i % grid.width) + 0.5) * scale;
+        const double world_z =
+            (static_cast<double>(i / grid.width) + 0.5) * scale;
+        const double moisture = fbm(
+            world_x / (province_scale * 0.82),
+            world_z / (province_scale * 0.82),
+            plan.seed ^ 0x68E31DA4C2B2AE35ull, 2);
+        const double precipitation = clamp01(
+            plan.climate.base_humidity * 0.70 + 0.10 +
+            0.20 * (0.5 + 0.5 * moisture));
+        cell.lake = cell.lake_depth_m >= plan.hydrology.lake_minimum_depth_m &&
+            accumulation[i] >= plan.hydrology.lake_minimum_accumulation &&
+            precipitation >= plan.hydrology.lake_minimum_precipitation;
+        cell.lake_surface_elevation = filled[i];
+        cell.river = !cell.lake && direction[i] != DrainageDirection::Sink &&
+                     accumulation[i] >= threshold;
+    }
+    grid.valid = true;
+    return grid;
+}
+
+const HydrologyField& hydrology_at(
+    const HydrologyGrid& grid, const WorldPlan& plan,
+    std::int64_t world_x, std::int64_t world_z) {
+    const double scale = plan.hydrology.routing_cell_scale;
+    const auto x = std::min(
+        grid.width - 1, static_cast<std::size_t>(world_x / scale));
+    const auto z = std::min(
+        grid.height - 1, static_cast<std::size_t>(world_z / scale));
+    return grid.cells[z * grid.width + x];
+}
+
 std::uint8_t diagnostic_gray(double value) {
     return static_cast<std::uint8_t>(
         std::clamp(std::lround(clamp01(value) * 255.0), 0l, 255l));
@@ -753,8 +957,9 @@ WorldSample WorldSampler::sample(std::int64_t world_x,
     result.ocean_moisture = ocean_moisture;
     result.is_ocean = is_ocean;
     result.is_mountain = !is_ocean && terrain.mountain_strength > 0.34;
-    const HydrologyField hydrology = evaluate_hydrology(
-        plan_, x, z, terrain.normalized_elevation, precipitation);
+    const HydrologyField hydrology = include_local_hydrology
+        ? evaluate_hydrology(plan_, x, z, terrain.normalized_elevation, precipitation)
+        : HydrologyField{};
     result.drainage_direction = hydrology.direction;
     result.watershed_accumulation = hydrology.accumulation;
     result.river_strength = hydrology.river_strength;
@@ -894,6 +1099,8 @@ RgbaImage WorldSampler::generate_rgba_region(
             "TerrainSettings sea_level does not match the world-plan sea level");
     }
 
+    const HydrologyGrid hydrology_grid = build_hydrology_grid(plan_);
+
     RgbaImage image;
     image.width = width;
     image.height = depth;
@@ -934,9 +1141,27 @@ RgbaImage WorldSampler::generate_rgba_region(
 
     for (std::size_t z = 0; z < depth; ++z) {
         for (std::size_t x = 0; x < width; ++x) {
-            const WorldSample sample_at = sample(
+            WorldSample sample_at = sample(
                 origin_x + static_cast<std::int64_t>(x),
-                origin_z + static_cast<std::int64_t>(z));
+                origin_z + static_cast<std::int64_t>(z),
+                !hydrology_grid.valid);
+            if (hydrology_grid.valid && !sample_at.is_ocean) {
+                const auto& hydro = hydrology_at(
+                    hydrology_grid, plan_,
+                    origin_x + static_cast<std::int64_t>(x),
+                    origin_z + static_cast<std::int64_t>(z));
+                sample_at.drainage_direction = hydro.direction;
+                sample_at.watershed_accumulation = hydro.accumulation;
+                sample_at.river_strength = hydro.river_strength;
+                sample_at.lake_depth_m = hydro.lake_depth_m;
+                sample_at.lake_surface_elevation = hydro.lake_surface_elevation;
+                sample_at.is_river = hydro.river;
+                sample_at.is_lake = hydro.lake;
+                sample_at.feature_flags = static_cast<std::uint8_t>(
+                    sample_at.feature_flags & static_cast<std::uint8_t>(~0x60u));
+                if (hydro.river) sample_at.feature_flags |= 0x20u;
+                if (hydro.lake) sample_at.feature_flags |= 0x40u;
+            }
             if (climate_diagnostics != nullptr) {
                 const std::size_t index = z * width + x;
                 climate_diagnostics->temperature.pixels[index] = diagnostic_pixel(
