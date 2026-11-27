@@ -21,8 +21,8 @@ TEST_CASE("inventory: merge before empty slots and report accepted amount") {
   CHECK(inventory.slot(0).count == 8);
   CHECK(inventory.slot(1).count == 3);
   CHECK(inventory.count(Item::wood) == 11);
-  CHECK(inventory.add(Item::stone, 30) == 16);
-  CHECK(inventory.count(Item::stone) == 16);
+  CHECK(inventory.add(Item::stone, 30) == 8);
+  CHECK(inventory.count(Item::stone) == 8);
 }
 
 TEST_CASE("inventory: removal is all-or-nothing and clears empty stacks") {
@@ -33,6 +33,26 @@ TEST_CASE("inventory: removal is all-or-nothing and clears empty stacks") {
   CHECK(inventory.remove(Item::wood, 8));
   CHECK(inventory.slot(0).empty());
   CHECK(inventory.slot(1).count == 2);
+}
+
+TEST_CASE("inventory: selected-slot removal is bounded and all-or-nothing") {
+  Inventory inventory;
+  REQUIRE(inventory.add(Item::wood, 10) == 10);
+  REQUIRE(inventory.add(Item::stone, 3) == 3);
+  REQUIRE(inventory.add(Item::wood, 4) == 4);
+  CHECK(inventory.slot(0).item == Item::wood);
+  CHECK(inventory.slot(0).count == 8);
+  CHECK(inventory.slot(2).item == Item::wood);
+  CHECK(inventory.slot(2).count == 2);
+  CHECK_FALSE(inventory.remove_from_slot(2, 3));
+  CHECK(inventory.slot(2).count == 2);
+  CHECK(inventory.remove_from_slot(2, 1));
+  CHECK(inventory.slot(2).count == 1);
+  CHECK(inventory.slot(0).count == 8);
+  CHECK_FALSE(inventory.remove_from_slot(3, 1));
+  CHECK_FALSE(inventory.remove_from_slot(99, 1));
+  CHECK(inventory.remove_from_slot(2, 1));
+  CHECK(inventory.slot(2).empty());
 }
 
 TEST_CASE("inventory: slot swapping is bounded and value-semantic") {
