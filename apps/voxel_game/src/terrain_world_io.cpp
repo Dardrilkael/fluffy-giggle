@@ -46,18 +46,46 @@ constexpr std::uint32_t kSeaLevel = 12;
   return bytes;
 }
 
-[[nodiscard]] std::vector<std::uint8_t> flatten_rgba(
+void write_diagnostic_png(
+    const std::filesystem::path& path,
     const ws::rgba_terrain_core::RgbaImage& image) {
-  std::vector<std::uint8_t> bytes;
-  bytes.reserve(image.pixels.size() * 4u);
-  for (const auto& pixel : image.pixels) {
-    bytes.push_back(pixel.r);
-    bytes.push_back(pixel.g);
-    bytes.push_back(pixel.b);
-    bytes.push_back(pixel.a);
+  const auto bytes = flatten_rgba(image);
+
+  if (!files.diagnostics_directory.empty()) {
+    std::filesystem::create_directories(files.diagnostics_directory);
+    write_diagnostic_png(files.diagnostics_directory / "temperature.png",
+                         climate_diagnostics.temperature);
+    write_diagnostic_png(files.diagnostics_directory / "humidity.png",
+                         climate_diagnostics.humidity);
+    write_diagnostic_png(files.diagnostics_directory / "precipitation.png",
+                         climate_diagnostics.precipitation);
+    write_diagnostic_png(files.diagnostics_directory / "orographic-lift.png",
+                         climate_diagnostics.orographic_lift);
+    write_diagnostic_png(files.diagnostics_directory / "rain-shadow.png",
+                         climate_diagnostics.rain_shadow);
+    write_diagnostic_png(files.diagnostics_directory / "ocean-moisture.png",
+                         climate_diagnostics.ocean_moisture);
+    write_diagnostic_png(files.diagnostics_directory / "flow-accumulation.png",
+                         hydrology_diagnostics.flow_accumulation);
+    write_diagnostic_png(files.diagnostics_directory / "river-strength.png",
+                         hydrology_diagnostics.river_strength);
+    write_diagnostic_png(files.diagnostics_directory / "drainage-direction.png",
+                         hydrology_diagnostics.drainage_direction);
+    write_diagnostic_png(files.diagnostics_directory / "lake-depth.png",
+                         hydrology_diagnostics.lake_depth);
+    write_diagnostic_png(files.diagnostics_directory / "lake-basins.png",
+                         hydrology_diagnostics.lake_basins);
   }
-  return bytes;
+  const auto status = ws::image::write_rgba8_png_file(
+      path.string(), static_cast<std::uint32_t>(image.width),
+      static_cast<std::uint32_t>(image.height), bytes);
+  if (!status) {
+    throw std::runtime_error(
+        "could not write terrain diagnostic PNG '" + path.string() +
+        "': " + status.error().message);
+  }
 }
+
 
 void write_diagnostic_png(
     const std::filesystem::path& path,
