@@ -78,7 +78,12 @@ TEST_CASE("frustum: positive support vertex is conservative for AABBs") {
                         plane[2] * p[2] + plane[3] >= 0.0f;
         has_inside_sample |= inside;
       }
-  CHECK_FALSE(has_inside_sample && !aabb_visible(fr, box_min, box_max));
+  // Rewritten to avoid doctest "Expression Too Complex" static assertion:
+  // Original: CHECK_FALSE(has_inside_sample && !aabb_visible(fr, box_min, box_max))
+  // Equivalent: if has_inside_sample is true, aabb_visible must be true
+  if (has_inside_sample) {
+    CHECK(aabb_visible(fr, box_min, box_max));
+  }
 }
 
 TEST_CASE("frustum: degenerate camera and invalid aspect fail open without NaNs") {
