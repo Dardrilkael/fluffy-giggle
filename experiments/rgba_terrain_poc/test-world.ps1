@@ -1,13 +1,9 @@
 [CmdletBinding()]
 param(
-    [ValidateRange(1, 4096)]
-    [int]$Width = 256,
-
-    [ValidateRange(1, 4096)]
-    [int]$Depth = 256,
-
-    [ValidatePattern('^(0[xX][0-9a-fA-F]+|[0-9]+)$')]
-    [string]$Seed = "0xC0FFEE",
+    # Zero/null means "reuse the remembered value".
+    [int]$Width = 0,
+    [int]$Depth = 0,
+    [string]$Seed = $null,
 
     [ValidateSet("Debug", "Release", "RelWithDebInfo", "MinSizeRel")]
     [string]$Configuration = "Release",
@@ -16,10 +12,37 @@ param(
 
     [switch]$Clean,
     [switch]$SkipBuild,
-    [switch]$LaunchGame
+    [switch]$LaunchGame,
+    [switch]$ResetSettings
 )
 
 $ErrorActionPreference = "Stop"
+
+function Assert-ValidSeed {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    if ($Value -notmatch '^(0[xX][0-9a-fA-F]+|[0-9]+)$') {
+        throw "Seed must be a decimal integer or a 0x-prefixed hexadecimal integer."
+    }
+
+    try {
+        if ($Value -match '^0[xX]') {
+            $numericValue = [Convert]::ToUInt64($Value.Substring(2), 16)
+        } else {
+            $numericValue = [UInt64]::Parse(
+                $Value,
+                [Globalization.NumberStyles]::None,
+                [Globalization.CultureInfo]::InvariantCulture
+            )
+        }
+    } catch {
+        throw "Seed '$Value' is outside the supported unsigned 32-bit range."
+    }
+
+    if ($numericValue -gt [UInt32]::MaxValue) {
+        throw "Seed '$Value' is outside the supported unsigned 32-bit range (0..4294967295)."
+    }
+}
 
 function Invoke-NativeStep {
     param(
@@ -36,14 +59,91 @@ function Invoke-NativeStep {
 }
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+
+# Keep local test preferences in the ignored build directory, not in source.
+$SettingsPath = Join-Path $RepoRoot "build\terrain-world-test-settings.json"
+$SettingsDirectory = Split-Path -Parent $SettingsPath
+$Settings = [pscustomobject]@{
+    Width = 256
+    Depth = 256
+    Seed = "0xC0FFEE"
+}
+
+if (-not $ResetSettings -and (Test-Path -LiteralPath $SettingsPath -PathType Leaf)) {
+    try {
+        $SavedSettings = Get-Content -LiteralPath $SettingsPath -Raw |
+            ConvertFrom-Json -ErrorAction Stop
+
+        if ($null -eq $SavedSettings -or
+            $SavedSettings.schema_version -ne 1 -or
+            $null -eq $SavedSettings.width -or
+            $null -eq $SavedSettings.depth -or
+            [string]::IsNullOrWhiteSpace([string]$SavedSettings.seed)) {
+            throw "The settings file is missing required fields or uses an unsupported schema."
+        }
+
+        $SavedWidth = [int]$SavedSettings.width
+        $SavedDepth = [int]$SavedSettings.depth
+        $SavedSeed = [string]$SavedSettings.seed
+
+        if ($SavedWidth -lt 1 -or $SavedWidth -gt 4096 -or
+            $SavedDepth -lt 1 -or $SavedDepth -gt 4096) {
+            throw "Saved width and depth must each be between 1 and 4096."
+        }
+        Assert-ValidSeed $SavedSeed
+
+        $Settings.Width = $SavedWidth
+        $Settings.Depth = $SavedDepth
+        $Settings.Seed = $SavedSeed
+    } catch {
+        throw "Could not load '$SettingsPath': $($_.Exception.Message) Use -ResetSettings to restore defaults."
+    }
+}
+
+if ($PSBoundParameters.ContainsKey("Width")) {
+    if ($Width -lt 1 -or $Width -gt 4096) {
+        throw "Width must be between 1 and 4096."
+    }
+    $Settings.Width = $Width
+}
+if ($PSBoundParameters.ContainsKey("Depth")) {
+    if ($Depth -lt 1 -or $Depth -gt 4096) {
+        throw "Depth must be between 1 and 4096."
+    }
+    $Settings.Depth = $Depth
+}
+if ($PSBoundParameters.ContainsKey("Seed")) {
+    Assert-ValidSeed $Seed
+    $Settings.Seed = $Seed
+}
+
+$Width = $Settings.Width
+$Depth = $Settings.Depth
+$Seed = $Settings.Seed
+
 $PixelCount = [long]$Width * [long]$Depth
 $MaxPixels = [long](64 * 1024 * 1024 / 64)
 if ($PixelCount -gt $MaxPixels) {
     throw "The POC limit is $MaxPixels map pixels (64 million voxels at 64 blocks high)."
 }
 if ($LaunchGame -and ($Width -ne 256 -or $Depth -ne 256)) {
-    throw "The current voxel_game importer requires exactly 256x256. Generate 256x256 when using -LaunchGame."
+    throw "The current voxel_game importer requires exactly 256x256. Set -Width 256 -Depth 256, or use -ResetSettings to restore the default size."
 }
+
+# Persist only after all selected values have passed validation.
+New-Item -ItemType Directory -Force -Path $SettingsDirectory | Out-Null
+$SettingsJson = [ordered]@{
+    schema_version = 1
+    width = $Width
+    depth = $Depth
+    seed = $Seed
+} | ConvertTo-Json
+$TemporarySettingsPath = "$SettingsPath.tmp"
+Set-Content -LiteralPath $TemporarySettingsPath -Value $SettingsJson -Encoding UTF8
+Move-Item -LiteralPath $TemporarySettingsPath -Destination $SettingsPath -Force
+
+Write-Host ("World settings: {0}x{1}, seed {2}" -f $Width, $Depth, $Seed) -ForegroundColor Cyan
+Write-Host "Remembered in:  $SettingsPath" -ForegroundColor DarkGray
 
 if ([System.IO.Path]::IsPathRooted($OutputDir)) {
     $ResolvedOutputDir = $OutputDir
