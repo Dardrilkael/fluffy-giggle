@@ -37,7 +37,7 @@ TEST_CASE("ui layout: generic settings rows place, hit and map values") {
   using namespace ws::ui::layout::settings;
   // layout<Count>(frame_w, frame_h, panel_h, slider_w, slider_h, top, step)
   const auto sliders = layout<3>(
-      1280.0f, 720.0f, 520.0f, 300.0f, 62.0f, 12.0f, 112.0f);
+      1280.0f, 720.0f, 300.0f, 340.0f, 12.0f, 112.0f, 62.0f);
   CHECK(sliders[0].index == 0);
   CHECK(sliders[2].index == 2);
   CHECK(value_from_x(sliders[1].bounds, 0.0f, 1.0f,
