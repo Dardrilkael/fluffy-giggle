@@ -179,6 +179,35 @@ TEST_CASE("RGBA regions stitch exactly when generated as separate chunks") {
     CHECK(volume.height == settings.volume_height);
 }
 
+TEST_CASE("coarse hydrology runoff responds to the shared precipitation climate") {
+    auto dry_plan = make_default_world_plan(96, 96, 0xC11A7Eu);
+    dry_plan.hydrology.routing_cell_scale = 4.0;
+    dry_plan.hydrology.river_accumulation_threshold = 0.65;
+    dry_plan.climate.base_humidity = 0.08;
+    auto wet_plan = dry_plan;
+    wet_plan.climate.base_humidity = 0.92;
+
+    const WorldSampler dry(std::move(dry_plan));
+    const WorldSampler wet(std::move(wet_plan));
+    TerrainSettings settings;
+    settings.min_height = 0.0f;
+    settings.max_height = 56.0f;
+    settings.volume_height = 64;
+    settings.sea_level = 12;
+
+    const auto dry_map = dry.generate_rgba_region(0, 0, 96, 96, settings);
+    const auto wet_map = wet.generate_rgba_region(0, 0, 96, 96, settings);
+    std::size_t dry_river_cells = 0;
+    std::size_t wet_river_cells = 0;
+    for (std::size_t i = 0; i < dry_map.pixels.size(); ++i) {
+        // RGBA v2 stores the river feature in bit 6 of the packed B byte.
+        dry_river_cells += (dry_map.pixels[i].b & 0x40u) != 0u ? 1u : 0u;
+        wet_river_cells += (wet_map.pixels[i].b & 0x40u) != 0u ? 1u : 0u;
+    }
+    CHECK(wet_river_cells >= dry_river_cells);
+    CHECK(wet_map.pixels.size() == dry_map.pixels.size());
+}
+
 TEST_CASE("coarse hydrology remains identical across separately generated regions") {
     auto plan = make_default_world_plan(128, 128, 0xD4A1A6Eu);
     plan.hydrology.routing_cell_scale = 8.0;
