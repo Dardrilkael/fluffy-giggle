@@ -67,7 +67,7 @@ if(ws_want_bounce)
   add_subdirectory(bounce)
 endif()
 if(ws_want_voxel_game)
-  # voxel_game is the four-lib composition: a first-person voxel sandbox -
+  # voxel_game composes the UI, physics, audio, gameplay and terrain cores -
   # ws::ui's r3d mesh path draws the chunk meshes, ws::physics3d drives the
   # player against a sparse static grid of surface blocks, ws::audio
   # synthesizes the place/break one-shots.
