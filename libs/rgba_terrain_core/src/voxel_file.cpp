@@ -1,5 +1,6 @@
 #include <ws/rgba_terrain_core/voxel_file.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
