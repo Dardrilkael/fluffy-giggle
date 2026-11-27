@@ -34,6 +34,8 @@
 #include <cstdlib>
 #include <numbers>
 #include <optional>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #ifdef __ANDROID__
@@ -56,6 +58,10 @@
 #include <ws/ui/app.hpp>
 #include <ws/ui/renderer2d.hpp>
 #include <ws/ui/renderer3d.hpp>
+#include <ws/rgba_terrain_core/metadata.hpp>
+#include <ws/rgba_terrain_core/rgba_terrain.hpp>
+#include <ws/rgba_terrain_core/voxel_file.hpp>
+#include <ws/rgba_terrain_core/voxel_validation.hpp>
 
 #include "menu.hpp"
 #include "hotbar.hpp"
@@ -66,6 +72,7 @@
 #include "player.hpp"
 #include "renderer.hpp"
 #include "world.hpp"
+#include "terrain_import.hpp"
 #include "voxel_audio.hpp"
 
 namespace {
@@ -241,7 +248,62 @@ class VoxelApp final : public ws::ui::App {
 
     // --- the world --------------------------------------------------------
     const auto generation_start = std::chrono::steady_clock::now();
-    world_.generate(kSeed);
+    const char* terrain_png = std::getenv("WS_VOXEL_TERRAIN_PNG");
+    const char* terrain_meta = std::getenv("WS_VOXEL_TERRAIN_META");
+    const char* terrain_voxels = std::getenv("WS_VOXEL_TERRAIN_VOXELS");
+    const bool terrain_requested =
+        terrain_png != nullptr || terrain_meta != nullptr ||
+        terrain_voxels != nullptr;
+    if (!terrain_requested) {
+      world_.generate(kSeed);
+    } else {
+      if (terrain_png == nullptr || terrain_meta == nullptr ||
+          terrain_voxels == nullptr) {
+        ws::core::error(
+            "voxel: RGBA terrain import requires WS_VOXEL_TERRAIN_PNG, "
+            "WS_VOXEL_TERRAIN_META and WS_VOXEL_TERRAIN_VOXELS");
+        dead_ = true;
+        return;
+      }
+      try {
+        const auto metadata =
+            ws::rgba_terrain_core::load_metadata(terrain_meta);
+        const auto image =
+            ws::rgba_terrain_core::load_rgba_image(terrain_png);
+        const auto expected = ws::rgba_terrain_core::generate_voxel_volume(
+            image, metadata.layout, metadata.settings);
+        const auto stored =
+            ws::rgba_terrain_core::read_voxel_file(terrain_voxels);
+        if (!stored) {
+          throw std::runtime_error(stored.error().message);
+        }
+        const auto validation =
+            ws::rgba_terrain_core::compare_voxel_volumes(expected, *stored);
+        if (!validation.exact_match()) {
+          throw std::runtime_error(
+              "saved voxel volume does not exactly match PNG + metadata");
+        }
+        const auto imported = voxel::import_terrain_volume(world_, *stored);
+        if (!imported) {
+          throw std::runtime_error(imported.error().message);
+        }
+        ws::core::info(
+            "voxel: imported RGBA terrain {}x{}x{} ({} voxels, {} columns)",
+            stored->width, stored->depth, stored->height,
+            imported->voxel_count, imported->column_count);
+        ws::core::info(
+            "voxel: imported biomes plains={} forest={} desert={} mountain={}",
+            imported->biome_columns[static_cast<std::size_t>(voxel::Biome::plains)],
+            imported->biome_columns[static_cast<std::size_t>(voxel::Biome::forest)],
+            imported->biome_columns[static_cast<std::size_t>(voxel::Biome::desert)],
+            imported->biome_columns[static_cast<std::size_t>(voxel::Biome::mountain)]);
+      } catch (const std::exception& exception) {
+        ws::core::error("voxel: RGBA terrain import failed: {}",
+                        exception.what());
+        dead_ = true;
+        return;
+      }
+    }
     const float generation_ms = voxel::perf::ms_since(generation_start);
     const int sx = voxel::kWorldSizeX / 2;
     const int sz = voxel::kWorldSizeZ / 2;
