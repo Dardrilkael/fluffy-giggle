@@ -1,0 +1,68 @@
+# Testing the plan-based terrain generator
+
+The easiest end-to-end test is one PowerShell command from the repository root:
+
+~~~powershell
+.\experiments\rgba_terrain_poc\test-world.ps1
+~~~
+
+It builds the RGBA terrain POC, runs the image/terrain-core tests, generates
+a world using WorldSampler (not the legacy synthetic generator), inspects
+the RGBA data map, and verifies that the saved voxel file exactly matches a
+fresh PNG + metadata reconstruction.
+
+Outputs are written to build\terrain-world-test:
+
+- terrain.png — authoritative RGBA8 data map.
+- terrain.rgba-terrain — channel and voxel settings.
+- terrain.rgba-voxels — optional validation artifact.
+
+## Launch the generated world
+
+To also build the game, run its terrain-import test, and launch it with the
+generated map:
+
+~~~powershell
+.\experiments\rgba_terrain_poc\test-world.ps1 -LaunchGame
+~~~
+
+The game importer currently requires a 256x256 map. The script enforces that
+when LaunchGame is selected and restores the three terrain environment
+variables after the game exits.
+
+## Useful options
+
+~~~powershell
+# Change the world seed (same seed + settings = same data map)
+.\experiments\rgba_terrain_poc\test-world.ps1 -Seed 12345
+
+# Generate a different-size preview map
+.\experiments\rgba_terrain_poc\test-world.ps1 -Width 512 -Depth 512
+
+# Rebuild from a clean POC build directory
+.\experiments\rgba_terrain_poc\test-world.ps1 -Clean
+
+# Reuse the existing executable for faster iteration
+.\experiments\rgba_terrain_poc\test-world.ps1 -SkipBuild
+
+# Put output somewhere else
+.\experiments\rgba_terrain_poc\test-world.ps1 -OutputDir "terrain-tests\mountain-world"
+~~~
+
+The POC currently caps generated maps at 1,048,576 pixels because the test
+pipeline also builds a 64-block-high voxel volume. Large finite worlds should
+be generated region-by-region through the library API, not as one enormous
+voxel file.
+
+## What to check
+
+The inspect report includes elevation variation and coverage for water,
+forest, mountains, rivers and lakes. validate should report an exact match
+between the saved voxel file and reconstruction from the PNG and metadata.
+
+The PNG is a data map, not a colorized preview: do not edit it in an image
+editor that may quantize, blend, or color-correct its RGBA values.
+
+For the lower-level commands and RGBA channel layout, see README.md and
+HOW_TO_COMPILE.md.
+~~~
