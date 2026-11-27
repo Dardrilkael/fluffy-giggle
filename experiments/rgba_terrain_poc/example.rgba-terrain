@@ -2,7 +2,7 @@
 channel.r=height16_msb
 channel.g=height16_lsb
 channel.b=material_id
-channel.a=water_mask
+channel.a=biome_water_flags
 min_height=0
 max_height=256
 
