@@ -51,8 +51,11 @@ The production sampler runs deterministic stream-power hydraulic incision
 and thermal talus relaxation over the complete finite routing grid before
 final D8 flow accumulation. The resulting elevation offsets are interpolated
 into the RGBA map, so independently generated chunks share the same eroded
-surface. Set `WorldHydrologySettings::erosion_enabled = false` only for
-baseline comparisons or intentionally un-eroded test maps.
+surface. This whole-world pass is used when the routing grid fits the
+existing one-million-cell safety limit; oversized worlds retain the bounded
+local hydrology fallback without global erosion. Set
+`WorldHydrologySettings::erosion_enabled = false` only for baseline
+comparisons or intentionally un-eroded test maps.
 
 The voxel-only detail pass is deliberately separate from 2D world generation:
 caves, ores, and vegetation are gameplay details, not competing sources for
