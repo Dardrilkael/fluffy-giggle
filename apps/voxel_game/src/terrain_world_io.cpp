@@ -72,7 +72,8 @@ constexpr std::uint32_t kSeaLevel = 12;
 MapFiles generated_map_files() {
   const auto directory =
       std::filesystem::path("worlds") / "generated-world";
-  return {directory / "terrain.png", directory / "terrain.rgba-terrain"};
+  return {directory / "terrain.png", directory / "terrain.rgba-terrain",
+          directory / "terrain.channels.png"};
 }
 
 void generate_png_map(const MapFiles& files, std::uint32_t seed) {
@@ -121,6 +122,56 @@ void generate_png_map(const MapFiles& files, std::uint32_t seed) {
   sidecar.flush();
   if (!sidecar) {
     throw std::runtime_error("could not finish writing terrain metadata sidecar");
+  }
+}
+
+void generate_channel_preview_png(const MapFiles& files) {
+  if (files.png.empty() || files.channel_preview.empty()) {
+    throw std::invalid_argument("terrain preview paths must not be empty");
+  }
+
+  const auto loaded = ws::image::load_rgba8_file(files.png.string());
+  if (!loaded) {
+    throw std::runtime_error("could not decode saved terrain PNG for preview: " +
+                             loaded.error().message);
+  }
+  const auto& source = *loaded;
+  if (source.width == 0 || source.height == 0 ||
+      source.width > UINT32_MAX / 2u || source.height > UINT32_MAX / 2u) {
+    throw std::runtime_error("saved terrain PNG dimensions cannot be previewed");
+  }
+
+  // Each quadrant is one original byte channel, visualized as grayscale.
+  // Alpha is deliberately made opaque in this display-only sheet so biome
+  // IDs remain visible instead of being interpreted as transparency.
+  const std::uint32_t width = source.width * 2u;
+  const std::uint32_t height = source.height * 2u;
+  std::vector<std::uint8_t> preview(
+      static_cast<std::size_t>(width) * height * 4u, 255u);
+  for (std::uint32_t y = 0; y < source.height; ++y) {
+    for (std::uint32_t x = 0; x < source.width; ++x) {
+      const std::size_t source_offset =
+          (static_cast<std::size_t>(y) * source.width + x) * 4u;
+      for (std::uint32_t channel = 0; channel < 4u; ++channel) {
+        const std::uint32_t dst_x = x + (channel & 1u) * source.width;
+        const std::uint32_t dst_y = y + (channel >> 1u) * source.height;
+        const std::size_t dst_offset =
+            (static_cast<std::size_t>(dst_y) * width + dst_x) * 4u;
+        const std::uint8_t value = source.pixels[source_offset + channel];
+        preview[dst_offset + 0u] = value;
+        preview[dst_offset + 1u] = value;
+        preview[dst_offset + 2u] = value;
+        preview[dst_offset + 3u] = 255u;
+      }
+    }
+  }
+
+  std::filesystem::create_directories(files.channel_preview.parent_path());
+  const auto written = ws::image::write_rgba8_png_file(
+      files.channel_preview.string(), width, height, preview);
+  if (!written) {
+    throw std::runtime_error("could not write terrain channel preview: " +
+                             written.error().message);
   }
 }
 
