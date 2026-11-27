@@ -2332,6 +2332,7 @@ RgbaImage WorldSampler::generate_rgba_region(
                     plan_.hydrology.routing_cell_scale,
                     plan_.scales.province_scale * 0.24);
                 const double mountain_proximity =
+                    hydrology_grid.valid &&
                     std::isfinite(hydro.mountain_peak_distance_m)
                         ? std::exp(-hydro.mountain_peak_distance_m /
                                    mountain_system_radius)
@@ -2363,16 +2364,18 @@ RgbaImage WorldSampler::generate_rgba_region(
                             ? Rgba8{0, 0, channel, 255}
                             : Rgba8{0, 0, 0, 255});
                 };
+                const bool apply_landform_diagnostic =
+                    hydrology_grid.valid && !base_terrain_is_ocean;
                 const double hydraulic_delta =
-                    hydrology_grid.valid
+                    apply_landform_diagnostic
                         ? hydrology_grid.hydraulic_offsets[routing_index]
                         : 0.0;
                 const double thermal_delta =
-                    hydrology_grid.valid
+                    apply_landform_diagnostic
                         ? hydrology_grid.thermal_offsets[routing_index]
                         : 0.0;
                 const double fluvial_delta =
-                    hydrology_grid.valid
+                    apply_landform_diagnostic
                         ? hydrology_grid.fluvial_offsets[routing_index]
                         : 0.0;
                 const double erosion_delta = hydraulic_delta + thermal_delta;
