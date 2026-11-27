@@ -117,6 +117,14 @@ error, 3 = valid voxel file but reconstruction mismatch.
 
     rgba_terrain_poc inspect terrain.png terrain.rgba-terrain
 
+Create independent layer previews from an existing data map:
+
+    rgba_terrain_poc diagnose terrain.png terrain.rgba-terrain terrain_diagnostics
+
+This writes elevation, slope, biome, material, water and individual
+forest/mountain/river/lake masks. Climate previews are not reconstructible
+from the packed PNG and are emitted by `generate-world` during sampling.
+
 Inspection reports the encoded elevation range, mean and standard deviation,
 number of distinct heights, horizontal/vertical neighbor-step statistics,
 surface material and biome distributions, and coverage of water/forest/
