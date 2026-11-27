@@ -1,9 +1,9 @@
 #include "terrain_world_io.hpp"
+#include "terrain_world_profile.hpp"
 
 #include <ws/image/image.hpp>
 #include <ws/rgba_terrain_core/metadata.hpp>
 #include <ws/rgba_terrain_core/rgba_terrain.hpp>
-#include <ws/rgba_terrain_core/world_plan.hpp>
 #include <ws/rgba_terrain_core/world_sampler.hpp>
 
 #include <algorithm>
@@ -17,21 +17,6 @@
 
 namespace voxel::terrain_world_io {
 namespace {
-
-constexpr float kMinimumHeight = 0.0f;
-constexpr float kMaximumHeight = 56.0f;
-constexpr std::uint32_t kVolumeHeight = 64;
-constexpr std::uint32_t kSeaLevel = 12;
-
-[[nodiscard]] ws::rgba_terrain_core::TerrainSettings terrain_settings() {
-  ws::rgba_terrain_core::TerrainSettings settings;
-  settings.min_height = kMinimumHeight;
-  settings.max_height = kMaximumHeight;
-  settings.volume_height = kVolumeHeight;
-  settings.sea_level = kSeaLevel;
-  settings.subsurface_depth = 4;
-  return settings;
-}
 
 [[nodiscard]] std::vector<std::uint8_t> flatten_rgba(
     const ws::rgba_terrain_core::RgbaImage& image) {
@@ -99,22 +84,11 @@ void generate_png_map(const MapFiles& files, std::uint32_t seed) {
 
   const auto width = static_cast<std::size_t>(kWorldSizeX);
   const auto depth = static_cast<std::size_t>(kWorldSizeZ);
-  auto plan = ws::rgba_terrain_core::make_default_world_plan(
+  auto plan = terrain_world_profile::make_world_plan(
       static_cast<std::int64_t>(width), static_cast<std::int64_t>(depth), seed);
 
-  // Preserve the POC's multi-scale relationships while adapting its
-  // absolute sampling scales to the game's finite 256x256 map.
-  const double span = static_cast<double>(std::max(width, depth));
-  plan.scales.continent_scale = std::max(16.0, span * 0.52);
-  plan.scales.province_scale = std::max(8.0, span * 0.23);
-  plan.scales.ecosystem_scale = std::max(4.0, span * 0.12);
-  plan.scales.sub_biome_scale = std::max(2.0, span * 0.045);
-  plan.scales.habitat_scale = std::max(1.0, span * 0.015);
-  plan.hydrology.routing_cell_scale = std::max(1.0, span / 32.0);
-  plan.validate();
-
   const ws::rgba_terrain_core::WorldSampler sampler(std::move(plan));
-  const auto settings = terrain_settings();
+  const auto settings = terrain_world_profile::settings();
   ws::rgba_terrain_core::WorldClimateDiagnosticImages climate_diagnostics;
   ws::rgba_terrain_core::WorldHydrologyDiagnosticImages hydrology_diagnostics;
   const auto image = sampler.generate_rgba_region(
