@@ -23,3 +23,15 @@ Reusable CPU-side terrain data-map and voxel reconstruction library.
 ## Validation
 Tests cover decoding, metadata, deterministic maps, column expansion,
 voxel material layers, water fill and map analysis.
+
+
+## Voxel persistence
+- RGAVOX02 is a 20-byte header (magic + uint32 width/depth/height, little-endian)
+  followed by five explicit bytes per voxel: kind, material, biome, density,
+  feature flags.
+- Never serialize `sizeof(Voxel)`; its padding/layout is not file format.
+- Use `write_voxel_file` / `read_voxel_file` and return ws::core::Status/Result.
+- Reject unsupported magic, zero/overflow dimensions, wrong exact file size,
+  invalid voxel kind and truncated data.
+- Keep the reader/writer bounded in fixed-size blocks.
+- Use `compare_voxel_volumes` for exact field-level validation.
