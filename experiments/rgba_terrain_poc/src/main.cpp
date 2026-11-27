@@ -6,6 +6,7 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 namespace {
 void write_u32(std::ostream& out, std::uint32_t value) {
