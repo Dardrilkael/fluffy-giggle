@@ -1,8 +1,8 @@
 # apps/voxel_game - the first-person voxel sandbox on the ws stack:
-# ws::ui's r3d mesh path renders the chunk meshes, ws::physics3d drives
-# the player's collision against a sparse static grid of surface blocks,
-# and ws::audio synthesizes the place/break one-shots. One dependency
-# set: ui, physics, audio - the bounce app's composition.
+# ws::ui renders chunk meshes, ws::physics3d drives player collision,
+# ws::audio synthesizes place/break one-shots, and ws::rgba_terrain_core
+# supplies the generic RGBA voxel format. The app-owned terrain adapter
+# translates generic voxel IDs into this game's block and biome vocabulary.
 find_package(Threads REQUIRED)
 ws_add_app(voxel_game DEPENDS ws::ui ws::physics ws::audio ws::gameplay ws::rgba_terrain_core)
 target_sources(voxel_game PRIVATE src/terrain_import.cpp)
@@ -10,7 +10,8 @@ target_link_libraries(voxel_game PRIVATE Threads::Threads)
 
 # The headless logic suite: worldgen determinism, independent frustum
 # oracles, DDA raycasts, direct-grid movement, deterministic player replay,
-# and menu/settings geometry. LINK
+# and menu/settings geometry. A separate terrain-import suite checks the
+# RGBA-to-game adapter, preflight rejection and chunk-coordinate mapping. LINK
 # names the default-link override (ws::ui - the suite's TUs include
 # world.cpp, which includes ws/ui headers), and DEPENDS carries the rest
 # (ws_add_test's LINK is SINGLE-value).
