@@ -25,6 +25,7 @@ enum class ErrorCode : std::int32_t {
     invalid_dimensions = 3,
     unsupported_channels = 4,
     not_rgba = 5,
+    unsupported_bit_depth = 6;
 };
 
 // Tightly packed, interleaved, top-to-bottom pixels. channels is the decoded
@@ -52,8 +53,9 @@ struct LoadOptions {
 [[nodiscard]] ws::core::Result<Image> load_memory(
     std::span<const std::uint8_t> encoded, LoadOptions options = {});
 
-// Strict data-image entry points: reject images whose encoded source does not
-// have four channels. They never silently turn RGB/grayscale images into RGBA.
+// Strict data-image entry points: require 8-bit data with four encoded
+// source channels. They never silently turn RGB/grayscale images into RGBA
+// or truncate 16-bit-per-channel inputs.
 [[nodiscard]] ws::core::Result<Image> load_rgba8_file(std::string_view path);
 [[nodiscard]] ws::core::Result<Image> load_rgba8_memory(
     std::span<const std::uint8_t> encoded);
