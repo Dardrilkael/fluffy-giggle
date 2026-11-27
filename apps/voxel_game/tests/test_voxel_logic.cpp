@@ -1526,6 +1526,98 @@ TEST_CASE("meshing: exposed faces are classified once and greedily grouped by te
   CHECK(water[0].geometry.indices.size() == 6u);
 }
 
+TEST_CASE("meshing: cut-out blocks preserve opaque neighbor faces") {
+  voxel::World world;
+  world.generate(0xC070u);
+  constexpr int cx = 4, cz = 4;
+  constexpr int ox = cx * voxel::kChunkSizeX;
+  constexpr int oz = cz * voxel::kChunkSizeZ;
+  constexpr int x = ox + 7, y = 30, z = oz + 7;
+  for (int yy = 0; yy < voxel::kChunkSizeY; ++yy)
+    for (int zz = 0; zz < voxel::kChunkSizeZ; ++zz)
+      for (int xx = 0; xx < voxel::kChunkSizeX; ++xx)
+        (void)world.set_block(ox + xx, yy, oz + zz, voxel::Block::air);
+
+  const auto face_count = [&](int tile) {
+    std::size_t indices = 0;
+    for (const auto& mesh : world.build_chunk_meshes(cx, cz))
+      if (mesh.tile == tile) indices += mesh.geometry.indices.size();
+    return indices / 6u;
+  };
+
+  // Opaque stone keeps its interface face; the cut-out block's hidden
+  // face against stone is removed.
+  REQUIRE(world.set_block(x, y, z, voxel::Block::stone));
+  REQUIRE(world.set_block(x + 1, y, z, voxel::Block::glass));
+  CHECK(face_count(3) == 6u);
+  CHECK(face_count(11) == 5u);
+
+  // The same rule applies to foliage.
+  (void)world.set_block(x, y, z, voxel::Block::air);
+  (void)world.set_block(x + 1, y, z, voxel::Block::air);
+  REQUIRE(world.set_block(x, y, z, voxel::Block::stone));
+  REQUIRE(world.set_block(x + 1, y, z, voxel::Block::leaves));
+  CHECK(face_count(3) == 6u);
+  CHECK(face_count(12) == 5u);
+}
+
+TEST_CASE("worldgen: tree crowns extend across chunk boundaries") {
+  voxel::World world;
+  world.generate(0xC0FFEEu);
+
+  bool found_cross_chunk_crown = false;
+  const auto check_x_seams = [&] {
+    for (int seam = voxel::kChunkSizeX; seam < voxel::kWorldSizeX;
+         seam += voxel::kChunkSizeX) {
+      for (int z = 1; z < voxel::kWorldSizeZ - 1; ++z) {
+        for (int y = 2; y < voxel::kChunkSizeY - 3; ++y) {
+          const auto is_trunk_base = [&](int x) {
+            return world.block_at(x, y, z) == voxel::Block::wood &&
+                   world.block_at(x, y - 1, z) != voxel::Block::wood;
+          };
+          if (is_trunk_base(seam - 1) &&
+              (world.block_at(seam, y + 2, z) == voxel::Block::leaves ||
+               world.block_at(seam, y + 3, z) == voxel::Block::leaves)) {
+            return true;
+          }
+          if (is_trunk_base(seam) &&
+              (world.block_at(seam - 1, y + 2, z) == voxel::Block::leaves ||
+               world.block_at(seam - 1, y + 3, z) == voxel::Block::leaves)) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  };
+  const auto check_z_seams = [&] {
+    for (int seam = voxel::kChunkSizeZ; seam < voxel::kWorldSizeZ;
+         seam += voxel::kChunkSizeZ) {
+      for (int x = 1; x < voxel::kWorldSizeX - 1; ++x) {
+        for (int y = 2; y < voxel::kChunkSizeY - 3; ++y) {
+          const auto is_trunk_base = [&](int z) {
+            return world.block_at(x, y, z) == voxel::Block::wood &&
+                   world.block_at(x, y - 1, z) != voxel::Block::wood;
+          };
+          if (is_trunk_base(seam - 1) &&
+              (world.block_at(x, y + 2, seam) == voxel::Block::leaves ||
+               world.block_at(x, y + 3, seam) == voxel::Block::leaves)) {
+            return true;
+          }
+          if (is_trunk_base(seam) &&
+              (world.block_at(x, y + 2, seam - 1) == voxel::Block::leaves ||
+               world.block_at(x, y + 3, seam - 1) == voxel::Block::leaves)) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  };
+  found_cross_chunk_crown = check_x_seams() || check_z_seams();
+  CHECK(found_cross_chunk_crown);
+}
+
 TEST_CASE("voxel acoustics: six room boundaries become sorted early reflections") {
   voxel::World world;
   world.generate(0xAC0571C5u);
