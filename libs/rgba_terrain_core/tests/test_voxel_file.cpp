@@ -114,6 +114,14 @@ TEST_CASE("RGAVOX02 rejects bad magic, truncated payload and trailing bytes") {
     CHECK(trailing_result.error().code ==
           static_cast<std::int32_t>(VoxelFileError::trailing_data));
 
+    auto invalid_kind = valid;
+    invalid_kind[kVoxelFileHeaderBytes] = 0xffu;
+    write_bytes(path, invalid_kind);
+    const auto invalid_kind_result = read_voxel_file(path.string());
+    CHECK_FALSE(invalid_kind_result.has_value());
+    CHECK(invalid_kind_result.error().code ==
+          static_cast<std::int32_t>(VoxelFileError::invalid_voxel_kind));
+
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
 }
