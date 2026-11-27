@@ -38,7 +38,9 @@ struct WorldClimateSettings {
 struct WorldHydrologySettings {
     // The D8 routing grid is evaluated at this absolute world-unit spacing.
     // RGBA region generation builds it over the finite world, independently
-    // of requested chunk dimensions and generation order.
+    // of requested chunk dimensions and generation order. Hydraulic erosion
+    // and final hydrology share one priority-flood drainage graph; that graph
+    // is rebuilt after each erosion iteration as elevation changes.
     double routing_cell_scale = 1200.0;
 
     // Deterministic whole-world stream-power incision and thermal talus
