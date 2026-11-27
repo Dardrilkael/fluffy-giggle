@@ -404,6 +404,12 @@ struct HydrologyField {
     DrainageDirection direction = DrainageDirection::Sink;
     double accumulation = 0.0;
     double river_strength = 0.0;
+    std::uint32_t watershed_id = 0;
+    std::uint8_t stream_order = 0;
+    RiverClass river_class = RiverClass::None;
+    double river_distance_m = 0.0;
+    double river_influence = 0.0;
+    double mountain_peak_distance_m = 0.0;
     double lake_depth_m = 0.0;
     double lake_surface_elevation = 0.0;
     bool river = false;
@@ -1068,6 +1074,9 @@ struct HydrologyGrid {
     std::size_t height = 0;
     std::vector<HydrologyField> cells;
     std::vector<double> elevation_offsets;
+    std::vector<double> hydraulic_offsets;
+    std::vector<double> thermal_offsets;
+    std::vector<double> fluvial_offsets;
     // Pre-erosion elevation at grid cell centers. Used to determine ocean
     // classification at pixel resolution by bilinear interpolation and
     // comparison with sea_level_fraction, matching the baseline terrain's
@@ -1084,6 +1093,9 @@ struct HydrologyGrid {
     double maximum_accumulation = 0.0;
     double maximum_lake_depth_m = 0.0;
     double maximum_erosion_offset = 0.0;
+    double maximum_hydraulic_offset = 0.0;
+    double maximum_thermal_offset = 0.0;
+    double maximum_fluvial_offset = 0.0;
     bool valid = false;
 };
 
