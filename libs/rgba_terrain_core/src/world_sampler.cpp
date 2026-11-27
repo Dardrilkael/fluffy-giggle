@@ -587,8 +587,13 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     HydrologyGrid grid;
     const double scale = plan.hydrology.routing_cell_scale;
     const auto grid_dimension = [scale](std::int64_t extent) {
-        return static_cast<std::size_t>(
-            std::ceil(static_cast<double>(extent) / scale));
+        const double cells = std::ceil(static_cast<double>(extent) / scale);
+        if (!std::isfinite(cells) || cells < 1.0 ||
+            cells > static_cast<double>(
+                std::numeric_limits<std::size_t>::max())) {
+            return std::size_t{0};
+        }
+        return static_cast<std::size_t>(cells);
     };
     grid.width = grid_dimension(plan.width);
     grid.height = grid_dimension(plan.depth);
