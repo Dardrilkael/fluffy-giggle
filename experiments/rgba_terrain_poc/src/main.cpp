@@ -195,17 +195,12 @@ int generate_command(int argc, char** argv) {
         }
     }
 
-    const rgba_terrain::ChannelLayout layout{{
-        rgba_terrain::ChannelRole::Height16Msb,
-        rgba_terrain::ChannelRole::Height16Lsb,
-        rgba_terrain::ChannelRole::MaterialId,
-        rgba_terrain::ChannelRole::BiomeWaterFlags,
-    }};
-    // Decode the just-written PNG again: voxelization consumes the persisted
-    // data map, not a separate in-memory terrain representation.
+    // Read both artifacts back from disk. This exercises the metadata parser
+    // and ensures voxelization consumes the exact persisted PNG channel data.
+    const auto decoded_metadata = rgba_terrain::load_metadata(argv[6]);
     const auto decoded_image = rgba_terrain::load_rgba_image(argv[5]);
     const auto volume = rgba_terrain::generate_voxel_volume(
-        decoded_image, layout, settings);
+        decoded_image, decoded_metadata.layout, decoded_metadata.settings);
     write_voxel_file(volume, argv[7]);
     print_map_report(decoded_image, volume);
     std::cout << "Wrote data PNG: " << argv[5] << "\n"
