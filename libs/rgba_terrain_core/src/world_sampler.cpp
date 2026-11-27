@@ -278,6 +278,109 @@ TerrainField evaluate_terrain(const WorldPlan& plan, double x, double z,
 }
 
 
+
+struct ClimateField {
+    double temperature_c = 0.0;
+    double humidity = 0.0;
+    double precipitation = 0.0;
+    double orographic_lift = 0.0;
+    double rain_shadow = 0.0;
+    double ocean_moisture = 0.0;
+};
+
+ClimateField evaluate_climate(
+    const WorldPlan& plan, double x, double z,
+    const RegionalInfluences& regions, const TerrainField& terrain) {
+    const double province_scale = plan.scales.province_scale;
+    const double maximum_elevation_m = plan.climate.maximum_elevation_m;
+    const double region_blend = std::min(1.0, regions.weight_sum);
+    const double above_sea_fraction = clamp01(
+        (terrain.normalized_elevation - plan.sea_level_fraction) /
+        (1.0 - plan.sea_level_fraction));
+    const double elevation_m = above_sea_fraction * maximum_elevation_m;
+    const double latitude = plan.depth <= 1
+        ? 0.0
+        : std::abs((z / static_cast<double>(plan.depth - 1)) * 2.0 - 1.0);
+    const double regional_temperature = fbm(
+        x / (province_scale * 1.4), z / (province_scale * 1.4),
+        plan.seed ^ 0xB5297A4D68E31DA4ull, 3) *
+        plan.climate.regional_temperature_variation_c;
+    const double sea_level_temperature =
+        plan.climate.equator_temperature_c +
+        (plan.climate.pole_temperature_c -
+         plan.climate.equator_temperature_c) * std::pow(latitude, 0.90) +
+        regional_temperature +
+        (regions.weight_sum > 0.0
+             ? (regions.temperature_sum / regions.weight_sum) * region_blend
+             : 0.0);
+    ClimateField result;
+    result.temperature_c = sea_level_temperature -
+        (elevation_m / 1000.0) *
+            plan.climate.elevation_lapse_rate_c_per_km;
+
+    constexpr std::array<double, 3> fetch_fractions{0.22, 0.55, 1.15};
+    constexpr std::array<double, 3> ocean_weights{0.45, 0.35, 0.20};
+    const double wind_length = std::hypot(
+        plan.climate.prevailing_wind_x, plan.climate.prevailing_wind_z);
+    const double wind_x = plan.climate.prevailing_wind_x / wind_length;
+    const double wind_z = plan.climate.prevailing_wind_z / wind_length;
+    std::array<TerrainField, fetch_fractions.size()> upwind{};
+    double upwind_peak = terrain.normalized_elevation;
+    for (std::size_t i = 0; i < fetch_fractions.size(); ++i) {
+        const double distance = province_scale * fetch_fractions[i];
+        const double upwind_x = x - wind_x * distance;
+        const double upwind_z = z - wind_z * distance;
+        const auto upwind_regions = evaluate_regions(plan, upwind_x, upwind_z);
+        const double upwind_blend = std::min(1.0, upwind_regions.weight_sum);
+        const double upwind_bias = upwind_regions.weight_sum > 0.0
+            ? (upwind_regions.elevation_sum / upwind_regions.weight_sum) *
+                  upwind_blend : 0.0;
+        upwind[i] = evaluate_terrain(plan, upwind_x, upwind_z, upwind_bias);
+        upwind_peak = std::max(upwind_peak, upwind[i].normalized_elevation);
+        if (upwind[i].is_ocean(plan.sea_level_fraction)) {
+            result.ocean_moisture += ocean_weights[i];
+        }
+    }
+    const double windward_rise = std::max(
+        0.0, terrain.normalized_elevation - upwind.front().normalized_elevation);
+    result.orographic_lift = clamp01(
+        windward_rise * maximum_elevation_m / 1200.0 +
+        terrain.mountain_strength * 0.08);
+    result.rain_shadow = clamp01(
+        (upwind_peak - terrain.normalized_elevation) *
+        maximum_elevation_m / 1800.0);
+    const double coast = 1.0 - smoothstep(
+        0.015, 0.18,
+        std::abs(terrain.normalized_elevation - plan.sea_level_fraction));
+    const double moisture_noise = fbm(
+        x / (province_scale * 0.82), z / (province_scale * 0.82),
+        plan.seed ^ 0x68E31DA4C2B2AE35ull, 3) *
+        plan.climate.regional_humidity_variation;
+    const double evaporation_factor = std::clamp(
+        0.55 + (sea_level_temperature + 10.0) / 80.0, 0.20, 1.10);
+    const double ocean_vapor = plan.climate.coastal_humidity_boost *
+        (0.35 * coast + 0.65 * result.ocean_moisture) * evaporation_factor;
+    const double moisture_supply = clamp01(
+        plan.climate.base_humidity + moisture_noise + ocean_vapor -
+        result.rain_shadow * plan.climate.rain_shadow_strength +
+        (regions.weight_sum > 0.0
+             ? (regions.humidity_sum / regions.weight_sum) * region_blend
+             : 0.0));
+    const double lift_cooling_c = windward_rise * maximum_elevation_m *
+        plan.climate.elevation_lapse_rate_c_per_km / 1000.0;
+    const double condensation_efficiency = std::clamp(
+        0.70 + lift_cooling_c / 28.0, 0.70, 1.15);
+    result.precipitation = clamp01(
+        moisture_supply * (0.42 + 0.58 * result.orographic_lift) *
+        condensation_efficiency + terrain.mountain_strength * 0.025);
+    result.humidity = clamp01(moisture_supply - result.precipitation * 0.12);
+    if (terrain.is_ocean(plan.sea_level_fraction)) {
+        result.humidity = std::max(result.humidity, 0.68);
+        result.precipitation = clamp01(result.precipitation + 0.04);
+    }
+    return result;
+}
+
 struct HydrologyField {
     DrainageDirection direction = DrainageDirection::Sink;
     double accumulation = 0.0;
@@ -841,120 +944,16 @@ WorldSample WorldSampler::sample_impl(std::int64_t world_x,
     const TerrainField terrain = evaluate_terrain(
         plan_, x, z, regional_elevation_bias);
 
-    const double maximum_elevation_m = plan_.climate.maximum_elevation_m;
-    const double above_sea_fraction = clamp01(
+    const ClimateField climate = evaluate_climate(
+        plan_, x, z, regions, terrain);
+    const double elevation_m = clamp01(
         (terrain.normalized_elevation - plan_.sea_level_fraction) /
-        (1.0 - plan_.sea_level_fraction));
-    const double elevation_m = above_sea_fraction * maximum_elevation_m;
-    const double latitude = plan_.depth <= 1
-        ? 0.0
-        : std::abs((z / static_cast<double>(plan_.depth - 1)) * 2.0 - 1.0);
-
-    const double regional_temperature = fbm(
-        x / (province_scale * 1.4),
-        z / (province_scale * 1.4),
-        plan_.seed ^ 0xB5297A4D68E31DA4ull, 3) *
-        plan_.climate.regional_temperature_variation_c;
-    const double sea_level_temperature =
-        plan_.climate.equator_temperature_c +
-        (plan_.climate.pole_temperature_c -
-         plan_.climate.equator_temperature_c) * std::pow(latitude, 0.90) +
-        regional_temperature +
-        (regions.weight_sum > 0.0
-             ? (regions.temperature_sum / regions.weight_sum) * region_blend
-             : 0.0);
-    const double temperature = sea_level_temperature -
-        (elevation_m / 1000.0) *
-            plan_.climate.elevation_lapse_rate_c_per_km;
-
-    // Sample a short atmospheric fetch in the direction the wind arrives from.
-    // The profile is shared by every chunk because it uses absolute coordinates.
-    constexpr std::array<double, 3> fetch_fractions{0.22, 0.55, 1.15};
-    constexpr std::array<double, 3> ocean_weights{0.45, 0.35, 0.20};
-    const double wind_length = std::hypot(
-        plan_.climate.prevailing_wind_x,
-        plan_.climate.prevailing_wind_z);
-    const double wind_x = plan_.climate.prevailing_wind_x / wind_length;
-    const double wind_z = plan_.climate.prevailing_wind_z / wind_length;
-
-    std::array<TerrainField, fetch_fractions.size()> upwind{};
-    double ocean_moisture = 0.0;
-    double upwind_peak = terrain.normalized_elevation;
-    for (std::size_t i = 0; i < fetch_fractions.size(); ++i) {
-        const double distance = province_scale * fetch_fractions[i];
-        const double upwind_x = x - wind_x * distance;
-        const double upwind_z = z - wind_z * distance;
-        const RegionalInfluences upwind_regions =
-            evaluate_regions(plan_, upwind_x, upwind_z);
-        const double upwind_blend = std::min(1.0, upwind_regions.weight_sum);
-        const double upwind_elevation_bias =
-            upwind_regions.weight_sum > 0.0
-                ? (upwind_regions.elevation_sum /
-                   upwind_regions.weight_sum) * upwind_blend
-                : 0.0;
-        upwind[i] = evaluate_terrain(
-            plan_, upwind_x, upwind_z, upwind_elevation_bias);
-        upwind_peak = std::max(
-            upwind_peak, upwind[i].normalized_elevation);
-        if (upwind[i].is_ocean(plan_.sea_level_fraction)) {
-            ocean_moisture += ocean_weights[i];
-        }
-    }
-
-    const double windward_rise = std::max(
-        0.0, terrain.normalized_elevation -
-                 upwind.front().normalized_elevation);
-    const double orographic_lift = clamp01(
-        windward_rise * maximum_elevation_m / 1200.0 +
-        terrain.mountain_strength * 0.08);
-    const double rain_shadow = clamp01(
-        (upwind_peak - terrain.normalized_elevation) *
-        maximum_elevation_m / 1800.0);
-
-    const double coast = 1.0 - smoothstep(
-        0.015, 0.18,
-        std::abs(terrain.normalized_elevation - plan_.sea_level_fraction));
-    const double moisture_noise = fbm(
-        x / (province_scale * 0.82),
-        z / (province_scale * 0.82),
-        plan_.seed ^ 0x68E31DA4C2B2AE35ull, 3) *
-        plan_.climate.regional_humidity_variation;
-
-    // Warm sea-level air evaporates more water; the upwind ocean fetch carries
-    // that vapor inland. Moisture is an availability index, not relative RH.
-    const double evaporation_factor = std::clamp(
-        0.55 + (sea_level_temperature + 10.0) / 80.0, 0.20, 1.10);
-    const double ocean_vapor =
-        plan_.climate.coastal_humidity_boost *
-        (0.35 * coast + 0.65 * ocean_moisture) *
-        evaporation_factor;
-    double moisture_supply = clamp01(
-        plan_.climate.base_humidity + moisture_noise + ocean_vapor -
-        rain_shadow * plan_.climate.rain_shadow_strength +
-        (regions.weight_sum > 0.0
-             ? (regions.humidity_sum / regions.weight_sum) * region_blend
-             : 0.0));
-
-    // Orographic ascent cools the incoming air. The lapse rate therefore
-    // participates in both the local temperature and condensation potential.
-    const double lift_cooling_c =
-        windward_rise * maximum_elevation_m *
-        plan_.climate.elevation_lapse_rate_c_per_km / 1000.0;
-    const double condensation_efficiency = std::clamp(
-        0.70 + lift_cooling_c / 28.0, 0.70, 1.15);
-    double precipitation = clamp01(
-        moisture_supply * (0.42 + 0.58 * orographic_lift) *
-        condensation_efficiency +
-        terrain.mountain_strength * 0.025);
-
-    // Rainfall removes part of the moisture available to the air mass. The
-    // upwind peak term separately carries that drying into the lee of ranges.
-    double humidity = clamp01(moisture_supply - precipitation * 0.12);
+        (1.0 - plan_.sea_level_fraction)) *
+        plan_.climate.maximum_elevation_m;
+    const double temperature = climate.temperature_c;
+    const double humidity = climate.humidity;
+    const double precipitation = climate.precipitation;
     const bool is_ocean = terrain.is_ocean(plan_.sea_level_fraction);
-    if (is_ocean) {
-        humidity = std::max(humidity, 0.68);
-        precipitation = clamp01(precipitation + 0.04);
-    }
 
     WorldSample result;
     result.normalized_elevation = terrain.normalized_elevation;
@@ -963,9 +962,9 @@ WorldSample WorldSampler::sample_impl(std::int64_t world_x,
     result.temperature_c = temperature;
     result.humidity = humidity;
     result.precipitation = precipitation;
-    result.orographic_lift = orographic_lift;
-    result.rain_shadow = rain_shadow;
-    result.ocean_moisture = ocean_moisture;
+    result.orographic_lift = climate.orographic_lift;
+    result.rain_shadow = climate.rain_shadow;
+    result.ocean_moisture = climate.ocean_moisture;
     result.is_ocean = is_ocean;
     result.is_mountain = !is_ocean && terrain.mountain_strength > 0.34;
     const HydrologyField hydrology = include_local_hydrology
