@@ -25,6 +25,22 @@ temperature/moisture biome classification, and a meandering river corridor.
 The river is a deliberately simple synthetic mask and height cut, not a
 hydrological drainage simulation.
 
+## Load the map in the voxel game
+
+The game needs only the PNG and its metadata sidecar. It reconstructs the
+voxel volume directly at startup; the generated `.rgba-voxels` file is not a
+required runtime input.
+
+```powershell
+$env:WS_VOXEL_TERRAIN_PNG = "C:\terrain\terrain.png"
+$env:WS_VOXEL_TERRAIN_META = "C:\terrain\terrain.rgba-terrain"
+```
+
+Launch `voxel_game` with those variables set. To additionally validate a
+previously generated voxel artifact against the PNG, optionally set
+`WS_VOXEL_TERRAIN_VOXELS` to its path. The game still imports the volume
+reconstructed from the PNG, never the optional artifact.
+
 ## RGBA channel packing
 
 The generated PNG uses every channel:
