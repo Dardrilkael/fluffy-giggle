@@ -1,6 +1,10 @@
 #include "rgba_terrain/rgba_terrain.hpp"
+#include "rgba_terrain/metadata.hpp"
 
 #include <cassert>
+#include <filesystem>
+#include <fstream>
+#include <system_error>
 #include <stdexcept>
 
 using namespace rgba_terrain;
@@ -144,5 +148,29 @@ int main() {
         rejected = true;
     }
     assert(rejected);
+
+    const auto metadata_path = std::filesystem::temp_directory_path() /
+                               "rgba_terrain_packed_flags.rgba-terrain";
+    {
+        std::ofstream metadata_file(metadata_path);
+        metadata_file
+            << "channel.r=height16_msb\\n"
+            << "channel.g=height16_lsb\\n"
+            << "channel.b=material_id\\n"
+            << "channel.a=biome_water_flags\\n"
+            << "min_height=0\\n"
+            << "max_height=56\\n"
+            << "volume_height=64\\n"
+            << "sea_level=12\\n";
+        assert(static_cast<bool>(metadata_file));
+    }
+    const auto parsed_metadata = load_metadata(metadata_path.string());
+    std::error_code cleanup_error;
+    std::filesystem::remove(metadata_path, cleanup_error);
+    assert(parsed_metadata.layout.channels[3] == ChannelRole::BiomeWaterFlags);
+    assert(parsed_metadata.settings.max_height == 56.0f);
+    const auto parsed_columns = generate_columns(
+        generated, parsed_metadata.layout, parsed_metadata.settings);
+    assert(parsed_columns.columns.size() == generated.pixels.size());
     return 0;
 }
