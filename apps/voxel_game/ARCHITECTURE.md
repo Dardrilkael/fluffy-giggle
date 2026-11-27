@@ -49,7 +49,21 @@ library does not depend on the game. The fixed world is 256x256x64 (16x16
 chunks), matching the current 256x256 data-map resolution without resampling.
 
 The import preflights dimensions, voxel kinds, supported material IDs, biome
-IDs and column-consistent feature metadata before clearing the world. Generic
+IDs, full/empty density and column-consistent feature metadata before clearing the world. Generic
 material IDs are explicitly mapped in `terrain_import.cpp`; biome and feature
 flags are retained in per-column metadata, not discarded or misrepresented as
 block types. The renderer remains unchanged and consumes the same World API.
+
+
+To opt into a validated data-map world at startup, set all three variables
+before launching `voxel_game`:
+
+```powershell
+$env:WS_VOXEL_TERRAIN_PNG = "C:\terrain\terrain.png"
+$env:WS_VOXEL_TERRAIN_META = "C:\terrain\terrain.meta"
+$env:WS_VOXEL_TERRAIN_VOXELS = "C:\terrain\terrain.rgba-voxels"
+```
+
+The app reconstructs the expected volume from the PNG and metadata and checks
+the persisted voxel file byte-field-for-byte-field before import. With none of
+the variables set, the original seeded procedural world remains the default.
