@@ -2,6 +2,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 namespace rgba_terrain {
 enum class ChannelRole : std::uint8_t { Unused, Height8, Height16Msb, Height16Lsb, MaterialId, BiomeId, WaterMask, Density };
@@ -34,7 +35,5 @@ struct TerrainColumns {
   std::vector<VoxelColumn> columns;
 };
 [[nodiscard]] TerrainColumns generate_columns(const RgbaImage&, const ChannelLayout&, const TerrainSettings&);
-#ifdef RGBA_TERRAIN_HAS_PNG
-[[nodiscard]] RgbaImage load_png_rgba(const char* path);
-#endif
+[[nodiscard]] RgbaImage load_rgba_image(const std::string& path);
 } // namespace rgba_terrain
