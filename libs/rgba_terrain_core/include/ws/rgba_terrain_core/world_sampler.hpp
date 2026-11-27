@@ -114,7 +114,8 @@ public:
 private:
     [[nodiscard]] WorldSample sample_impl(
         std::int64_t world_x, std::int64_t world_z,
-        bool include_local_hydrology) const;
+        bool include_local_hydrology,
+        double terrain_elevation_offset = 0.0) const;
 
     WorldPlan plan_;
 };
