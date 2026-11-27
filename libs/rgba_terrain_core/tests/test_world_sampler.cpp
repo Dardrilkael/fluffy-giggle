@@ -245,6 +245,11 @@ TEST_CASE("coarse hydrology remains identical across separately generated region
 
 TEST_CASE("whole-world erosion changes terrain deterministically and preserves chunk stitching") {
     auto eroded_plan = make_default_world_plan(96, 96, 0xE20510u);
+    eroded_plan.scales.continent_scale = 160.0;
+    eroded_plan.scales.province_scale = 64.0;
+    eroded_plan.scales.ecosystem_scale = 40.0;
+    eroded_plan.scales.sub_biome_scale = 18.0;
+    eroded_plan.scales.habitat_scale = 6.0;
     eroded_plan.hydrology.routing_cell_scale = 4.0;
     eroded_plan.hydrology.river_accumulation_threshold = 1.8;
     eroded_plan.hydrology.erosion_enabled = true;
