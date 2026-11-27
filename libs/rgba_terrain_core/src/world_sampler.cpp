@@ -494,17 +494,19 @@ HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
             const std::int64_t source_z = gz + dz;
             const double world_x = (static_cast<double>(source_x) + 0.5) * scale;
             const double world_z = (static_cast<double>(source_z) + 0.5) * scale;
-            const double moisture_noise = fbm(
-                world_x / (province_scale * 0.82),
-                world_z / (province_scale * 0.82),
-                plan.seed ^ 0x68E31DA4C2B2AE35ull, 2);
-            const double estimated_runoff = clamp01(
-                plan.climate.base_humidity * 0.45 + 0.25 +
-                0.30 * (0.5 + 0.5 * moisture_noise));
-            accumulation[index] =
-                (column == watershed_radius && row == watershed_radius)
-                    ? 0.35 + precipitation * 0.65
-                    : estimated_runoff;
+            const auto source_regions = evaluate_regions(
+                plan, world_x, world_z);
+            const double source_blend =
+                std::min(1.0, source_regions.weight_sum);
+            const double source_bias = source_regions.weight_sum > 0.0
+                ? (source_regions.elevation_sum /
+                   source_regions.weight_sum) * source_blend : 0.0;
+            const TerrainField source_terrain = evaluate_terrain(
+                plan, world_x, world_z, source_bias);
+            const ClimateField source_climate = evaluate_climate(
+                plan, world_x, world_z, source_regions, source_terrain);
+            accumulation[index] = source_terrain.is_ocean(
+                plan.sea_level_fraction) ? 0.0 : source_climate.precipitation;
             order[index] = index;
         }
     }
@@ -721,7 +723,6 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     const auto index = [&grid](std::size_t x, std::size_t z) {
         return z * grid.width + x;
     };
-    const double province_scale = plan.scales.province_scale;
     for (std::size_t z = 0; z < grid.height; ++z) {
         for (std::size_t x = 0; x < grid.width; ++x) {
             const std::size_t i = index(x, z);
