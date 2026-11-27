@@ -168,10 +168,10 @@ void mesh_chunk_snapshot(const ChunkMeshSnapshot& snapshot, std::vector<CpuMeshD
 
 class World {
  public:
-  // Generates seeded biome terrain: temperature/moisture climate fields,
-  // plains/desert/forest/mountain surfaces, winding rivers, 3D cave
-  // pockets and clustered ore veins. All fields are deterministic per
-  // seed and continuous across chunk boundaries.
+  // Legacy in-memory generator retained for headless logic tests and the
+  // optional benchmark path. It is not the production world generator:
+  // normal gameplay uses terrain_world_io + WorldSampler's RGBA v2 map.
+  // Keep this compatibility path isolated from production terrain tuning.
   void generate(std::uint32_t seed);
 
   // Clears blocks and per-column metadata without regenerating terrain.
