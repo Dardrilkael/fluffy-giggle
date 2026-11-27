@@ -758,7 +758,12 @@ void erode_terrain(std::vector<double>& elevation,
         for (const std::size_t i : order) {
             if (ocean[i]) continue;
             const auto d = direction[i];
-            if (d == DrainageDirection::Sink) continue;
+            if (d == DrainageDirection::Sink) {
+                next_elevation[i] = std::clamp(
+                    elevation[i] + sediment[i],
+                    sea_level + 0.001, 0.995);
+                continue;
+            }
             const std::size_t di = static_cast<std::size_t>(d);
             const auto nx = static_cast<std::int64_t>(i % width) + drainage_dx[di];
             const auto nz = static_cast<std::int64_t>(i / width) + drainage_dz[di];
@@ -780,9 +785,7 @@ void erode_terrain(std::vector<double>& elevation,
             // Transport most sediment downstream; deposit more where the
             // channel flattens, forming small deterministic valley fans.
             const double deposition_fraction =
-                d == DrainageDirection::Sink
-                    ? 1.0
-                    : 0.12 + 0.58 * (1.0 - smoothstep(0.006, 0.035, slope));
+                0.12 + 0.58 * (1.0 - smoothstep(0.006, 0.035, slope));
             const double deposited = carried_sediment * deposition_fraction;
             next_elevation[i] = std::clamp(
                 elevation[i] - incision + deposited,
