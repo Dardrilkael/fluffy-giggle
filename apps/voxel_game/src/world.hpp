@@ -31,6 +31,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -60,6 +61,19 @@ enum class Block : std::uint8_t {
   coal_ore,
   iron_ore,
   count_,
+};
+
+enum class Biome : std::uint8_t {
+  plains = 0,
+  forest,
+  desert,
+  mountain,
+  count_,
+};
+
+struct ColumnMetadata {
+  Biome biome = Biome::plains;
+  std::uint8_t feature_flags = 0;
 };
 
 // The tint the type's chunk meshes are drawn with (r2d's 0xRRGGBBAA).
@@ -128,6 +142,14 @@ class World {
   // seed and continuous across chunk boundaries.
   void generate(std::uint32_t seed);
 
+  // Clears blocks and per-column metadata without regenerating terrain.
+  void reset_empty();
+
+  [[nodiscard]] bool set_column_metadata(
+      int x, int z, Biome biome, std::uint8_t feature_flags) noexcept;
+  [[nodiscard]] ColumnMetadata column_metadata(int x, int z) const noexcept;
+
+
   // The block at game-space integer coordinates; outside the region
   // reads air (the world floats in a void).
   [[nodiscard]] Block block_at(int x, int y, int z) const;
@@ -182,6 +204,9 @@ class World {
   // One contiguous chunk-major block volume; each chunk span contains
   // kBlocksPerChunk cells with x fastest and y slowest.
   BlockStorage blocks_;
+  std::array<ColumnMetadata,
+             static_cast<std::size_t>(kWorldSizeX) * kWorldSizeZ>
+      column_metadata_{};
 };
 
 }  // namespace voxel
