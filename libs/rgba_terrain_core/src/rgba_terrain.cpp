@@ -272,7 +272,8 @@ VoxelVolume generate_voxel_volume(const TerrainColumns& columns,
                     }
                 } else if ((y <= settings.sea_level &&
                             (column.water_mask >= settings.water_threshold ||
-                             (column.feature_flags & 0x80u) != 0)) ||
+                             ((column.feature_flags & 0x80u) != 0 &&
+                              (column.feature_flags & 0x60u) == 0))) ||
                            (y == column.height + 1 &&
                             (column.feature_flags & 0x60u) != 0)) {
                     // Inland rivers and lakes receive a surface-water voxel
