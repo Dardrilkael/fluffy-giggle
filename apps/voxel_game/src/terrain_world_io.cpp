@@ -120,6 +120,8 @@ void generate_png_map(const MapFiles& files, std::uint32_t seed) {
                          hydrology_diagnostics.lake_depth);
     write_diagnostic_png(files.diagnostics_directory / "lake-basins.png",
                          hydrology_diagnostics.lake_basins);
+    write_diagnostic_png(files.diagnostics_directory / "erosion-delta.png",
+                         hydrology_diagnostics.erosion_delta);
   }
 
   std::filesystem::create_directories(files.png.parent_path());
