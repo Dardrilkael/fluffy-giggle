@@ -775,18 +775,19 @@ void erode_terrain(std::vector<double>& elevation,
                 std::pow(slope * 100.0, 0.65);
             const double incision = std::min(
                 0.0018, 0.000055 * stream_power);
-            next_elevation[i] = std::max(
-                sea_level + 0.001, next_elevation[i] - incision);
-            sediment[i] += incision * 0.70;
+            const double carried_sediment = sediment[i] + incision * 0.70;
 
             // Transport most sediment downstream; deposit more where the
             // channel flattens, forming small deterministic valley fans.
             const double deposition_fraction =
-                0.12 + 0.58 * (1.0 - smoothstep(0.006, 0.035, slope));
-            const double deposited = sediment[i] * deposition_fraction;
-            next_elevation[downstream] = std::min(
-                0.995, next_elevation[downstream] + deposited);
-            sediment[downstream] += sediment[i] - deposited;
+                d == DrainageDirection::Sink
+                    ? 1.0
+                    : 0.12 + 0.58 * (1.0 - smoothstep(0.006, 0.035, slope));
+            const double deposited = carried_sediment * deposition_fraction;
+            next_elevation[i] = std::clamp(
+                elevation[i] - incision + deposited,
+                sea_level + 0.001, 0.995);
+            sediment[downstream] += carried_sediment - deposited;
         }
         elevation.swap(next_elevation);
 
@@ -811,11 +812,17 @@ void erode_terrain(std::vector<double>& elevation,
                         if (ocean[low]) continue;
                         const double difference =
                             elevation[high] - elevation[low];
-                        if (difference <= talus_threshold) continue;
-                        const double transfer =
-                            (difference - talus_threshold) * thermal_rate;
-                        delta[high] -= transfer;
-                        delta[low] += transfer;
+                        const double excess =
+                            std::abs(difference) - talus_threshold;
+                        if (excess <= 0.0) continue;
+                        const double transfer = excess * thermal_rate;
+                        if (difference > 0.0) {
+                            delta[high] -= transfer;
+                            delta[low] += transfer;
+                        } else {
+                            delta[high] += transfer;
+                            delta[low] -= transfer;
+                        }
                     }
                 }
             }
