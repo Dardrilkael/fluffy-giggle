@@ -1,33 +1,33 @@
 # Included by the workspace's experiments/CMakeLists.txt.
-if(NOT TARGET ws::image)
-  message(FATAL_ERROR "RGBA terrain POC requires ws::image. Configure the workspace with WS_BUILD_LIBS=image (or build all libraries).")
+if(NOT TARGET ws::image OR NOT TARGET ws::core)
+  message(FATAL_ERROR "RGBA terrain POC requires ws::image and ws::core. Configure with WS_BUILD_LIBS=image (or build all libraries).")
 endif()
 
 option(RGBA_TERRAIN_BUILD_TESTS "Build RGBA terrain tests" ${WS_BUILD_TESTS})
 
-add_library(rgba_terrain_core
+# Keep the experiment-local implementation out of the workspace library
+# registry until its API is mature enough to become a reusable ws:: library.
+# The executable and tests compile the same implementation sources directly;
+# the executable itself links only workspace-owned ws:: targets.
+set(RGBA_TERRAIN_SOURCES
   src/rgba_terrain.cpp
   src/metadata.cpp
   src/image_io.cpp
   src/synthetic_map.cpp
   src/map_analysis.cpp)
-target_include_directories(rgba_terrain_core PUBLIC include)
-target_compile_features(rgba_terrain_core PUBLIC cxx_std_20)
-target_link_libraries(rgba_terrain_core PUBLIC ws::image)
 
-ws_set_warnings(rgba_terrain_core)
-
-# Use the workspace app helper so this executable inherits the same C++,
-# warning, linking, and build-output conventions as apps under apps/.
-# The root CMakeLists places the resulting .exe in build/<preset>/bin.
 ws_add_app(rgba_terrain_poc
-  SOURCES src/main.cpp
-  DEPENDS rgba_terrain_core)
+  SOURCES src/main.cpp ${RGBA_TERRAIN_SOURCES}
+  DEPENDS ws::core ws::image)
+target_include_directories(rgba_terrain_poc PRIVATE include)
 
 if(RGBA_TERRAIN_BUILD_TESTS)
   enable_testing()
-  add_executable(rgba_terrain_tests tests/test_rgba_terrain.cpp)
-  target_link_libraries(rgba_terrain_tests PRIVATE rgba_terrain_core)
+  add_executable(rgba_terrain_tests
+    tests/test_rgba_terrain.cpp
+    ${RGBA_TERRAIN_SOURCES})
+  target_include_directories(rgba_terrain_tests PRIVATE include)
+  target_link_libraries(rgba_terrain_tests PRIVATE ws::image)
   ws_set_warnings(rgba_terrain_tests)
   # The current terrain test uses assert(); keep its checks active in Release.
   if(MSVC)
