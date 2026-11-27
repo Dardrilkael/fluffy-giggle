@@ -1,13 +1,17 @@
 #include <ws/rgba_terrain_core/world_plan.hpp>
 #include <ws/rgba_terrain_core/world_sampler.hpp>
+#include <ws/rgba_terrain_core/rgba_terrain.hpp>
+#include <ws/image/image.hpp>
 
 #include <doctest/doctest.h>
 
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 using namespace ws::rgba_terrain_core;
 
@@ -46,7 +50,8 @@ TEST_CASE("world sampler is deterministic at global coordinates") {
     CHECK(first.humidity <= 1.0);
     CHECK(first.precipitation >= 0.0);
     CHECK(first.precipitation <= 1.0);
-    CHECK(first.biome_id == 0 || (first.biome_id >= 8 && first.biome_id <= 27));
+    const bool biome_ok = (first.biome_id == 0) || (first.biome_id >= 8 && first.biome_id <= 27);
+    CHECK(biome_ok);
     CHECK(first.ecosystem_id != 0);
 }
 
@@ -604,8 +609,113 @@ TEST_CASE("world plan exposes detailed biome definitions and v2 material packing
     const auto columns = generate_columns(image, layout, settings);
     REQUIRE(columns.columns.size() == 32u * 32u);
     for (const auto& column : columns.columns) {
-        CHECK(column.biome_id == 0 || (column.biome_id >= 8 && column.biome_id <= 27));
+        const bool biome_ok = (column.biome_id == 0) || (column.biome_id >= 8 && column.biome_id <= 27);
+        CHECK(biome_ok);
         CHECK(column.material_id <= 15);
         CHECK((column.feature_flags & 0x87u) == 0);
     }
+}
+
+TEST_CASE("generate full 256x256 terrain with erosion and save output files") {
+    // This test generates the production 256x256 terrain map with erosion
+    // and saves all output files for manual inspection.
+    auto plan = make_default_world_plan(256, 256, 0xC0FFEEu);
+    plan.scales.continent_scale = 160.0;
+    plan.scales.province_scale = 64.0;
+    plan.scales.ecosystem_scale = 40.0;
+    plan.scales.sub_biome_scale = 18.0;
+    plan.scales.habitat_scale = 6.0;
+    plan.hydrology.routing_cell_scale = 4.0;
+    plan.hydrology.river_accumulation_threshold = 1.8;
+    plan.hydrology.erosion_enabled = true;
+    plan.validate();
+
+    const WorldSampler sampler(std::move(plan));
+    TerrainSettings settings;
+    settings.min_height = 0.0f;
+    settings.max_height = 56.0f;
+    settings.volume_height = 64;
+    settings.sea_level = 12;
+
+    WorldClimateDiagnosticImages climate_diagnostics;
+    WorldHydrologyDiagnosticImages hydrology_diagnostics;
+
+    const auto image = sampler.generate_rgba_region(
+        0, 0, 256, 256, settings,
+        &climate_diagnostics, &hydrology_diagnostics);
+
+    REQUIRE(image.width == 256);
+    REQUIRE(image.height == 256);
+    REQUIRE(image.pixels.size() == 256u * 256u);
+
+    // Create output directory
+    std::filesystem::create_directories("terrain_output");
+
+    // Helper to save an RgbaImage as PNG
+    auto save_image = [](const char* filename, const RgbaImage& img) {
+        std::vector<std::uint8_t> bytes;
+        bytes.reserve(img.pixels.size() * 4);
+        for (const auto& pixel : img.pixels) {
+            bytes.push_back(pixel.r);
+            bytes.push_back(pixel.g);
+            bytes.push_back(pixel.b);
+            bytes.push_back(pixel.a);
+        }
+        auto status = ws::image::write_rgba8_png_file(
+            filename, static_cast<std::uint32_t>(img.width),
+            static_cast<std::uint32_t>(img.height), bytes);
+        return status.has_value();
+    };
+
+    // Save main terrain PNG (RGBA v2 format)
+    CHECK(save_image("terrain_output/terrain.png", image));
+
+    // Save erosion diagnostic (key output to verify erosion is visible)
+    CHECK(save_image("terrain_output/erosion-delta.png", hydrology_diagnostics.erosion_delta));
+
+    // Save other diagnostic images
+    CHECK(save_image("terrain_output/river-strength.png", hydrology_diagnostics.river_strength));
+    CHECK(save_image("terrain_output/flow-accumulation.png", hydrology_diagnostics.flow_accumulation));
+    CHECK(save_image("terrain_output/lake-depth.png", hydrology_diagnostics.lake_depth));
+    CHECK(save_image("terrain_output/lake-basins.png", hydrology_diagnostics.lake_basins));
+    CHECK(save_image("terrain_output/drainage-direction.png", hydrology_diagnostics.drainage_direction));
+    CHECK(save_image("terrain_output/temperature.png", climate_diagnostics.temperature));
+    CHECK(save_image("terrain_output/humidity.png", climate_diagnostics.humidity));
+    CHECK(save_image("terrain_output/precipitation.png", climate_diagnostics.precipitation));
+    CHECK(save_image("terrain_output/orographic-lift.png", climate_diagnostics.orographic_lift));
+    CHECK(save_image("terrain_output/rain-shadow.png", climate_diagnostics.rain_shadow));
+    CHECK(save_image("terrain_output/ocean-moisture.png", climate_diagnostics.ocean_moisture));
+
+    // Verify erosion_delta has meaningful data (non-zero pixels)
+    std::size_t erosion_pixels = 0;
+    for (const auto& pixel : hydrology_diagnostics.erosion_delta.pixels) {
+        if (pixel.r > 0 || pixel.g > 0 || pixel.b > 0 || pixel.a > 0) {
+            erosion_pixels++;
+        }
+    }
+    MESSAGE("Erosion delta non-zero pixels: " << erosion_pixels);
+    CHECK(erosion_pixels > 0u);
+
+    // Verify terrain uses v2 format (biome in A channel, material/flags in B)
+    std::size_t v2_biome_pixels = 0;
+    std::size_t v2_material_pixels = 0;
+    for (const auto& pixel : image.pixels) {
+        if (pixel.a != 0) v2_biome_pixels++;  // biome ID in alpha
+        if ((pixel.b & 0xF0u) != 0 || (pixel.b & 0x0Fu) != 0) v2_material_pixels++;  // material/flags
+    }
+    MESSAGE("V2 biome pixels (A != 0): " << v2_biome_pixels);
+    MESSAGE("V2 material/flags pixels (B != 0): " << v2_material_pixels);
+    CHECK(v2_biome_pixels > 0u);
+    CHECK(v2_material_pixels > 0u);
+
+    // Verify the full normalized elevation range is preserved (from recent fix)
+    double min_elev = 1.0, max_elev = 0.0;
+    for (const auto& pixel : image.pixels) {
+        const double elev = (pixel.r * 256.0 + pixel.g) / 65535.0;
+        min_elev = std::min(min_elev, elev);
+        max_elev = std::max(max_elev, elev);
+    }
+    MESSAGE("Elevation range: [" << min_elev << ", " << max_elev << "]");
+    CHECK(min_elev < 0.1);  // Should reach near 0 (sea level)
+    CHECK(max_elev > 0.4);  // Should reach reasonable mountain height (default plan peaks ~0.45)
 }

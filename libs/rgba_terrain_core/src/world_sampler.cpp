@@ -127,13 +127,19 @@ double fbm(double x, double z, std::uint64_t seed, unsigned octaves) {
     return amplitude_sum > 0.0 ? sum / amplitude_sum : 0.0;
 }
 
-double clamp01(double value) {
-    return std::clamp(value, 0.0, 1.0);
+double smooth(double t) {
+    return t * t * (3.0 - 2.0 * t);
 }
 
 double smoothstep(double edge0, double edge1, double value) {
-    const double t = clamp01((value - edge0) / (edge1 - edge0));
-    return t * t * (3.0 - 2.0 * t);
+    if (edge1 <= edge0) {
+        return value < edge0 ? 0.0 : 1.0;
+    }
+    return smooth(std::clamp((value - edge0) / (edge1 - edge0), 0.0, 1.0));
+}
+
+double clamp01(double value) {
+    return std::clamp(value, 0.0, 1.0);
 }
 
 double climate_distance(double temperature, double humidity,
@@ -423,7 +429,7 @@ double terrain_at_grid(const WorldPlan& plan, std::int64_t gx,
 
 HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
                                   double normalized_elevation,
-                                  double precipitation) {
+                                  [[maybe_unused]] double precipitation) {
     HydrologyField result;
     const double scale = plan.hydrology.routing_cell_scale;
     const double grid_x = std::floor(x / scale);

@@ -13,6 +13,12 @@
 
 using namespace ws::rgba_terrain_core;
 
+TEST_CASE("minimal test - just check framework works") {
+    CHECK(1 == 1);
+    CHECK(true);
+    MESSAGE("Minimal test passed");
+}
+
 TEST_CASE("RGBA terrain image decoding and voxel reconstruction") {
     RgbaImage image{2, 1, {{255, 7, 3, 255}, {0, 9, 4, 0}}};
     ChannelLayout layout;
