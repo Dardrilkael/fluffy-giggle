@@ -88,5 +88,60 @@ int main() {
         rejected = true;
     }
     assert(rejected);
+
+    ChannelLayout packed_layout;
+    packed_layout.channels = {
+        ChannelRole::Height16Msb, ChannelRole::Height16Lsb,
+        ChannelRole::MaterialId, ChannelRole::BiomeWaterFlags,
+    };
+    TerrainSettings generated_settings;
+    generated_settings.max_height = 56.0f;
+    generated_settings.volume_height = 64;
+    generated_settings.sea_level = 12;
+    const auto generated = generate_synthetic_map(64, 64, 0xC0FFEEu, generated_settings);
+    const auto generated_again = generate_synthetic_map(64, 64, 0xC0FFEEu, generated_settings);
+    assert(generated.pixels.size() == 64u * 64u);
+    bool has_water = false, has_forest = false, has_mountain = false;
+    bool has_river = false, has_multiple_heights = false;
+    const auto first_height = (static_cast<unsigned>(generated.pixels[0].r) << 8u) | generated.pixels[0].g;
+    for (std::size_t i = 0; i < generated.pixels.size(); ++i) {
+        const auto& pixel = generated.pixels[i];
+        const auto& same = generated_again.pixels[i];
+        assert(pixel.r == same.r && pixel.g == same.g && pixel.b == same.b && pixel.a == same.a);
+        const auto h = (static_cast<unsigned>(pixel.r) << 8u) | pixel.g;
+        has_multiple_heights = has_multiple_heights || h != first_height;
+        has_water = has_water || (pixel.a & 0x80u) != 0;
+        has_forest = has_forest || (pixel.a & 0x08u) != 0;
+        has_mountain = has_mountain || (pixel.a & 0x10u) != 0;
+        has_river = has_river || (pixel.a & 0x20u) != 0;
+    }
+    assert(has_multiple_heights && has_water && has_river);
+    assert(has_forest || has_mountain);
+
+    const auto generated_columns = generate_columns(generated, packed_layout, generated_settings);
+    assert(generated_columns.columns.size() == generated.pixels.size());
+    const auto generated_volume = generate_voxel_volume(generated_columns, generated_settings);
+    assert(generated_volume.voxels.size() == 64u * 64u * 64u);
+    bool flags_survive = false;
+    for (const auto& column : generated_columns.columns) {
+        const auto& top = generated_volume.at(column.x, column.height, column.z);
+        assert(top.biome_id == column.biome_id);
+        assert(top.feature_flags == column.feature_flags);
+        flags_survive = flags_survive || top.feature_flags != 0;
+    }
+    assert(flags_survive);
+
+    rejected = false;
+    try {
+        ChannelLayout conflicting;
+        conflicting.channels = {
+            ChannelRole::Height16Msb, ChannelRole::Height16Lsb,
+            ChannelRole::BiomeId, ChannelRole::BiomeWaterFlags,
+        };
+        (void)generate_columns(generated, conflicting, generated_settings);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    assert(rejected);
     return 0;
 }
