@@ -4,10 +4,10 @@ The following exploratory milestones are intentionally skipped for now so
 work can proceed directly to end-to-end reconstruction correctness. They
 remain recorded for later reconsideration.
 
-## 1. Terrain continuity — SKIPPED
-- [ ] Replace abrupt river height clamping with a distance-based channel and gradual banks.
-- [ ] Ensure channel carving does not introduce unintended cliffs.
-- [ ] Keep river masks, water presence and terrain elevation distinct.
+## 1. Terrain continuity — IN PROGRESS
+- [x] Replace abrupt river height clamping with a distance-based channel and gradual banks.
+- [ ] Add quantitative checks for bank gradients and unintended cliffs.
+- [x] Keep river masks, water presence and terrain elevation distinct.
 
 ## 2. Expanded spatial inspector — SKIPPED
 - [ ] Add slope percentiles and elevation-difference histograms.
