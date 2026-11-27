@@ -14,10 +14,26 @@ Then run:
 
     rgba_terrain_poc generate-world 256 256 0xC0FFEE terrain.png terrain.rgba-terrain terrain.rgba-voxels
 
-The command produces three files:
-- `terrain.png`: a machine-authored RGBA8 data map, not a colorized preview
+The command produces three primary files:
+- `terrain.png`: the authoritative machine-authored RGBA8 data map, not a colorized preview
 - `terrain.rgba-terrain`: explicit channel and voxel-generation metadata
 - `terrain.rgba-voxels`: the resulting dense 3D voxel volume
+
+It also writes independent visualization PNGs (none are inputs to the terrain
+pipeline):
+
+- `terrain_diagnostics/elevation.png`, `slope.png`, `biome.png`,
+  `material.png`, and `water.png`
+- `forest.png`, `mountain.png`, `river.png`, and `lake.png` feature masks
+- Adjacent to the source PNG: `terrain_temperature.png`,
+  `terrain_humidity.png`, `terrain_precipitation.png`,
+  `terrain_orographic_lift.png`, `terrain_rain_shadow.png`, and
+  `terrain_ocean_moisture.png`
+
+Scalar previews use grayscale. Elevation is normalized to the actual
+elevation range in the source image; slope is scaled over 0..60 degrees;
+climate layers are normalized to their modeled ranges. These are for visual
+inspection only and must never be imported as terrain data.
 
 The `generate-world` command uses the plan-based WorldSampler: multi-scale
 continents, regional terrain influences, coupled temperature/moisture,
