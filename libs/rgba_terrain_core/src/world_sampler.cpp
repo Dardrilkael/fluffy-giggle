@@ -288,7 +288,15 @@ TerrainField evaluate_terrain(const WorldPlan& plan, double x, double z,
     return {elevation, continentalness, mountain_strength};
 }
 
-
+bool terrain_is_ocean_at(const WorldPlan& plan, double x, double z) {
+    const RegionalInfluences regions = evaluate_regions(plan, x, z);
+    const double blend = std::min(1.0, regions.weight_sum);
+    const double elevation_bias = regions.weight_sum > 0.0
+        ? (regions.elevation_sum / regions.weight_sum) * blend
+        : 0.0;
+    return evaluate_terrain(plan, x, z, elevation_bias)
+        .is_ocean(plan.sea_level_fraction);
+}
 
 struct ClimateField {
     double temperature_c = 0.0;
@@ -1409,7 +1417,14 @@ RgbaImage WorldSampler::generate_rgba_region(
         for (std::size_t x = 0; x < width; ++x) {
             const auto world_x = origin_x + static_cast<std::int64_t>(x);
             const auto world_z = origin_z + static_cast<std::int64_t>(z);
-            const double erosion_offset = hydrology_grid.valid
+            // Erosion is simulated only on land routing cells. Do not let
+            // bilinear interpolation blend neighboring land offsets into
+            // analytical ocean pixels at the coastline.
+            const bool base_terrain_is_ocean = terrain_is_ocean_at(
+                plan_, static_cast<double>(world_x),
+                static_cast<double>(world_z));
+            const double erosion_offset =
+                hydrology_grid.valid && !base_terrain_is_ocean
                 ? sample_elevation_offset(
                     hydrology_grid.elevation_offsets,
                     hydrology_grid.width, hydrology_grid.height,
