@@ -7,7 +7,7 @@
 # archive folded into ws_ui) links them PUBLIC - see the link line below.
 # The registry in cmake/WsHelpers.cmake must match this list verbatim;
 # ws_add_library fails configure on a mismatch.
-ws_add_library(ui DEPENDS ws::core ws::math ws::input ws::gfx ws::jobs ws::settings ws::app ws::platform ws::plotmath)
+ws_add_library(ui DEPENDS ws::core ws::math ws::input ws::gfx ws::jobs ws::settings ws::app ws::platform ws::plotmath ws::image)
 
 # The gui subset as its own archive - the stage-2 acceptance cut. It links
 # ws::core + ws::input (the frame snapshot it reads; itself core-only,
@@ -62,14 +62,14 @@ endif()
 # library (apps draw through <ws/ui/widgets.hpp>). Static archives still
 # forward these targets to the final link, so symbols resolve.
 if(ANDROID)
-  target_link_libraries(ws_ui PRIVATE imgui implot volk stb android log)
+  target_link_libraries(ws_ui PRIVATE imgui implot volk stb ws::image android log)
   # native_app_glue headers for src/platform/window_android.cpp (its .c
   # lands in the
   # app module in A2; the header-only usage here is enough for the seam).
   target_include_directories(ws_ui PRIVATE
     "${ANDROID_NDK}/sources/android/native_app_glue")
 else()
-  target_link_libraries(ws_ui PRIVATE imgui implot glfw volk stb)
+  target_link_libraries(ws_ui PRIVATE imgui implot glfw volk stb ws::image)
   if(WIN32)
     # window_glfw.cpp's OS dark-mode probe (App::prefers_dark) reads the
     # Personalize key through RegGetValueA, which advapi32 owns. A system
