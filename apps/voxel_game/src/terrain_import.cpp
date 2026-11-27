@@ -85,6 +85,18 @@ ws::core::Result<TerrainImportReport> import_terrain_volume(
       for (std::size_t x = 0; x < volume.width; ++x) {
         const Voxel& voxel = volume.at(x, y, z);
         Block block = Block::air;
+        const bool density_supported =
+            (voxel.kind == VoxelKind::Air && voxel.density == 0) ||
+            (voxel.kind == VoxelKind::Solid && voxel.density == 255) ||
+            (voxel.kind == VoxelKind::Water && voxel.density == 255);
+        if (!density_supported) {
+          return import_error(
+              TerrainImportError::unsupported_density,
+              "game blocks are fully occupied; unsupported density " +
+                  std::to_string(voxel.density) + " at x=" +
+                  std::to_string(x) + " y=" + std::to_string(y) +
+                  " z=" + std::to_string(z));
+        }
         if (!map_voxel(voxel, block)) {
           const auto kind = static_cast<unsigned>(voxel.kind);
           if (voxel.kind == VoxelKind::Solid) {
