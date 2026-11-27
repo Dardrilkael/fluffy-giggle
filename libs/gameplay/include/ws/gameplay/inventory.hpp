@@ -107,6 +107,18 @@ class Inventory {
     return true;
   }
 
+  // Removes only from the requested slot. Failure leaves every slot intact.
+  [[nodiscard]] constexpr bool remove_from_slot(
+      std::size_t index, std::uint16_t amount) noexcept {
+    if (index >= SlotCount) return false;
+    auto& stack = slots_[index];
+    if (stack.count < amount) return false;
+    if (amount == 0) return true;
+    stack.count = static_cast<std::uint16_t>(stack.count - amount);
+    if (stack.count == 0) stack = {};
+    return true;
+  }
+
  private:
   std::array<stack_type, SlotCount> slots_{};
 };
