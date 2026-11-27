@@ -98,7 +98,7 @@ void RgbaImage::validate() const {
 }
 
 void ChannelLayout::validate() const {
-    std::array<unsigned, 8> counts{};
+    std::array<unsigned, 9> counts{};
     for (const ChannelRole role : channels) {
         const auto index = static_cast<std::size_t>(role);
         if (index >= counts.size()) {
@@ -166,6 +166,11 @@ TerrainColumns generate_columns(const RgbaImage& image,
     const int biome = find_role(layout, ChannelRole::BiomeId);
     const int water = find_role(layout, ChannelRole::WaterMask);
     const int density = find_role(layout, ChannelRole::Density);
+    const int packed_flags = find_role(layout, ChannelRole::BiomeWaterFlags);
+    if (packed_flags >= 0 && (biome >= 0 || water >= 0)) {
+        throw std::invalid_argument(
+            "biome_water_flags cannot be combined with separate biome_id or water_mask channels");
+    }
 
     TerrainColumns result{image.width, image.height, {}};
     result.columns.reserve(image.pixels.size());
@@ -194,11 +199,15 @@ TerrainColumns generate_columns(const RgbaImage& image,
                 height,
                 material >= 0 ? value_at(pixel, material)
                               : settings.default_material,
-                biome >= 0 ? value_at(pixel, biome)
-                           : settings.default_biome,
+                packed_flags >= 0
+                    ? static_cast<std::uint8_t>(value_at(pixel, packed_flags) & 0x07u)
+                    : (biome >= 0 ? value_at(pixel, biome) : settings.default_biome),
                 water >= 0 ? value_at(pixel, water) : std::uint8_t{0},
                 density >= 0 ? value_at(pixel, density)
                              : settings.solid_density,
+                packed_flags >= 0
+                    ? static_cast<std::uint8_t>(value_at(pixel, packed_flags) & 0xF8u)
+                    : std::uint8_t{0},
             });
         }
     }
@@ -249,6 +258,7 @@ VoxelVolume generate_voxel_volume(const TerrainColumns& columns,
                     columns.columns[z * volume.width + x];
                 Voxel voxel{};
                 voxel.biome_id = column.biome_id;
+                voxel.feature_flags = column.feature_flags;
 
                 if (y <= column.height) {
                     voxel.kind = VoxelKind::Solid;
@@ -261,7 +271,8 @@ VoxelVolume generate_voxel_volume(const TerrainColumns& columns,
                         voxel.material_id = settings.deep_material;
                     }
                 } else if (y <= settings.sea_level &&
-                           column.water_mask >= settings.water_threshold) {
+                           (column.water_mask >= settings.water_threshold ||
+                            (column.feature_flags & 0x80u) != 0)) {
                     voxel.kind = VoxelKind::Water;
                     voxel.material_id = settings.water_material;
                     voxel.density = 255;
