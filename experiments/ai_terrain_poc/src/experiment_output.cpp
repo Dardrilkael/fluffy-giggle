@@ -5,8 +5,9 @@
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <sstream>
 #include <stdexcept>
-#include <vector>
+#include <utility>
 
 namespace ai_terrain {
 namespace {
@@ -18,20 +19,18 @@ void write_u32_le(std::ostream& out, std::uint32_t value) {
 
 void write_heightmap_binary(const std::filesystem::path& path,
                             const Heightmap& map) {
+  if (map.width > UINT32_MAX || map.depth > UINT32_MAX)
+    throw std::runtime_error("heightmap dimensions exceed file format limits");
   std::ofstream out(path, std::ios::binary);
   if (!out) throw std::runtime_error("cannot create " + path.string());
   out.write("AITHMAP1", 8);
   write_u32_le(out, static_cast<std::uint32_t>(map.width));
   write_u32_le(out, static_cast<std::uint32_t>(map.depth));
-  for (float value : map.heights) {
-    const auto bits = std::bit_cast<std::uint32_t>(value);
-    write_u32_le(out, bits);
-  }
+  for (float value : map.heights)
+    write_u32_le(out, std::bit_cast<std::uint32_t>(value));
   if (!out) throw std::runtime_error("failed writing " + path.string());
 }
 
-// Dependency-free 24-bit BMP preview. The binary heightmap remains the
-// authoritative lossless source; this image is only for quick inspection.
 void write_heightmap_bmp(const std::filesystem::path& path,
                          const Heightmap& map) {
   const std::uint32_t row_bytes = static_cast<std::uint32_t>(map.width * 3);
@@ -64,8 +63,7 @@ void write_heightmap_bmp(const std::filesystem::path& path,
       out.put(static_cast<char>(gray));
       out.put(static_cast<char>(gray));
     }
-    const auto pad = stride - row_bytes;
-    out.write(padding.data(), static_cast<std::streamsize>(pad));
+    out.write(padding.data(), static_cast<std::streamsize>(stride - row_bytes));
   }
   if (!out) throw std::runtime_error("failed writing " + path.string());
 }
@@ -127,8 +125,17 @@ void ExperimentOutput::write_manifest(std::uint64_t seed,
            << "  \"region_count\": " << region_count << ",\n"
            << "  \"heightmap_format\": \"AITHMAP1: uint32 width, uint32 depth, row-major float32 little-endian\",\n"
            << "  \"preview_format\": \"24-bit grayscale BMP\",\n"
-           << "  \"samples\": [\"flat\", \"rolling\", \"mountainous\"]\n"
-           << "}";
+           << "  \"samples\": [\"flat\", \"rolling\", \"mountainous\"]";
+  if (region_count > 0) {
+    manifest << ",\n  \"regions\": [";
+    for (std::size_t i = 0; i < region_count; ++i) {
+      if (i) manifest << ", ";
+      manifest << "\"regions/region_" << std::setw(4) << std::setfill('0')
+               << i << "\"";
+    }
+    manifest << "]";
+  }
+  manifest << "\n}";
   write_json(root_ / "manifest.json", manifest.str());
 }
 
