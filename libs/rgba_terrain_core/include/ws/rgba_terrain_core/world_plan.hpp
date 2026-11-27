@@ -50,9 +50,14 @@ struct WorldHydrologySettings {
     // Disable only for comparisons, fixtures or deliberately un-eroded maps.
     bool erosion_enabled = true;
 
-    // Accumulation is precipitation-weighted contributing routing cells.
-    // Its magnitude therefore depends on routing_cell_scale and climate.
+    // Accumulation sums precipitation-derived runoff (rain plus
+    // temperature-dependent snowmelt) across contributing routing cells.
+    // Its magnitude therefore depends on routing_cell_scale and climate,
+    // rather than basin area alone.
     double river_accumulation_threshold = 2.6;
+
+    // Maximum normalized channel incision at the active river centerline.
+    // Actual depth and width are further scaled by Strahler order and runoff.
     double river_channel_depth_fraction = 0.018;
 
     double lake_minimum_depth_m = 40.0;
