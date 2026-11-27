@@ -1,6 +1,8 @@
 #include <ws/rgba_terrain_core/rgba_terrain.hpp>
 #include <ws/rgba_terrain_core/metadata.hpp>
 #include <ws/rgba_terrain_core/map_analysis.hpp>
+#include <ws/rgba_terrain_core/voxel_file.hpp>
+#include <ws/rgba_terrain_core/voxel_validation.hpp>
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -137,6 +139,21 @@ TEST_CASE("RGBA terrain image decoding and voxel reconstruction") {
     }
     CHECK(flags_survive);
     CHECK(has_water_voxel);
+
+    // Exercise the persisted representation using a nontrivial generated map.
+    const auto generated_voxel_path = std::filesystem::temp_directory_path() /
+                                      "rgba_terrain_generated_roundtrip.rgba-voxels";
+    const auto generated_write = write_voxel_file(
+        generated_voxel_path.string(), generated_volume);
+    REQUIRE(generated_write.has_value());
+    const auto generated_read = read_voxel_file(generated_voxel_path.string());
+    REQUIRE(generated_read.has_value());
+    const auto generated_report = compare_voxel_volumes(
+        generated_volume, *generated_read);
+    CHECK(generated_report.exact_match());
+    CHECK(generated_report.compared_voxels == generated_volume.voxels.size());
+    std::error_code generated_cleanup_error;
+    std::filesystem::remove(generated_voxel_path, generated_cleanup_error);
 
     rejected = false;
     try {
