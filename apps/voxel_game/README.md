@@ -47,9 +47,12 @@ the original material and biome/flag fields. New production code should
 construct a `WorldSampler` and use `generate_rgba_region()` with the v2
 `MaterialFeatureFlags` / `BiomeId` layout.
 
-The voxel-only pass is deliberately separate from 2D world generation:
-caves, ores, and vegetation are 3D/gameplay details, not competing sources
-for the terrain surface, climate, or river network.
+The voxel-only detail pass is deliberately separate from 2D world generation:
+caves, ores, and vegetation are gameplay details, not competing sources for
+the production terrain surface, climate, or river network. The older
+`World::generate()` implementation remains only as a standalone compatibility
+path for headless logic tests and the opt-in benchmark; it is not the normal
+gameplay world-generation path.
 
 ## Generating and loading worlds
 
