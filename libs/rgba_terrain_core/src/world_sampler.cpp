@@ -902,7 +902,7 @@ void apply_fluvial_terrain_shaping(
     std::vector<std::size_t> river_seeds;
     river_seeds.reserve(count / 8u);
     for (std::size_t i = 0; i < count; ++i) {
-        if (cells[i].stream_order > 0u && !ocean[i]) {
+        if (cells[i].stream_order > 0u && !cells[i].lake && !ocean[i]) {
             river_seeds.push_back(i);
         }
         cells[i].mountain_peak_distance_m =
@@ -924,7 +924,7 @@ void apply_fluvial_terrain_shaping(
     const double mountain_system_radius =
         std::max(scale, plan.scales.province_scale * 0.24);
     for (std::size_t i = 0; i < count; ++i) {
-        if (cells[i].stream_order == 0u || ocean[i]) continue;
+        if (cells[i].stream_order == 0u || cells[i].lake || ocean[i]) continue;
         const std::size_t downstream = drainage_downstream_index(
             i, cells[i].direction, width, height);
         if (downstream == count || ocean[downstream]) continue;
@@ -1645,7 +1645,8 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
                 original_routing.filled_elevation[i];
             cell.river = !cell.lake && cell.stream_order > 0u;
             if (cell.lake) {
-                cell.stream_order = 0u;
+                // Preserve Strahler order through the drainage route; the
+                // lake suppresses the visible river segment, not runoff.
                 cell.river_class = RiverClass::None;
                 cell.river = false;
             }
@@ -1735,7 +1736,8 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
             grid.maximum_lake_depth_m, cell.lake_depth_m);
         cell.river = !cell.lake && cell.stream_order > 0u;
         if (cell.lake) {
-            cell.stream_order = 0u;
+            // Preserve Strahler order through the drainage route; the lake
+            // suppresses the visible river segment, not runoff.
             cell.river_class = RiverClass::None;
             cell.river = false;
         }
