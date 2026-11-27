@@ -437,6 +437,32 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
     }
     CHECK(marked_erosion_cells > 0u);
 
+    std::size_t nonzero_stream_order = 0;
+    std::size_t nonzero_river_influence = 0;
+    std::size_t nonzero_hydraulic_delta = 0;
+    std::size_t nonzero_thermal_delta = 0;
+    std::size_t nonzero_fluvial_delta = 0;
+    for (std::size_t i = 0; i < erosion_diagnostics.stream_order.pixels.size(); ++i) {
+        nonzero_stream_order +=
+            erosion_diagnostics.stream_order.pixels[i].r > 0u ? 1u : 0u;
+        nonzero_river_influence +=
+            erosion_diagnostics.river_influence.pixels[i].r > 0u ? 1u : 0u;
+        nonzero_hydraulic_delta +=
+            (erosion_diagnostics.hydraulic_erosion_delta.pixels[i].r > 0u ||
+             erosion_diagnostics.hydraulic_erosion_delta.pixels[i].b > 0u) ? 1u : 0u;
+        nonzero_thermal_delta +=
+            (erosion_diagnostics.thermal_erosion_delta.pixels[i].r > 0u ||
+             erosion_diagnostics.thermal_erosion_delta.pixels[i].b > 0u) ? 1u : 0u;
+        nonzero_fluvial_delta +=
+            (erosion_diagnostics.fluvial_terrain_delta.pixels[i].r > 0u ||
+             erosion_diagnostics.fluvial_terrain_delta.pixels[i].b > 0u) ? 1u : 0u;
+    }
+    CHECK(nonzero_stream_order > 0u);
+    CHECK(nonzero_river_influence > 0u);
+    CHECK(nonzero_hydraulic_delta > 0u);
+    CHECK(nonzero_thermal_delta > 0u);
+    CHECK(nonzero_fluvial_delta > 0u);
+
     const auto left = eroded.generate_rgba_region(0, 0, 48, 96, settings);
     const auto right = eroded.generate_rgba_region(48, 0, 48, 96, settings);
     for (std::size_t z = 0; z < 96; ++z) {
@@ -822,6 +848,13 @@ TEST_CASE("generate full 256x256 terrain with erosion and save output files") {
     CHECK(save_image("terrain_output/lake-depth.png", hydrology_diagnostics.lake_depth));
     CHECK(save_image("terrain_output/lake-basins.png", hydrology_diagnostics.lake_basins));
     CHECK(save_image("terrain_output/drainage-direction.png", hydrology_diagnostics.drainage_direction));
+    CHECK(save_image("terrain_output/stream-order.png", hydrology_diagnostics.stream_order));
+    CHECK(save_image("terrain_output/watershed-basins.png", hydrology_diagnostics.watershed_basins));
+    CHECK(save_image("terrain_output/river-influence.png", hydrology_diagnostics.river_influence));
+    CHECK(save_image("terrain_output/mountain-peak-distance.png", hydrology_diagnostics.mountain_peak_distance));
+    CHECK(save_image("terrain_output/hydraulic-erosion-delta.png", hydrology_diagnostics.hydraulic_erosion_delta));
+    CHECK(save_image("terrain_output/thermal-erosion-delta.png", hydrology_diagnostics.thermal_erosion_delta));
+    CHECK(save_image("terrain_output/fluvial-terrain-delta.png", hydrology_diagnostics.fluvial_terrain_delta));
     CHECK(save_image("terrain_output/temperature.png", climate_diagnostics.temperature));
     CHECK(save_image("terrain_output/humidity.png", climate_diagnostics.humidity));
     CHECK(save_image("terrain_output/precipitation.png", climate_diagnostics.precipitation));
@@ -832,7 +865,7 @@ TEST_CASE("generate full 256x256 terrain with erosion and save output files") {
     // Verify erosion_delta has meaningful data (non-zero pixels)
     std::size_t erosion_pixels = 0;
     for (const auto& pixel : hydrology_diagnostics.erosion_delta.pixels) {
-        if (pixel.r > 0 || pixel.g > 0 || pixel.b > 0 || pixel.a > 0) {
+        if (pixel.r > 0 || pixel.b > 0) {
             erosion_pixels++;
         }
     }
