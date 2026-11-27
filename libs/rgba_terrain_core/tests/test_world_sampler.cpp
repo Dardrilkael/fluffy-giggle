@@ -654,6 +654,9 @@ TEST_CASE("greater atmospheric moisture availability supports more precipitation
             const auto wet_sample = wet.sample(x, z);
             CHECK(wet_sample.humidity >= dry_sample.humidity);
             CHECK(wet_sample.precipitation >= dry_sample.precipitation);
+            CHECK(wet_sample.watershed_accumulation >=
+                  dry_sample.watershed_accumulation);
+            CHECK(wet_sample.river_strength >= dry_sample.river_strength);
             found_land = true;
             break;
         }
