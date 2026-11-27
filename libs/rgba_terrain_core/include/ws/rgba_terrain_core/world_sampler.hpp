@@ -77,8 +77,9 @@ struct WorldSample {
 
     // Hydrology diagnostics. Accumulation is precipitation-derived runoff,
     // including temperature-dependent rain and snowmelt, in source-cell
-    // equivalents. Watershed IDs are populated by whole-world generation;
-    // the bounded point-sample fallback may leave them zero.
+    // equivalents. Whole-world generation reports watershed IDs and Strahler
+    // order; the bounded point-sample fallback reports only local stream
+    // presence (order 1) and leaves watershed IDs zero.
     DrainageDirection drainage_direction = DrainageDirection::Sink;
     double watershed_accumulation = 0.0;
     double river_strength = 0.0;
