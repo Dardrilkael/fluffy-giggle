@@ -1148,6 +1148,7 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
 
     const double threshold = plan.hydrology.river_accumulation_threshold;
 
+    {
     // The baseline hydrology uses the same priority-flood/D8 graph as
     // erosion and final post-erosion hydrology. Keep these cells for exact
     // baseline ocean classification at output-pixel resolution.
@@ -1185,6 +1186,8 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
         cell.river = !cell.lake &&
             original_routing.direction[i] != DrainageDirection::Sink &&
             original_accumulation[i] >= threshold;
+    }
+
     }
 
     if (plan.hydrology.erosion_enabled) {
