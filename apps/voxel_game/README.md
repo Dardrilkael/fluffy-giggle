@@ -13,7 +13,7 @@ Jolt behind `ws::physics3d`, OpenAL Soft behind `ws::audio`.
   field carves winding river channels and sandy banks; water fills low
   ground to the water plane. 3D coherent density carves underground caves,
   clustered 3D noise creates coal/iron ore veins, and tree density varies
-  with forest climate. All fields are deterministic per seed
+  with forest climate; tree trunks and leaf crowns are applied in world coordinates and can cross chunk boundaries. All fields are deterministic per seed
   (default seed `0xC0FFEE`) and continuous across chunk boundaries.
 - **World entry screen**: a fresh launch starts with no terrain world generated or loaded. Choose a seed, increment/decrement it or randomize it, then select **Generate / Regenerate PNG**. Terrain sampling runs in the background and writes the authoritative RGBA PNG plus metadata. The result is loaded as a preview behind the menu; it does not enter gameplay. **Load Saved PNG / Preview** loads the previous map without starting the game. **Play World** is enabled only after a map has been previewed and is the only menu action that enters gameplay.
 - **A first-person player**: WASD movement, mouse look, space jump
@@ -25,7 +25,7 @@ Jolt behind `ws::physics3d`, OpenAL Soft behind `ws::audio`.
   jump buffering and coyote time. Jolt remains available through
   `ws::physics3d::World3D` for ordinary dynamic objects.
 - **Block interaction**: left mouse breaks and collects drops; right mouse places the selected hotbar stack and consumes one item. The DDA raycast has a 7-block reach and placement cannot entomb the player.
-- **Expanded blocks**: cobblestone, planks, bricks, glass, leaves, coal/iron ore, gravel, clay, snow, ice, sandstone, mud, mossy stone, red sand, basalt and peat. New variants reuse the closest matching resource-pack texture when an exact asset is absent.
+- **Expanded blocks**: cobblestone, planks, bricks, glass, leaves, coal/iron ore, gravel, clay, snow, ice, sandstone, mud, mossy stone, red sand, basalt and peat. New variants reuse the closest matching resource-pack texture when an exact asset is absent. Leaves use a cut-out alpha pass; glass and ice share a resource-pack tile and are rendered in that same no-depth-write pass. Face culling preserves opaque neighbor faces behind cut-out materials.
 - **Inventory and crafting**: 27 stackable slots, a 9-slot hotbar, stack limit 64, item counts, and a starter recipe book. E opens inventory, C opens crafting, and F1-F6 craft the listed recipes when materials are available.
 - **HUD**: crosshair, a 9-slot item hotbar (keys 1–9), an FPS counter,
   position/grounded readout, and the controls line.
@@ -115,8 +115,8 @@ next pass (drag-look).
 
 Note: the app appears in the configure automatically only when its whole
 lib set is configured (`ws_want_voxel_game`); a subset build that omits
-`ui`, `physics` or `audio` silently skips the app (the repo's gating
-contract).
+`ui`, `physics`, `audio`, `gameplay` or `rgba_terrain_core` silently skips
+the app (the repo's gating contract).
 
 ## The architecture
 
