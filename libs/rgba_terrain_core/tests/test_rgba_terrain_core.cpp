@@ -183,7 +183,7 @@ TEST_CASE("RGBA terrain image decoding and voxel reconstruction") {
     CHECK(sixteen_bit_analysis.height_encoding_max == 65535);
     CHECK(sixteen_bit_analysis.min_height == 0x8000u);
     CHECK(sixteen_bit_analysis.max_height == 0x8000u);
-\n    const auto analysis = analyze_map(
+    const auto analysis = analyze_map(
         generated, packed_layout, generated_settings);
     CHECK(analysis.width == 64 && analysis.depth == 64);
     CHECK(analysis.min_height <= analysis.max_height);
