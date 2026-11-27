@@ -22,6 +22,9 @@ endif()
 if(ws_want_image)
   add_subdirectory(image)
 endif()
+if(ws_want_rgba_terrain_core)
+  add_subdirectory(rgba_terrain_core)
+endif()
 if(ws_want_math)
   # ws::math: dense Matrix<T> + LU and ws-owned fixed-size vecmath; the spice
   # arc grows the sparse symbolic-reuse LU facade here (its MNA solver's
