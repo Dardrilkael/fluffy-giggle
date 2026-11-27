@@ -178,7 +178,8 @@ int main() {
         generated, packed_layout, generated_settings);
     assert(analysis.width == 64 && analysis.depth == 64);
     assert(analysis.min_height <= analysis.max_height);
-    assert(analysis.distinct_heights > 1);
+    assert(analysis.distinct_heights > 57);
+    assert(analysis.max_height > 255);
     assert(analysis.standard_deviation > 0.0);
     assert(analysis.horizontal_edges == 64u * 63u);
     assert(analysis.vertical_edges == 64u * 63u);
