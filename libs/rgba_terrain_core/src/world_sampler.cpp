@@ -833,7 +833,7 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     std::vector<std::size_t> order(count);
     for (std::size_t i = 0; i < count; ++i) order[i] = i;
     std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
-        if (elevation[a] != elevation[b]) return elevation[a] > elevation[b];
+        if (filled[a] != filled[b]) return filled[a] > filled[b];
         return visit_order[a] > visit_order[b];
     });
     for (const std::size_t i : order) {
@@ -932,8 +932,6 @@ WorldSample WorldSampler::sample_impl(std::int64_t world_x,
 
     const double x = static_cast<double>(world_x);
     const double z = static_cast<double>(world_z);
-    const double province_scale = plan_.scales.province_scale;
-
     const RegionalInfluences regions = evaluate_regions(plan_, x, z);
     const double region_blend = std::min(1.0, regions.weight_sum);
     const double regional_elevation_bias = regions.weight_sum > 0.0
