@@ -11,11 +11,47 @@ a world using WorldSampler (not the legacy synthetic generator), inspects
 the RGBA data map, and verifies that the saved voxel file exactly matches a
 fresh PNG + metadata reconstruction.
 
-Outputs are written to build\terrain-world-test:
+## Generated files and remembered settings
 
-- terrain.png — authoritative RGBA8 data map.
-- terrain.rgba-terrain — channel and voxel settings.
-- terrain.rgba-voxels — optional validation artifact.
+By default, generated world files are written to:
+
+`build\terrain-world-test\`
+
+- `terrain.png` — authoritative RGBA8 data map.
+- `terrain.rgba-terrain` — channel and voxel settings.
+- `terrain.rgba-voxels` — optional validation artifact.
+
+The output directory can be changed per run with `-OutputDir`. For example:
+
+~~~powershell
+.\experiments\rgba_terrain_poc\test-world.ps1 -OutputDir "terrain-tests\mountain-world"
+~~~
+
+The script remembers the last selected width, depth, and seed in
+`build\terrain-world-test-settings.json`. This is local runtime state under
+the ignored `build\` directory; it is not committed to Git.
+
+After setting a value once, running the script without those parameters
+reuses the saved values. Supplying only one dimension updates that dimension
+and keeps the other saved value:
+
+~~~powershell
+# Save seed 12345; the next run without parameters reuses it.
+.\experiments\rgba_terrain_poc\test-world.ps1 -Seed 12345
+.\experiments\rgba_terrain_poc\test-world.ps1
+
+# Change only the width; saved depth and seed remain unchanged.
+.\experiments\rgba_terrain_poc\test-world.ps1 -Width 512
+~~~
+
+Restore the original defaults (256x256, seed 0xC0FFEE) with:
+
+~~~powershell
+.\experiments\rgba_terrain_poc\test-world.ps1 -ResetSettings
+~~~
+
+The reset command also runs the normal build/generation/validation flow.
+Combine it with `-SkipBuild` to reuse the existing executable.
 
 ## Launch the generated world
 
@@ -28,15 +64,16 @@ generated map:
 
 The game importer currently requires a 256x256 map. The script enforces that
 when LaunchGame is selected and restores the three terrain environment
-variables after the game exits.
+variables after the game exits. If remembered dimensions are not 256x256,
+set them back explicitly or use `-ResetSettings`.
 
 ## Useful options
 
 ~~~powershell
-# Change the world seed (same seed + settings = same data map)
+# Change the world seed (and remember it)
 .\experiments\rgba_terrain_poc\test-world.ps1 -Seed 12345
 
-# Generate a different-size preview map
+# Generate a different-size preview map (and remember both dimensions)
 .\experiments\rgba_terrain_poc\test-world.ps1 -Width 512 -Depth 512
 
 # Rebuild from a clean POC build directory
@@ -45,7 +82,7 @@ variables after the game exits.
 # Reuse the existing executable for faster iteration
 .\experiments\rgba_terrain_poc\test-world.ps1 -SkipBuild
 
-# Put output somewhere else
+# Put output somewhere else for this run
 .\experiments\rgba_terrain_poc\test-world.ps1 -OutputDir "terrain-tests\mountain-world"
 ~~~
 
@@ -65,4 +102,3 @@ editor that may quantize, blend, or color-correct its RGBA values.
 
 For the lower-level commands and RGBA channel layout, see README.md and
 HOW_TO_COMPILE.md.
-~~~
