@@ -96,6 +96,10 @@ public:
         WorldClimateDiagnosticImages* climate_diagnostics = nullptr) const;
 
 private:
+    [[nodiscard]] WorldSample sample_impl(
+        std::int64_t world_x, std::int64_t world_z,
+        bool include_local_hydrology) const;
+
     WorldPlan plan_;
 };
 
