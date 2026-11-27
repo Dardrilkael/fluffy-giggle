@@ -225,14 +225,18 @@ VoxelVolume generate_voxel_volume(const TerrainColumns& columns,
     volume.voxels.resize(checked_volume_size(
         volume.width, volume.depth, volume.height));
 
-    for (const VoxelColumn& column : columns.columns) {
-        if (column.x >= volume.width || column.z >= volume.depth) {
-            throw std::invalid_argument(
-                "terrain column coordinate lies outside its image");
-        }
-        if (column.height >= volume.height) {
-            throw std::invalid_argument(
-                "terrain column height lies outside the voxel volume");
+    for (std::size_t z = 0; z < volume.depth; ++z) {
+        for (std::size_t x = 0; x < volume.width; ++x) {
+            const VoxelColumn& column =
+                columns.columns[z * volume.width + x];
+            if (column.x != x || column.z != z) {
+                throw std::invalid_argument(
+                    "terrain columns must be in row-major x/z order");
+            }
+            if (column.height >= volume.height) {
+                throw std::invalid_argument(
+                    "terrain column height lies outside the voxel volume");
+            }
         }
     }
 
