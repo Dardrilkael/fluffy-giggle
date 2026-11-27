@@ -116,6 +116,9 @@ struct VoxelVolume {
 [[nodiscard]] VoxelVolume generate_voxel_volume(
     const RgbaImage&, const ChannelLayout&, const TerrainSettings&);
 [[nodiscard]] RgbaImage load_rgba_image(const std::string& path);
+// Legacy v1 API. Preserves the original RGBA channel contract but delegates
+// all terrain, climate, biome and hydrology sampling to WorldSampler.
+// New production code should use WorldSampler::generate_rgba_region().
 [[nodiscard]] RgbaImage generate_synthetic_map(
     std::size_t width, std::size_t depth, std::uint32_t seed,
     const TerrainSettings& settings);
