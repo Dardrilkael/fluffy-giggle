@@ -22,11 +22,13 @@ dependencies.
 
 ## Generate a map and voxel volume
 
-    rgba_terrain_poc generate 256 256 0xC0FFEE terrain.png terrain.rgba-terrain terrain.rgba-voxels
+    rgba_terrain_poc generate-world 256 256 0xC0FFEE terrain.png terrain.rgba-terrain terrain.rgba-voxels
 
-The command writes a lossless RGBA8 data PNG, its metadata sidecar, and a
+The `generate-world` command exercises WorldSampler, coupled climate and the
+new hydrology path. It writes a lossless RGBA8 data PNG, metadata sidecar, and
 dense RGAVOX02 voxel file. The PNG is reloaded through the strict shared image
-library before voxelization, checking the actual persisted map path.
+library before voxelization, checking the actual persisted map path. The older
+`generate` command remains a legacy synthetic baseline.
 
 ## Validate a voxel file
 
