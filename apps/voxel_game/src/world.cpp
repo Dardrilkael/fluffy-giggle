@@ -406,8 +406,35 @@ bool is_solid(Block block) {
   return block != Block::air && block != Block::water;
 }
 
-void World::generate(std::uint32_t seed) {
+void World::reset_empty() {
   blocks_.reset(Block::air);
+  column_metadata_.fill(ColumnMetadata{});
+}
+
+bool World::set_column_metadata(
+    int x, int z, Biome biome, std::uint8_t feature_flags) noexcept {
+  if (x < 0 || x >= kWorldSizeX || z < 0 || z >= kWorldSizeZ ||
+      static_cast<std::size_t>(biome) >=
+          static_cast<std::size_t>(Biome::count_)) {
+    return false;
+  }
+  const auto index = static_cast<std::size_t>(x) +
+                     static_cast<std::size_t>(z) * kWorldSizeX;
+  column_metadata_[index] = ColumnMetadata{biome, feature_flags};
+  return true;
+}
+
+ColumnMetadata World::column_metadata(int x, int z) const noexcept {
+  if (x < 0 || x >= kWorldSizeX || z < 0 || z >= kWorldSizeZ) {
+    return {};
+  }
+  const auto index = static_cast<std::size_t>(x) +
+                     static_cast<std::size_t>(z) * kWorldSizeX;
+  return column_metadata_[index];
+}
+
+void World::generate(std::uint32_t seed) {
+  reset_empty();
 
   // Generate chunk-by-chunk for contiguous writes. Every noise field
   // still uses WORLD coordinates, so adjacent chunks share continuous
