@@ -350,6 +350,78 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
     CHECK(land_routing_cells > 0u);
     const bool has_ocean_outlet = ocean_routing_cells > 0u;
 
+    std::vector<std::uint8_t> routing_stream_order(
+        routing_cell_count, 0u);
+    std::vector<std::size_t> routing_downstream(
+        routing_cell_count, routing_cell_count);
+    for (std::size_t z = 0; z < routing_height; ++z) {
+        for (std::size_t x = 0; x < routing_width; ++x) {
+            const std::size_t cell = z * routing_width + x;
+            const std::size_t world_x =
+                x * routing_cell_scale + routing_cell_scale / 2;
+            const std::size_t world_z =
+                z * routing_cell_scale + routing_cell_scale / 2;
+            const auto& order_pixel =
+                erosion_diagnostics.stream_order.at(world_x, world_z);
+            routing_stream_order[cell] = static_cast<std::uint8_t>(
+                std::lround(static_cast<double>(order_pixel.r) * 8.0 / 255.0));
+
+            const auto& basin_pixel =
+                erosion_diagnostics.watershed_basins.at(world_x, world_z);
+            if (!routing_ocean_mask[cell]) {
+                CHECK(basin_pixel.r != 0u || basin_pixel.g != 0u ||
+                      basin_pixel.b != 0u);
+            }
+
+            const int direction = direction_from_pixel(
+                erosion_diagnostics.drainage_direction.at(world_x, world_z));
+            if (direction >= 0) {
+                const auto next_x = static_cast<std::int64_t>(x) +
+                    route_dx[static_cast<std::size_t>(direction)];
+                const auto next_z = static_cast<std::int64_t>(z) +
+                    route_dz[static_cast<std::size_t>(direction)];
+                if (next_x >= 0 && next_z >= 0 &&
+                    next_x < static_cast<std::int64_t>(routing_width) &&
+                    next_z < static_cast<std::int64_t>(routing_height)) {
+                    routing_downstream[cell] =
+                        static_cast<std::size_t>(next_z) * routing_width +
+                        static_cast<std::size_t>(next_x);
+                }
+            }
+        }
+    }
+
+    // Verify the Strahler merge rule from the emitted D8 graph: no tributary
+    // order starts above 1; equal maximum tributaries increment the next cell.
+    std::size_t verified_stream_cells = 0;
+    for (std::size_t cell = 0; cell < routing_cell_count; ++cell) {
+        const std::uint8_t order = routing_stream_order[cell];
+        if (order == 0u) continue;
+        std::uint8_t maximum_upstream_order = 0u;
+        std::uint16_t equal_maximum_tributaries = 0u;
+        for (std::size_t upstream = 0; upstream < routing_cell_count; ++upstream) {
+            if (routing_downstream[upstream] != cell ||
+                routing_stream_order[upstream] == 0u) {
+                continue;
+            }
+            if (routing_stream_order[upstream] > maximum_upstream_order) {
+                maximum_upstream_order = routing_stream_order[upstream];
+                equal_maximum_tributaries = 1u;
+            } else if (routing_stream_order[upstream] ==
+                       maximum_upstream_order) {
+                ++equal_maximum_tributaries;
+            }
+        }
+        const std::uint8_t expected_order = maximum_upstream_order == 0u
+            ? 1u
+            : static_cast<std::uint8_t>(
+                maximum_upstream_order +
+                (equal_maximum_tributaries >= 2u ? 1u : 0u));
+        CHECK(order == expected_order);
+        ++verified_stream_cells;
+    }
+    CHECK(verified_stream_cells > 0u);
+
     std::size_t ocean_terminated_routes = 0;
     std::size_t boundary_terminated_routes = 0;
     for (std::size_t start_z = 0; start_z < routing_height; ++start_z) {
