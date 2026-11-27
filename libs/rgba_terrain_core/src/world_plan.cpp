@@ -94,6 +94,24 @@ void WorldPlan::validate() const {
         throw std::invalid_argument("world climate settings are outside valid ranges");
     }
 
+    require_positive(hydrology.routing_cell_scale, "hydrology.routing_cell_scale");
+    require_positive(hydrology.river_accumulation_threshold,
+                     "hydrology.river_accumulation_threshold");
+    require_finite(hydrology.river_channel_depth_fraction,
+                   "hydrology.river_channel_depth_fraction");
+    require_positive(hydrology.lake_minimum_depth_m,
+                     "hydrology.lake_minimum_depth_m");
+    require_finite(hydrology.lake_minimum_accumulation,
+                   "hydrology.lake_minimum_accumulation");
+    require_finite(hydrology.lake_minimum_precipitation,
+                   "hydrology.lake_minimum_precipitation");
+    if (hydrology.river_channel_depth_fraction > 0.25 ||
+        hydrology.lake_minimum_accumulation < 0.0 ||
+        hydrology.lake_minimum_precipitation < 0.0 ||
+        hydrology.lake_minimum_precipitation > 1.0) {
+        throw std::invalid_argument("world hydrology settings are outside valid ranges");
+    }
+
     std::array<bool, 256> ecosystem_ids{};
     bool has_land_ecosystem = false;
     for (const auto& ecosystem : ecosystems) {
