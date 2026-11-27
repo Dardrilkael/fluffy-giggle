@@ -111,6 +111,7 @@ TEST_CASE("RGBA terrain image decoding and voxel reconstruction") {
     CHECK(generated.pixels.size() == 64u * 64u);
     bool has_water = false, has_river = false, has_multiple_heights = false;
     std::size_t river_columns = 0;
+    std::size_t mountain_columns = 0;
     const auto first_height = (static_cast<unsigned>(generated.pixels[0].r) << 8u) | generated.pixels[0].g;
     for (std::size_t i = 0; i < generated.pixels.size(); ++i) {
         const auto& pixel = generated.pixels[i];
@@ -122,6 +123,7 @@ TEST_CASE("RGBA terrain image decoding and voxel reconstruction") {
         const bool river = (pixel.a & 0x20u) != 0;
         has_river = has_river || river;
         river_columns += river ? 1u : 0u;
+        mountain_columns += (pixel.a & 0x10u) != 0 ? 1u : 0u;
         if (river) {
             // River centerline is carved to a channel bed below sea level.
             const float normalized = static_cast<float>(h) / 65535.0f;
@@ -132,6 +134,7 @@ TEST_CASE("RGBA terrain image decoding and voxel reconstruction") {
     }
     CHECK(has_multiple_heights && has_water && has_river);
     CHECK(river_columns > 0 && river_columns < generated.pixels.size());
+    CHECK(mountain_columns > 0 && mountain_columns < generated.pixels.size());
 
     const auto generated_columns = generate_columns(generated, packed_layout, generated_settings);
     CHECK(generated_columns.columns.size() == generated.pixels.size());
