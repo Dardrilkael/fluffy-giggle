@@ -297,7 +297,9 @@ class VoxelApp final : public ws::ui::App {
           if (!validation.exact_match()) {
             throw std::runtime_error(
                 std::format("optional voxel artifact does not exactly match PNG + metadata "
-                "(mismatched voxels: {0})", validation.mismatched_voxels));          }          ws::core::info(
+                "(mismatched voxels: {0})", validation.mismatched_voxels));
+          }
+          ws::core::info(
               "voxel: optional voxel artifact validated ({0} voxels)",
               validation.compared_voxels);
         }
@@ -596,7 +598,8 @@ class VoxelApp final : public ws::ui::App {
     const auto phys_t0 = std::chrono::steady_clock::now();
     player_.tick(move, frame_dt, world_.collision_grid());
     if (audio_ok_) {
-      const Vec3 listener = player_.eye_position();      const Vec3 forward = player_.look_direction();
+      const Vec3 listener = player_.eye_position();
+      const Vec3 forward = player_.look_direction();
       (void)audio_.set_listener_position(listener.x, listener.y, listener.z);
       (void)audio_.set_listener_orientation(
           forward.x, forward.y, forward.z, 0.0f, 1.0f, 0.0f);
@@ -607,6 +610,7 @@ class VoxelApp final : public ws::ui::App {
     // --- target ray + hotbar selection --------------------------------------
     for (int i = 0; i < kHotbarSlots; ++i)
       if (input.key_pressed[kKey1 + i]) hotbar_ = i;
+
     const Vec3 target_eye = player_.eye_position();
     const Vec3 target_look = player_.look_direction();
     const float target_origin[3] = {target_eye.x, target_eye.y, target_eye.z};
@@ -863,14 +867,15 @@ class VoxelApp final : public ws::ui::App {
   void load_saved_png_preview() {
     const auto files = voxel::terrain_world_io::generated_map_files();
     voxel::terrain_world_io::generate_channel_preview_png(files);
+    const std::string preview_path = files.channel_preview.string();
+    const auto new_texture = r2d::load_texture(preview_path.c_str());
+    if (new_texture.id == 0) {
+      throw std::runtime_error("could not upload raw RGBA channel preview texture");
+    }
     if (terrain_preview_texture_.id != 0) {
       r2d::destroy_texture(terrain_preview_texture_);
     }
-    const std::string preview_path = files.channel_preview.string();
-    terrain_preview_texture_ = r2d::load_texture(preview_path.c_str());
-    if (terrain_preview_texture_.id == 0) {
-      throw std::runtime_error("could not upload raw RGBA channel preview texture");
-    }
+    terrain_preview_texture_ = new_texture;
     entry_preview_loaded_ = true;
     ws::core::info("voxel: showing raw RGBA channels from '{}'",
                    files.png.string());
@@ -895,7 +900,8 @@ class VoxelApp final : public ws::ui::App {
 
   void poll_world_generation() {
     if (!generation_in_progress_ || !generation_job_.valid()) return;
-    if (generation_job_.wait_for(std::chrono::seconds(0)) !=        std::future_status::ready) {
+    if (generation_job_.wait_for(std::chrono::seconds(0)) !=
+        std::future_status::ready) {
       return;
     }
 
@@ -923,7 +929,8 @@ class VoxelApp final : public ws::ui::App {
     }
     if (!generation_in_progress_ && entry_hit(
             seed_controls[1], mouse_x_, mouse_y_)) {
-      ++world_seed_;      return;
+      ++world_seed_;
+      return;
     }
     if (!generation_in_progress_ && entry_hit(
             seed_controls[2], mouse_x_, mouse_y_)) {
@@ -993,39 +1000,8 @@ class VoxelApp final : public ws::ui::App {
     (void)r2d::draw_text(panel.x + (panel.w - title_width) * 0.5f,
                          panel.y + 22.0f, title, font_,
                          r2d::rgba(239, 247, 225));
-    const auto controls = entry_seed_controls(frame);
-    r2d::draw_rounded_quad(controls[0].x, controls[0].y,
-                           controls[0].w, controls[0].h, 6.0f,
-                           r2d::rgba(54, 63, 59, 255));
-    r2d::draw_rounded_quad(controls[1].x, controls[1].y,
-                           controls[1].w, controls[1].h, 6.0f,
-                           r2d::rgba(54, 63, 59, 255));
-    r2d::draw_rounded_quad(controls[2].x, controls[2].y,
-                           controls[2].w, controls[2].h, 6.0f,
-                           r2d::rgba(54, 63, 59, 255));
-    (void)r2d::draw_text(controls[0].x + 17.0f, controls[0].y + 9.0f,
-                         "-", font_, r2d::rgba(245, 245, 235));
-    (void)r2d::draw_text(controls[1].x + 17.0f, controls[1].y + 9.0f,
-                         "+", font_, r2d::rgba(245, 245, 235));
-    (void)r2d::draw_text(controls[2].x + 12.0f, controls[2].y + 9.0f,
-                         "randomize", font_, r2d::rgba(225, 233, 218));
-    const auto buttons = entry_buttons(frame);
-    const bool saved = saved_map_available();
-    const char* labels[4] = {
-        generation_in_progress_ ? "GENERATING PNG..." : "GENERATE / REGENERATE PNG",
-        "LOAD SAVED PNG  /  PREVIEW",
-        "PLAY WORLD",
-        "QUIT GAME"};
-    for (std::size_t i = 0; i < buttons.size(); ++i) {
-      const bool disabled = (generation_in_progress_ && i != 0u) ||
-                            (i == 1u && !saved) ||
-                            (i == 2u && !entry_preview_loaded_);
-      const bool hovered = !disabled &&
-          entry_hit(buttons[i], mouse_x_, mouse_y_);
-      draw_entry_button(buttons[i], labels[i], hovered, disabled);
-    }
 
-    // Left side: a 2x2 channel sheet derived from the saved RGBA PNG.
+    // Left side: the exact R/G/B/A bytes are shown as four grayscale maps.
     const float preview_x = panel.x + 28.0f;
     const float preview_y = panel.y + 118.0f;
     constexpr float preview_size = 480.0f;
@@ -1037,8 +1013,6 @@ class VoxelApp final : public ws::ui::App {
     if (entry_preview_loaded_ && terrain_preview_texture_.id != 0) {
       r2d::draw_quad(preview_x, preview_y, preview_size, preview_size,
                      r2d::rgba(255, 255, 255, 255), terrain_preview_texture_);
-      const float label_w = 184.0f;
-      const float label_h = 25.0f;
       const float labels_x[4] = {preview_x + 6.0f, preview_x + 246.0f,
                                  preview_x + 6.0f, preview_x + 246.0f};
       const float labels_y[4] = {preview_y + 6.0f, preview_y + 6.0f,
@@ -1047,7 +1021,7 @@ class VoxelApp final : public ws::ui::App {
           "R  HEIGHT MSB", "G  HEIGHT LSB",
           "B  MATERIAL / FLAGS", "A  BIOME ID"};
       for (int i = 0; i < 4; ++i) {
-        r2d::draw_quad(labels_x[i], labels_y[i], label_w, label_h,
+        r2d::draw_quad(labels_x[i], labels_y[i], 184.0f, 25.0f,
                        r2d::rgba(8, 12, 14, 205));
         (void)r2d::draw_text(labels_x[i] + 7.0f, labels_y[i] + 5.0f,
                              channel_labels[i], font_,
@@ -1064,7 +1038,7 @@ class VoxelApp final : public ws::ui::App {
                          "Each quadrant shows exact 8-bit channel intensity.",
                          font_, r2d::rgba(155, 170, 160));
 
-    // Right side: seed controls and world actions.
+    // Right side: seed controls and actions.
     const float controls_x = panel.x + 560.0f;
     (void)r2d::draw_text(controls_x, panel.y + 94.0f,
                          "WORLD SEED", font_, r2d::rgba(181, 194, 178));
@@ -1072,6 +1046,31 @@ class VoxelApp final : public ws::ui::App {
     std::snprintf(seed_text, sizeof(seed_text), "%u", world_seed_);
     (void)r2d::draw_text(controls_x + 130.0f, panel.y + 94.0f,
                          seed_text, font_, r2d::rgba(220, 226, 210));
+    const auto controls = entry_seed_controls(frame);
+    for (const auto& control : controls) {
+      r2d::draw_rounded_quad(control.x, control.y, control.w, control.h,
+                             6.0f, r2d::rgba(54, 63, 59, 255));
+    }
+    (void)r2d::draw_text(controls[0].x + 17.0f, controls[0].y + 9.0f,
+                         "-", font_, r2d::rgba(245, 245, 235));
+    (void)r2d::draw_text(controls[1].x + 17.0f, controls[1].y + 9.0f,
+                         "+", font_, r2d::rgba(245, 245, 235));
+    (void)r2d::draw_text(controls[2].x + 12.0f, controls[2].y + 9.0f,
+                         "randomize", font_, r2d::rgba(225, 233, 218));
+
+    const auto buttons = entry_buttons(frame);
+    const bool saved = saved_map_available();
+    const char* labels[4] = {
+        generation_in_progress_ ? "GENERATING PNG..." : "GENERATE / REGENERATE PNG",
+        "LOAD SAVED PNG  /  PREVIEW", "PLAY WORLD", "QUIT GAME"};
+    for (std::size_t i = 0; i < buttons.size(); ++i) {
+      const bool disabled = (generation_in_progress_ && i != 0u) ||
+                            (i == 1u && !saved) ||
+                            (i == 2u && !entry_preview_loaded_);
+      const bool hovered = !disabled &&
+          entry_hit(buttons[i], mouse_x_, mouse_y_);
+      draw_entry_button(buttons[i], labels[i], hovered, disabled);
+    }
     if (!generation_status_.empty()) {
       (void)r2d::draw_text(controls_x, panel.y + 500.0f,
                            generation_status_.c_str(), font_,
@@ -1088,7 +1087,7 @@ class VoxelApp final : public ws::ui::App {
                               : r2d::rgba(14, 21, 25));
     r2d::end();
 
-    // The title screen is a 2D data-map viewer; no voxel world is imported
+    // The title screen is a 2D data-map viewer. No voxel world is imported
     // or rendered until the player explicitly selects PLAY WORLD.
 
     r2d::begin();
@@ -1188,7 +1187,8 @@ class VoxelApp final : public ws::ui::App {
     const Vec3 p = player_.position();
     std::snprintf(stats, sizeof(stats),
                   "fps %u   pos %.1f %.1f %.1f   %s\n"
-                  "cpu %.2fms (phys %.2f mesh %.2f upload %.2f submit %.2f)\n"                  "%s   cpu p50/p95/p99 %.2f/%.2f/%.2fms  "
+                  "cpu %.2fms (phys %.2f mesh %.2f upload %.2f submit %.2f)\n"
+                  "%s   cpu p50/p95/p99 %.2f/%.2f/%.2fms  "
                   "upload %.1f KB  mesh jobs %u  draws %u tris %u",
                   fps_, p.x, p.y, p.z,
                   player_.grounded() ? "ground" : "air", last_timings_.total_ms,
@@ -1248,7 +1248,8 @@ class VoxelApp final : public ws::ui::App {
           inventory_.swap_slots(static_cast<std::size_t>(hotbar_),
                                 static_cast<std::size_t>(i));
         }
-        return;      }
+        return;
+      }
     } else if (crafting_open_) {
       const float x = frame.width * 0.5f - 270.0f;
       const float y = (frame.height - 430.0f) * 0.5f;
