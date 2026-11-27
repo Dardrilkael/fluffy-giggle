@@ -41,6 +41,11 @@ struct WorldHydrologySettings {
     // of requested chunk dimensions and generation order.
     double routing_cell_scale = 1200.0;
 
+    // Deterministic whole-world stream-power incision and thermal talus
+    // relaxation run on the routing grid before final drainage is computed.
+    // Disable only for comparisons, fixtures or deliberately un-eroded maps.
+    bool erosion_enabled = true;
+
     // Accumulation is precipitation-weighted contributing routing cells.
     // Its magnitude therefore depends on routing_cell_scale and climate.
     double river_accumulation_threshold = 2.6;
