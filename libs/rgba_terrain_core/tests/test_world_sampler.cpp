@@ -326,6 +326,7 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
     REQUIRE(erosion_diagnostics.drainage_direction.width == 96);
     REQUIRE(erosion_diagnostics.drainage_direction.height == 96);
     std::size_t land_routing_cells = 0;
+    std::size_t ocean_routing_cells = 0;
     for (std::size_t start_z = 0; start_z < routing_height; ++start_z) {
         for (std::size_t start_x = 0; start_x < routing_width; ++start_x) {
             const std::size_t start_world_x =
@@ -334,6 +335,7 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
                 start_z * routing_cell_scale + routing_cell_scale / 2;
             if (output_elevation(start_world_x, start_world_z) <=
                 eroded.plan().sea_level_fraction) {
+                ++ocean_routing_cells;
                 continue;
             }
             ++land_routing_cells;
@@ -379,6 +381,7 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
         }
     }
     CHECK(land_routing_cells > 0u);
+    CHECK(ocean_routing_cells > 0u);
 
     std::size_t changed_heights = 0;
     for (std::size_t i = 0; i < terrain.pixels.size(); ++i) {
