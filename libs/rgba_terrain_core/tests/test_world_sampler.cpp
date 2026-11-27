@@ -319,9 +319,12 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
         }
         return -1;
     };
-    const auto output_elevation = [&](std::size_t x, std::size_t z) {
-        const auto& pixel = terrain.at(x, z);
-        return (static_cast<double>(pixel.r) * 256.0 + pixel.g) / 65535.0;
+    const auto is_ocean_routing_cell = [&](std::size_t x, std::size_t z) {
+        // Use the analytical pre-erosion mask, not river-channel or lake
+        // surface packing, because this is the outlet mask used by the graph.
+        return baseline.sample(
+            static_cast<std::int64_t>(x),
+            static_cast<std::int64_t>(z)).is_ocean;
     };
     REQUIRE(erosion_diagnostics.drainage_direction.width == 96);
     REQUIRE(erosion_diagnostics.drainage_direction.height == 96);
@@ -333,8 +336,7 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
                 x * routing_cell_scale + routing_cell_scale / 2;
             const std::size_t world_z =
                 z * routing_cell_scale + routing_cell_scale / 2;
-            if (output_elevation(world_x, world_z) <=
-                eroded.plan().sea_level_fraction) {
+            if (is_ocean_routing_cell(world_x, world_z)) {
                 ++ocean_routing_cells;
             } else {
                 ++land_routing_cells;
@@ -352,8 +354,7 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
                 start_x * routing_cell_scale + routing_cell_scale / 2;
             const std::size_t start_world_z =
                 start_z * routing_cell_scale + routing_cell_scale / 2;
-            if (output_elevation(start_world_x, start_world_z) <=
-                eroded.plan().sea_level_fraction) {
+            if (is_ocean_routing_cell(start_world_x, start_world_z)) {
                 continue;
             }
 
@@ -371,8 +372,7 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
                 if (direction_pixel.r == 0u && direction_pixel.g == 0u &&
                     direction_pixel.b == 0u) {
                     reached_ocean =
-                        output_elevation(world_x, world_z) <=
-                        eroded.plan().sea_level_fraction;
+                        is_ocean_routing_cell(world_x, world_z);
                     const bool reached_boundary =
                         current_x == 0 || current_z == 0 ||
                         current_x + 1u == routing_width ||
