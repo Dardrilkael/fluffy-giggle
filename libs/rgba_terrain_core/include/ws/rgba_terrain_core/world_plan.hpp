@@ -43,11 +43,13 @@ struct WorldHydrologySettings {
     // is rebuilt after each erosion iteration as elevation changes.
     double routing_cell_scale = 1200.0;
 
-    // Deterministic whole-world stream-power incision and thermal talus
-    // relaxation run on the routing grid before final drainage is computed
-    // by generate_rgba_region(). The elevation offsets are interpolated into
-    // output pixels, so independently requested regions use the same surface.
-    // Disable only for comparisons, fixtures or deliberately un-eroded maps.
+    // Deterministic whole-world hydraulic stream-power incision and separate
+    // thermal talus relaxation run on the routing grid before final drainage
+    // is computed. River-network fluvial shaping (channels, banks, floodplains,
+    // terraces and fans) remains active because it is part of terrain synthesis.
+    // The elevation offsets are interpolated into output pixels, so independently
+    // requested regions use the same surface. Disable only the two erosion
+    // passes for comparisons, fixtures or deliberately un-eroded maps.
     bool erosion_enabled = true;
 
     // Accumulation sums precipitation-derived runoff (rain plus
