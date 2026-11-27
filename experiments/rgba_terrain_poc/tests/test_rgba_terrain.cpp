@@ -174,7 +174,15 @@ int main() {
         generated, parsed_metadata.layout, parsed_metadata.settings);
     assert(parsed_columns.columns.size() == generated.pixels.size());
 
-    const auto analysis = analyze_map(
+
+    const auto eight_bit_analysis = analyze_map(image, layout, settings);
+    assert(eight_bit_analysis.height_encoding_max == 255);
+    const auto sixteen_bit_analysis = analyze_map(
+        precise, precise_layout, settings);
+    assert(sixteen_bit_analysis.height_encoding_max == 65535);
+    assert(sixteen_bit_analysis.min_height == 0x8000u);
+    assert(sixteen_bit_analysis.max_height == 0x8000u);
+\n    const auto analysis = analyze_map(
         generated, packed_layout, generated_settings);
     assert(analysis.width == 64 && analysis.depth == 64);
     assert(analysis.min_height <= analysis.max_height);
