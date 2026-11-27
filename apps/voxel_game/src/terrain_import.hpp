@@ -17,6 +17,7 @@ enum class TerrainImportError : std::int32_t {
   unsupported_material_id = 4,
   unsupported_biome_id = 5,
   inconsistent_column_metadata = 6,
+  unsupported_density = 7,
 };
 
 struct TerrainImportReport {
