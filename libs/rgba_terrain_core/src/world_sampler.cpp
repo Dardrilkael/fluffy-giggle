@@ -1176,7 +1176,7 @@ HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
             const ClimateField source_climate = evaluate_climate(
                 plan, world_x, world_z, source_regions, source_terrain);
             accumulation[index] = source_terrain.is_ocean(
-                plan.sea_level_fraction) ? 0.0 : source_climate.precipitation;
+                plan.sea_level_fraction) ? 0.0 : evaluate_runoff(source_climate);
             order[index] = index;
         }
     }
@@ -1583,6 +1583,7 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     if (count > maximum_routing_cells) return grid;
 
     std::vector<double> elevation(count);
+    std::vector<double> precipitation(count);
     std::vector<double> runoff(count);
     std::vector<double> mountain_strength(count);
     std::vector<bool> ocean(count, false);
@@ -1609,6 +1610,7 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
             ocean[i] = terrain.is_ocean(plan.sea_level_fraction);
             const ClimateField climate = evaluate_climate(
                 plan, world_x, world_z, regions, terrain);
+            precipitation[i] = climate.precipitation;
             runoff[i] = evaluate_runoff(climate);
         }
     }
@@ -1655,7 +1657,7 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
                 cell.lake_depth_m >= plan.hydrology.lake_minimum_depth_m &&
                 cell.accumulation >=
                     plan.hydrology.lake_minimum_accumulation &&
-                runoff[i] >=
+                precipitation[i] >=
                     plan.hydrology.lake_minimum_precipitation;
             cell.lake_surface_elevation =
                 original_routing.filled_elevation[i];
@@ -1695,6 +1697,7 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     for (std::size_t i = 0; i < count; ++i) {
         ocean[i] = elevation[i] <= plan.sea_level_fraction;
         if (ocean[i]) {
+            precipitation[i] = 0.0;
             runoff[i] = 0.0;
             continue;
         }
@@ -1712,8 +1715,10 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
         TerrainField eroded_terrain = evaluate_terrain(
             plan, world_x, world_z, bias);
         eroded_terrain.normalized_elevation = elevation[i];
-        runoff[i] = evaluate_runoff(evaluate_climate(
-            plan, world_x, world_z, regions, eroded_terrain));
+        const ClimateField eroded_climate = evaluate_climate(
+            plan, world_x, world_z, regions, eroded_terrain);
+        precipitation[i] = eroded_climate.precipitation;
+        runoff[i] = evaluate_runoff(eroded_climate);
     }
 
     const DrainageRouting routing =
@@ -1745,7 +1750,7 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
             cell.lake_depth_m >= plan.hydrology.lake_minimum_depth_m &&
             cell.accumulation >=
                 plan.hydrology.lake_minimum_accumulation &&
-            runoff[i] >=
+            precipitation[i] >=
                 plan.hydrology.lake_minimum_precipitation;
         cell.lake_surface_elevation = routing.filled_elevation[i];
         grid.maximum_lake_depth_m = std::max(
