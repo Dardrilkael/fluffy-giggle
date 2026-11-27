@@ -935,25 +935,22 @@ HydrologyGrid build_hydrology_grid(const WorldPlan& plan) {
     for (std::size_t i = 0; i < count; ++i) {
         grid.elevation_offsets[i] = elevation[i] - original_elevation[i];
         ocean[i] = elevation[i] <= plan.sea_level_fraction;
-        if (!ocean[i]) {
+        if (ocean[i]) {
+            precipitation[i] = 0.0;
+        } else if (plan.hydrology.erosion_enabled) {
             const std::size_t x = i % grid.width;
             const std::size_t z = i / grid.width;
             const double world_x = (static_cast<double>(x) + 0.5) * scale;
             const double world_z = (static_cast<double>(z) + 0.5) * scale;
             const auto regions = evaluate_regions(plan, world_x, world_z);
-            const TerrainField eroded_terrain{
-                elevation[i],
-                evaluate_terrain(plan, world_x, world_z,
-                    regions.weight_sum > 0.0
-                        ? regions.elevation_sum /
-                              regions.weight_sum *
-                              std::min(1.0, regions.weight_sum)
-                        : 0.0).continentalness,
-                0.0};
+            const double blend = std::min(1.0, regions.weight_sum);
+            const double bias = regions.weight_sum > 0.0
+                ? regions.elevation_sum / regions.weight_sum * blend : 0.0;
+            TerrainField eroded_terrain = evaluate_terrain(
+                plan, world_x, world_z, bias);
+            eroded_terrain.normalized_elevation = elevation[i];
             precipitation[i] = evaluate_climate(
                 plan, world_x, world_z, regions, eroded_terrain).precipitation;
-        } else {
-            precipitation[i] = 0.0;
         }
         accumulation[i] = ocean[i] ? 0.0 : precipitation[i];
     }
