@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <string>
 #include <utility>
 
@@ -63,7 +64,7 @@ ws::core::Result<TerrainImportReport> import_terrain_volume(
       volume.height != static_cast<std::size_t>(kChunkSizeY)) {
     return import_error(
         TerrainImportError::dimensions_mismatch,
-        "terrain volume must be exactly 128x128x64; the game does not resample");
+        "terrain volume must be exactly 256x256x64; the game does not resample");
   }
 
   try {
