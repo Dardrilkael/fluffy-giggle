@@ -1012,10 +1012,13 @@ void apply_fluvial_terrain_shaping(
             const double bank_radius = radii[1];
             const double floodplain_radius = radii[2];
             const double runoff = runoff_factor(river.accumulation, threshold);
-            const double order = static_cast<double>(river.stream_order);
+            const double order = static_cast<double>(
+                std::min<std::uint8_t>(river.stream_order, 8u));
 
+            // Keep incision concentrated in the active channel; bank and
+            // floodplain shaping are separate, progressively wider profiles.
             const double channel_profile = 1.0 - smoothstep(
-                channel_radius * 0.40, bank_radius, distance);
+                channel_radius * 0.45, channel_radius, distance);
             const double channel_depth =
                 plan.hydrology.river_channel_depth_fraction *
                 (0.40 + 0.15 * std::max(0.0, order - 1.0)) *
@@ -1052,7 +1055,8 @@ void apply_fluvial_terrain_shaping(
             const double runoff = runoff_factor(river.accumulation, threshold);
             const auto radii = river_radii(river, scale, threshold);
             const double fan_radius = radii[2] *
-                (1.8 + 0.18 * static_cast<double>(river.stream_order));
+                (1.8 + 0.18 * static_cast<double>(
+                    std::min<std::uint8_t>(river.stream_order, 8u)));
             const double fan_d = fan_distance.distance[i];
             if (fan_d < fan_radius && fan_radius > 0.0) {
                 const std::size_t seed = fan_seed_cell;
@@ -1075,7 +1079,8 @@ void apply_fluvial_terrain_shaping(
                     : 1.0;
                 const double profile = 1.0 - fan_d / fan_radius;
                 shaped += 0.00042 *
-                    (0.5 + 0.12 * river.stream_order) * runoff *
+                    (0.5 + 0.12 * static_cast<double>(
+                        std::min<std::uint8_t>(river.stream_order, 8u))) * runoff *
                     profile * profile * forward;
             }
         }
