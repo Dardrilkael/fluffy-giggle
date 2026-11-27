@@ -21,6 +21,7 @@ ChannelRole parse_role(const std::string& s) {
   if(s=="biome_id") return ChannelRole::BiomeId;
   if(s=="water_mask") return ChannelRole::WaterMask;
   if(s=="density") return ChannelRole::Density;
+  if(s=="biome_water_flags") return ChannelRole::BiomeWaterFlags;
   throw std::runtime_error("unknown channel role: "+s);
 }
 }
