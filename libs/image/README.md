@@ -15,6 +15,9 @@ Example use:
     }
     // image->pixels is tightly packed RGBA8, top-to-bottom.
 
+The write_rgba8_png_file function writes exact interleaved RGBA8 bytes to a
+lossless PNG without color conversion or alpha premultiplication.
+
 The generic load_file and load_memory functions can preserve the source channel
 count or request 1, 2, 3, or 4 output channels. The strict RGBA entry points
 also check that the encoded source itself had four channels; RGB/grayscale
