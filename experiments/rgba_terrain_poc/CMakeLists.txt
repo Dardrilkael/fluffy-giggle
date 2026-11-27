@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(rgba_terrain_poc LANGUAGES CXX)
 option(RGBA_TERRAIN_BUILD_TESTS "Build RGBA terrain tests" ON)
-add_library(rgba_terrain_core src/rgba_terrain.cpp)
+add_library(rgba_terrain_core src/rgba_terrain.cpp src/metadata.cpp)
 target_include_directories(rgba_terrain_core PUBLIC include)
 target_compile_features(rgba_terrain_core PUBLIC cxx_std_20)
 if(MSVC)
