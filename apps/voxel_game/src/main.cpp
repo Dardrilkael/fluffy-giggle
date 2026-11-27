@@ -265,9 +265,9 @@ class VoxelApp final : public ws::ui::App {
         has_terrain_png || has_terrain_meta || has_terrain_voxels;
     const float bench_seconds = voxel::bench::bench_seconds_from_env();
     entry_menu_ = !terrain_requested && bench_seconds <= 0.0f;
-    if (!terrain_requested) {
+    if (!terrain_requested && !entry_menu_) {
       world_.generate(kSeed);
-    } else {
+    } else if (terrain_requested) {
       if (!has_terrain_png || !has_terrain_meta) {
         ws::core::error(
             "voxel: RGBA terrain import requires "
@@ -326,21 +326,27 @@ class VoxelApp final : public ws::ui::App {
         return;
       }
     }
-    const float generation_ms = voxel::perf::ms_since(generation_start);
-    const int sx = voxel::kWorldSizeX / 2;
-    const int sz = voxel::kWorldSizeZ / 2;
-    const int surface = world_.surface_height(sx, sz);
-    const Vec3 spawn{static_cast<float>(sx) + 0.5f,
-                     static_cast<float>(surface) + 1.0f +
-                         player_.tuning_half_height(),
-                     static_cast<float>(sz) + 0.5f};
+    world_loaded_ = !entry_menu_;
+    if (!entry_menu_) {
+      const float generation_ms = voxel::perf::ms_since(generation_start);
 
-    // The player queries the world's chunk storage directly. Terrain is
-    // not represented by rigid bodies; the general physics world remains
-    // available to other gameplay entities when they are introduced.
-    if (!player_.spawn(spawn)) {
-      dead_ = true;
-      return;
+      // The player queries the world's chunk storage directly. Terrain is
+      // not represented by rigid bodies; the general physics world remains
+      // available to other gameplay entities when they are introduced.
+      spawn_at_world_center();
+
+      // --- the chunk meshes (the renderer's one-time upload) -----------------
+      voxel::perf::FrameTimings startup_metrics{};
+      voxel_renderer_.rebuild_all(world_, &startup_metrics);
+      constexpr float kChunkCount = static_cast<float>(
+          voxel::kWorldChunksX * voxel::kWorldChunksZ);
+      ws::core::info(
+          "voxel: startup generation {:.2f} ms ({:.3f} ms/chunk); "
+          "CPU meshing {:.2f} ms ({:.3f} ms/chunk); "
+          "CPU upload {:.2f} ms, {} bytes",
+          generation_ms, generation_ms / kChunkCount,
+          startup_metrics.cpu_mesh_ms, startup_metrics.cpu_mesh_ms / kChunkCount,
+          startup_metrics.upload_ms, startup_metrics.upload_bytes);
     }
 
     // Starter supplies make the sandbox immediately playable; all later
@@ -358,19 +364,6 @@ class VoxelApp final : public ws::ui::App {
     } else {
       ws::core::warn("voxel: target outline mesh unavailable");
     }
-
-    // --- the chunk meshes (the renderer's one-time upload) -----------------
-    voxel::perf::FrameTimings startup_metrics{};
-    voxel_renderer_.rebuild_all(world_, &startup_metrics);
-    constexpr float kChunkCount = static_cast<float>(
-        voxel::kWorldChunksX * voxel::kWorldChunksZ);
-    ws::core::info(
-        "voxel: startup generation {:.2f} ms ({:.3f} ms/chunk); "
-        "CPU meshing {:.2f} ms ({:.3f} ms/chunk); "
-        "CPU upload {:.2f} ms, {} bytes",
-        generation_ms, generation_ms / kChunkCount,
-        startup_metrics.cpu_mesh_ms, startup_metrics.cpu_mesh_ms / kChunkCount,
-        startup_metrics.upload_ms, startup_metrics.upload_bytes);
 
     // --- the HUD font -------------------------------------------------------
     font_ = r2d::load_default_font(16.0f,
@@ -830,23 +823,29 @@ class VoxelApp final : public ws::ui::App {
   }
 
   void enter_current_world() {
+    if (!world_loaded_) {
+      generation_status_ = "Load or generate a PNG preview before playing.";
+      return;
+    }
     spawn_at_world_center();
     entry_menu_ = false;
     clicked_ = false;
+    look_dx_ = 0.0f;
+    look_dy_ = 0.0f;
+    have_last_mouse_ = false;
     set_cursor_mode(ws::ui::CursorMode::hidden);
   }
 
-  void load_saved_world_and_play() {
+  void load_saved_world_preview() {
     const auto files = voxel::terrain_world_io::generated_map_files();
     const auto report = voxel::terrain_world_io::import_png_map(world_, files);
     (void)report;
     spawn_at_world_center();
     voxel::perf::FrameTimings rebuild_metrics{};
     voxel_renderer_.rebuild_all(world_, &rebuild_metrics);
-    entry_menu_ = false;
-    clicked_ = false;
-    set_cursor_mode(ws::ui::CursorMode::hidden);
-    ws::core::info("voxel: loaded saved RGBA PNG world from '{}'",
+    world_loaded_ = true;
+    entry_preview_loaded_ = true;
+    ws::core::info("voxel: previewing saved RGBA PNG world from '{}'",
                    files.png.string());
   }
 
@@ -877,8 +876,8 @@ class VoxelApp final : public ws::ui::App {
     generation_in_progress_ = false;
     try {
       generation_job_.get();
-      load_saved_world_and_play();
-      generation_status_ = "Generated PNG saved and loaded. Have fun!";
+      load_saved_world_preview();
+      generation_status_ = "New PNG preview ready. Press PLAY WORLD to enter.";
     } catch (const std::exception& exception) {
       generation_status_ = std::string("Generation/load failed: ") +
                            exception.what();
@@ -917,16 +916,17 @@ class VoxelApp final : public ws::ui::App {
       start_world_generation();
     } else if (!generation_in_progress_ &&
                entry_hit(buttons[1], mouse_x_, mouse_y_)) {
-      enter_current_world();
-    } else if (!generation_in_progress_ &&
-               entry_hit(buttons[2], mouse_x_, mouse_y_)) {
       try {
-        load_saved_world_and_play();
-        generation_status_ = "Loaded the saved PNG world.";
+        load_saved_world_preview();
+        generation_status_ = "Saved PNG preview loaded. Press PLAY WORLD to enter.";
       } catch (const std::exception& exception) {
         generation_status_ = std::string("Could not load saved map: ") +
                              exception.what();
       }
+    } else if (!generation_in_progress_ &&
+               world_loaded_ &&
+               entry_hit(buttons[2], mouse_x_, mouse_y_)) {
+      enter_current_world();
     } else if (!generation_in_progress_ &&
                entry_hit(buttons[3], mouse_x_, mouse_y_)) {
       request_stop();
@@ -993,13 +993,14 @@ class VoxelApp final : public ws::ui::App {
     const auto buttons = entry_buttons(frame);
     const bool saved = saved_map_available();
     const char* labels[4] = {
-        generation_in_progress_ ? "GENERATING WORLD..." : "GENERATE NEW WORLD  /  PLAY",
-        "PLAY CURRENT WORLD",
-        "LOAD SAVED PNG WORLD",
+        generation_in_progress_ ? "GENERATING PNG..." : "GENERATE / REGENERATE PNG",
+        "LOAD SAVED PNG  /  PREVIEW",
+        "PLAY WORLD",
         "QUIT GAME"};
     for (std::size_t i = 0; i < buttons.size(); ++i) {
       const bool disabled = (generation_in_progress_ && i != 0u) ||
-                            (i == 2u && !saved);
+                            (i == 1u && !saved) ||
+                            (i == 2u && !world_loaded_);
       const bool hovered = !disabled &&
           entry_hit(buttons[i], mouse_x_, mouse_y_);
       draw_entry_button(buttons[i], labels[i], hovered, disabled);
@@ -1007,7 +1008,7 @@ class VoxelApp final : public ws::ui::App {
 
     (void)r2d::draw_text(
         panel.x + 28.0f, panel.y + 445.0f,
-        "256 x 256 terrain  |  PNG + metadata saved in worlds/generated-world/",
+        "Preview a saved/generated PNG, then press PLAY WORLD.",
         font_, r2d::rgba(155, 170, 160));
     if (!generation_status_.empty()) {
       (void)r2d::draw_text(panel.x + 28.0f, panel.y + 466.0f,
@@ -1019,18 +1020,24 @@ class VoxelApp final : public ws::ui::App {
   void draw_entry_menu_frame(const r2d::FrameSize& frame) {
     r2d::begin();
     r2d::set_layer(0);
-    r2d::draw_quad(0.0f, 0.0f, frame.width, frame.height,
-                   r2d::rgba(135, 196, 250));
+    r2d::draw_quad(
+        0.0f, 0.0f, frame.width, frame.height,
+        entry_preview_loaded_ ? r2d::rgba(135, 196, 250)
+                              : r2d::rgba(14, 21, 25));
     r2d::end();
 
-    const auto camera = voxel::begin_scene(
-        player_, settings_.fov_degrees, settings_.render_distance,
-        benchmark_shadow_flags_.cast);
-    voxel::draw_world(voxel_renderer_, tile_textures_, camera,
-                      frame.width / frame.height, nullptr,
-                      benchmark_shadow_flags_.cast,
-                      benchmark_shadow_flags_.receive);
-    r2d::end();
+    // A saved/generated PNG is shown as a first-person preview behind the
+    // title screen. A fresh launch draws no world until the user requests it.
+    if (entry_preview_loaded_) {
+      const auto camera = voxel::begin_scene(
+          player_, settings_.fov_degrees, settings_.render_distance,
+          benchmark_shadow_flags_.cast);
+      voxel::draw_world(voxel_renderer_, tile_textures_, camera,
+                        frame.width / frame.height, nullptr,
+                        benchmark_shadow_flags_.cast,
+                        benchmark_shadow_flags_.receive);
+      r2d::end();
+    }
 
     r2d::begin();
     r2d::set_layer(10);
@@ -1522,10 +1529,13 @@ class VoxelApp final : public ws::ui::App {
   bool paused_ = false;
   // The title screen owns generation/loading until the player selects a world.
   bool entry_menu_ = false;
+  bool world_loaded_ = false;
+  bool entry_preview_loaded_ = false;
   std::uint32_t world_seed_ = kSeed;
   bool generation_in_progress_ = false;
   std::future<void> generation_job_{};
-  std::string generation_status_ = "Choose a seed, generate a map, then play.";
+  std::string generation_status_ =
+      "No world loaded. Load a saved PNG or generate a new map.";
   float mouse_x_ = 0.0f;
   float mouse_y_ = 0.0f;
   bool clicked_ = false;
