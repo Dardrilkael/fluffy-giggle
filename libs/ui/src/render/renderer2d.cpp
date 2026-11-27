@@ -16,7 +16,7 @@
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Weverything"
 #endif
-#include <stb_image.h>  // declarations only; the implementation TU is stb_impl.cpp
+#include <stb_image.h>  // declarations; symbols are supplied by ws::image
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #elif defined(__clang__)
