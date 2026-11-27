@@ -4,6 +4,7 @@
 #include <doctest/doctest.h>
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <stdexcept>
 #include <utility>
@@ -47,6 +48,55 @@ TEST_CASE("world sampler is deterministic at global coordinates") {
     CHECK(first.precipitation <= 1.0);
     CHECK(first.biome_id == 0 || (first.biome_id >= 8 && first.biome_id <= 27));
     CHECK(first.ecosystem_id != 0);
+}
+
+TEST_CASE("gradient terrain fields vary spatially and remain order-independent") {
+    auto plan = make_default_world_plan(256, 256, 0x6EAD1E17u);
+    plan.scales.continent_scale = 160.0;
+    plan.scales.province_scale = 64.0;
+    plan.scales.ecosystem_scale = 40.0;
+    plan.scales.sub_biome_scale = 18.0;
+    plan.scales.habitat_scale = 6.0;
+    plan.hydrology.routing_cell_scale = 12.0;
+    plan.validate();
+
+    const WorldSampler sampler(std::move(plan));
+    constexpr std::array<std::array<std::int64_t, 2>, 9> coordinates{{
+        {{24, 24}}, {{88, 24}}, {{152, 24}},
+        {{24, 88}}, {{88, 88}}, {{152, 88}},
+        {{24, 152}}, {{88, 152}}, {{152, 152}},
+    }};
+
+    std::array<WorldSample, coordinates.size()> forward{};
+    std::array<WorldSample, coordinates.size()> reverse{};
+    for (std::size_t i = 0; i < coordinates.size(); ++i) {
+        forward[i] = sampler.sample(coordinates[i][0], coordinates[i][1]);
+        const std::size_t reverse_index = coordinates.size() - 1u - i;
+        reverse[reverse_index] = sampler.sample(
+            coordinates[reverse_index][0], coordinates[reverse_index][1]);
+    }
+
+    for (std::size_t i = 0; i < coordinates.size(); ++i) {
+        CHECK(forward[i] == reverse[i]);
+        CHECK(forward[i].normalized_elevation >= 0.0);
+        CHECK(forward[i].normalized_elevation <= 1.0);
+    }
+
+    double horizontal_variation = 0.0;
+    double vertical_variation = 0.0;
+    for (std::size_t row = 0; row < 3; ++row) {
+        for (std::size_t column = 0; column < 2; ++column) {
+            const std::size_t index = row * 3u + column;
+            horizontal_variation += std::abs(
+                forward[index + 1u].normalized_elevation -
+                forward[index].normalized_elevation);
+            vertical_variation += std::abs(
+                forward[index + 3u].normalized_elevation -
+                forward[index].normalized_elevation);
+        }
+    }
+    CHECK(horizontal_variation > 1.0e-5);
+    CHECK(vertical_variation > 1.0e-5);
 }
 
 TEST_CASE("world sampler rejects coordinates outside finite world bounds") {
