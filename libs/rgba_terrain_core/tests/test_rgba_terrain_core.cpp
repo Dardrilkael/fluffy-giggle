@@ -110,6 +110,7 @@ TEST_CASE("RGBA terrain image decoding and voxel reconstruction") {
     const auto generated_again = generate_synthetic_map(64, 64, 0xC0FFEEu, generated_settings);
     CHECK(generated.pixels.size() == 64u * 64u);
     bool has_water = false, has_river = false, has_multiple_heights = false;
+    std::size_t river_columns = 0;
     const auto first_height = (static_cast<unsigned>(generated.pixels[0].r) << 8u) | generated.pixels[0].g;
     for (std::size_t i = 0; i < generated.pixels.size(); ++i) {
         const auto& pixel = generated.pixels[i];
@@ -118,9 +119,19 @@ TEST_CASE("RGBA terrain image decoding and voxel reconstruction") {
         const auto h = (static_cast<unsigned>(pixel.r) << 8u) | pixel.g;
         has_multiple_heights = has_multiple_heights || h != first_height;
         has_water = has_water || (pixel.a & 0x80u) != 0;
-        has_river = has_river || (pixel.a & 0x20u) != 0;
+        const bool river = (pixel.a & 0x20u) != 0;
+        has_river = has_river || river;
+        river_columns += river ? 1u : 0u;
+        if (river) {
+            // River centerline is carved to a channel bed below sea level.
+            const float normalized = static_cast<float>(h) / 65535.0f;
+            const float world_height = generated_settings.min_height +
+                normalized * (generated_settings.max_height - generated_settings.min_height);
+            CHECK(world_height <= static_cast<float>(generated_settings.sea_level));
+        }
     }
     CHECK(has_multiple_heights && has_water && has_river);
+    CHECK(river_columns > 0 && river_columns < generated.pixels.size());
 
     const auto generated_columns = generate_columns(generated, packed_layout, generated_settings);
     CHECK(generated_columns.columns.size() == generated.pixels.size());
