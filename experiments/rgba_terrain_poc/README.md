@@ -1,95 +1,89 @@
 # RGBA Terrain Generator POC
 
-A standalone C++20 experiment that turns a purpose-authored RGBA data image
-into a real, dense 3D voxel volume. It is separate from the AI terrain
-analyzer and does not modify or invoke the game application. Every source
-pixel remains at its original (x,z) coordinate; there is no global
-feature-vector or tile-statistics reduction.
+This standalone C++20 experiment generates deterministic RGBA terrain data maps,
+writes them as lossless PNGs, reloads those PNGs, and expands the exact decoded
+pixels into a dense 3D voxel volume. It does not invoke or modify the game app.
 
-## Image and metadata contract
+## Generate a data map
 
-Use a lossless, 8-bit RGBA PNG, not a photograph. Preserve exact channel
-values: disable color-profile conversion, gamma correction, palette
-optimization, and any editor operation that changes pixel values. The
-experiment loads images through the shared ws::image library, whose strict
-RGBA entry point rejects sources that are not encoded as four channels.
-
-Each image has a matching .rgba-terrain sidecar that defines channel meanings.
-Supported roles: height8, height16_msb, height16_lsb, material_id, biome_id,
-water_mask, density, and unused. A layout must contain either one Height8
-channel or one Height16 MSB/LSB pair. Other roles can be assigned to any
-remaining channels, at most once each.
-
-Example sidecar:
-
-    channel.r=height16_msb
-    channel.g=height16_lsb
-    channel.b=material_id
-    channel.a=water_mask
-    min_height=0
-    max_height=46
-    volume_height=64
-    sea_level=12
-    subsurface_depth=4
-    water_threshold=128
-
-Height is normalized over 255 or 65535 levels and mapped into the configured
-world-height range. The top height is inclusive: a height of 10 creates solid
-voxels at y=0 through y=10.
-
-Optional metadata settings control volume height, sea level, water threshold,
-subsurface depth, and default/top/subsurface/deep/water material IDs. Defaults
-are defined in TerrainSettings in the public header. The volume height must
-be greater than max_height; sea_level must be inside the volume.
-
-## Voxel volume model
-
-The generator performs two explicit stages:
-
-1. Decode each image pixel into a spatial column containing x/z, surface
-   height, material ID, biome ID, water mask, and density.
-2. Expand those columns into a dense 3D volume. Each voxel stores four bytes:
-   kind (air/solid/water), material ID, biome ID, and density.
-
-Solid columns get a surface material at the top, a configurable subsurface
-band immediately below it, and a deep material underneath. If the water mask
-meets its threshold, water fills empty cells above the terrain through sea
-level. Air cells remain zero-initialized. Biome and density data are preserved
-on solid cells; water cells receive full density.
-
-Voxel indexing is X-fastest, then Z, then Y:
-`x + z*width + y*width*depth`. This makes each horizontal layer contiguous,
-which is convenient for image-to-volume generation and later mesh extraction.
-The current output is a dense volume, not chunk storage; sparse storage and
-streaming are deliberately deferred.
-
-## Build
-
-See HOW_TO_COMPILE.md or run build.ps1 from the repository root:
+From the repository root, build with:
 
     .\experiments\rgba_terrain_poc\build.ps1
 
-The script builds only the core + image libraries and this experiment. It
-disables applications, then builds and runs both image-decoder and terrain
-tests. It does not compile or modify other applications.
+Then run:
 
-## Run
+    rgba_terrain_poc generate 256 256 0xC0FFEE terrain.png terrain.rgba-terrain terrain.rgba-voxels
 
-    rgba_terrain_poc input.png input.rgba-terrain output.rgba-voxels
+The command produces three files:
+- `terrain.png`: a machine-authored RGBA8 data map, not a colorized preview
+- `terrain.rgba-terrain`: explicit channel and voxel-generation metadata
+- `terrain.rgba-voxels`: the resulting dense 3D voxel volume
 
-The output is little-endian `RGAVOX01` v1: 8-byte magic, uint32 width, depth,
-and height, followed by four bytes per voxel (kind, material, biome, density)
-in X-fastest, then Z, then Y order.
+The map is deterministic for a given size and seed. Its current synthetic fields
+include broad continental variation, hills, ridged mountain regions, simple
+temperature/moisture biome classification, and a meandering river corridor.
+The river is a deliberately simple synthetic mask and height cut, not a
+hydrological drainage simulation.
 
-## Current scope and next steps
+## RGBA channel packing
 
-This stage generates a complete 3D voxel volume from the RGBA spatial fields.
-It does not yet generate caves, ore, trees, erosion, or hydrological river
-networks; those should be separate passes that consume the same spatial
-fields instead of distorting or discarding image information. It also does
-not yet convert the dense volume into the game's chunk format or mesh.
+The generated PNG uses every channel:
 
-The next integration step is a tested adapter from this volume into the
-existing chunk/block representation, followed by chunk-boundary and memory
-considerations. The game runtime and its current procedural generator remain
-unchanged.
+| Channel | Data |
+|---|---|
+| R | 16-bit surface height, most-significant byte |
+| G | 16-bit surface height, least-significant byte |
+| B | Surface material ID |
+| A bits 0..2 | Biome ID |
+| A bit 3 | Forest flag |
+| A bit 4 | Mountain flag |
+| A bit 5 | River flag |
+| A bit 6 | Reserved |
+| A bit 7 | Water flag |
+
+Height is stored as a normalized unsigned 16-bit value and mapped to the
+world-height range in the sidecar. The generated map currently uses height
+0..56 in a 64-voxel-high volume. PNG is written losslessly and then decoded
+again before voxel generation, so the voxel stage consumes the persisted
+channel values.
+
+The metadata role `biome_water_flags` decodes alpha into the biome ID and
+feature flags. It cannot be combined with separate `biome_id` or
+`water_mask` roles in the same layout.
+
+## Voxel volume
+
+Each source pixel keeps its exact X/Z location and becomes one terrain column.
+The volume generator fills solid voxels from the base through the inclusive
+surface height, applies surface/subsurface/deep material IDs, and fills water
+above flagged low terrain through sea level.
+
+Each voxel is five bytes: kind (air/solid/water), material ID, biome ID,
+density, and feature flags. Indexing is X-fastest, then Z, then Y:
+`x + z*width + y*width*depth`.
+
+The binary file is little-endian `RGAVOX02`: 8-byte magic, uint32 width,
+depth, and height, then five bytes per voxel in the same X/Z/Y order.
+
+## Convert an existing data map
+
+    rgba_terrain_poc convert input.png input.rgba-terrain output.rgba-voxels
+
+Input must be an 8-bit RGBA PNG. The strict image loader rejects RGB,
+grayscale, and 16-bit-per-channel inputs rather than silently changing them.
+For 16-bit height, pack the high and low bytes into separate RGBA channels.
+
+## Build and tests
+
+The PowerShell script configures a subset build containing the core and
+shared image library, disables applications, builds this experiment, and runs
+the image and terrain tests. It does not compile or modify other applications.
+See HOW_TO_COMPILE.md for the manual CMake commands.
+
+## Current limitations
+
+This is a controlled synthetic map generator, not the planned AI terrain
+generator. Caves, ores, vegetation, erosion, drainage simulation, chunk
+conversion, and meshing are not implemented in this stage. The next useful
+validation is to inspect the generated data maps and test whether additional
+spatial fields can be packed without losing local structure.
