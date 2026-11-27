@@ -47,6 +47,11 @@ target_link_libraries(ws_ui PRIVATE ws_ui_gui)
 get_target_property(ui_sources ws_ui SOURCES)
 if(ui_sources)
   list(REMOVE_ITEM ui_sources ${ui_gui_srcs})
+  # stb_impl.cpp remains a combined implementation TU for tests/apps that
+  # compile it directly. The ws::ui archive uses the font-only TU instead;
+  # stb_image comes from its ws::image dependency.
+  list(REMOVE_ITEM ui_sources
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/text/stb_impl.cpp")
   if(ANDROID)
     list(REMOVE_ITEM ui_sources
       "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/window_glfw.cpp")
