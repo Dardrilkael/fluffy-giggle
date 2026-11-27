@@ -7,6 +7,7 @@
 #include <limits>
 #include <queue>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 
 namespace ws::rgba_terrain_core {
@@ -449,6 +450,8 @@ struct DrainageRouting {
     std::vector<double> filled_elevation;
     std::vector<std::size_t> upstream_order;
     std::vector<DrainageDirection> direction;
+    // Every land cell inherits the ID of its terminal ocean/boundary outlet.
+    std::vector<std::uint32_t> watershed_ids;
 };
 
 DrainageRouting build_drainage_routing(
@@ -610,7 +613,36 @@ DrainageRouting build_drainage_routing(
             }
             return lhs > rhs;
         });
+    // Propagate outlet IDs from sinks upstream. Reverse topological order
+    // guarantees each downstream basin ID is available before its tributaries.
+    routing.watershed_ids.assign(count, 0u);
+    for (std::size_t i = 0; i < count; ++i) {
+        if (routing.direction[i] == DrainageDirection::Sink) {
+            routing.watershed_ids[i] = static_cast<std::uint32_t>(i + 1u);
+        }
+    }
+    for (auto it = routing.upstream_order.rbegin();
+         it != routing.upstream_order.rend(); ++it) {
+        const std::size_t i = *it;
+        const std::size_t downstream = drainage_downstream_index(
+            i, routing.direction[i], width, height);
+        if (downstream != count) {
+            routing.watershed_ids[i] = routing.watershed_ids[downstream];
+        }
+    }
     return routing;
+}
+
+struct DrainageMetrics {
+    std::vector<double> accumulation;
+    std::vector<std::uint8_t> stream_order;
+};
+
+RiverClass classify_river(std::uint8_t order) {
+    if (order == 0u) return RiverClass::None;
+    if (order <= 2u) return RiverClass::Stream;
+    if (order <= 4u) return RiverClass::River;
+    return RiverClass::MajorRiver;
 }
 
 std::size_t drainage_downstream_index(
@@ -636,6 +668,71 @@ std::size_t drainage_downstream_index(
     }
     return static_cast<std::size_t>(z) * width +
            static_cast<std::size_t>(x);
+}
+
+DrainageMetrics accumulate_drainage(
+    const DrainageRouting& routing,
+    const std::vector<double>& precipitation,
+    const std::vector<bool>& ocean,
+    std::size_t width, std::size_t height,
+    double stream_threshold) {
+    DrainageMetrics metrics;
+    const std::size_t count = precipitation.size();
+    if (width == 0 || height == 0 ||
+        width > std::numeric_limits<std::size_t>::max() / height ||
+        count != width * height || ocean.size() != count ||
+        routing.direction.size() != count ||
+        routing.upstream_order.size() != count) {
+        return metrics;
+    }
+
+    metrics.accumulation.resize(count, 0.0);
+    metrics.stream_order.resize(count, 0u);
+    std::vector<std::uint8_t> maximum_upstream_order(count, 0u);
+    std::vector<std::uint16_t> maximum_order_tributaries(count, 0u);
+    for (std::size_t i = 0; i < count; ++i) {
+        // Rainfall is the only runoff source. Basin area alone never creates
+        // discharge: a dry contributing cell adds correspondingly little.
+        metrics.accumulation[i] = ocean[i] ? 0.0 : precipitation[i];
+    }
+
+    // Flow accumulation and Strahler order use the same upstream-first DAG.
+    for (const std::size_t i : routing.upstream_order) {
+        const bool stream = !ocean[i] &&
+            metrics.accumulation[i] >= stream_threshold;
+        if (stream) {
+            const std::uint8_t maximum = maximum_upstream_order[i];
+            const std::uint16_t equal_count =
+                maximum_order_tributaries[i];
+            const unsigned order = maximum == 0u
+                ? 1u
+                : static_cast<unsigned>(maximum) +
+                    (equal_count >= 2u ? 1u : 0u);
+            metrics.stream_order[i] = static_cast<std::uint8_t>(
+                std::min(order, 255u));
+        }
+
+        const std::size_t downstream = drainage_downstream_index(
+            i, routing.direction[i], width, height);
+        if (downstream == count) {
+            continue;
+        }
+        metrics.accumulation[downstream] += metrics.accumulation[i];
+
+        const std::uint8_t order = metrics.stream_order[i];
+        if (order == 0u) {
+            continue;
+        }
+        if (order > maximum_upstream_order[downstream]) {
+            maximum_upstream_order[downstream] = order;
+            maximum_order_tributaries[downstream] = 1u;
+        } else if (order == maximum_upstream_order[downstream] &&
+                   maximum_order_tributaries[downstream] <
+                       std::numeric_limits<std::uint16_t>::max()) {
+            ++maximum_order_tributaries[downstream];
+        }
+    }
+    return metrics;
 }
 
 HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
