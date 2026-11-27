@@ -12,13 +12,14 @@ struct MapFiles {
   std::filesystem::path metadata;
   std::filesystem::path channel_preview;
   std::filesystem::path rgb_preview;
+  std::filesystem::path diagnostics_directory;
 };
 
 // Stable app-data location used by the title screen's Generate/Load actions.
 // On Android the app changes its working directory to internalDataPath.
 [[nodiscard]] MapFiles generated_map_files();
 
-// Generates the authoritative RGBA v2 PNG and its sidecar. The game has a
+// Generates the authoritative RGBA v2 PNG, sidecar and optional diagnostic PNGs. The game has a
 // fixed 256x256x64 volume, so the map is generated at native X/Z resolution.
 void generate_png_map(const MapFiles& files, std::uint32_t seed);
 
