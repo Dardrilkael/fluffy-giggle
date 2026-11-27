@@ -34,8 +34,10 @@ using ws::rgba_terrain_core::VoxelVolume;
 [[nodiscard]] bool map_biome(std::uint8_t biome, Biome& result) noexcept {
   // Preserve the detailed biome identity in the game metadata. The
   // original four broad values remain stable for old v1 maps.
-  if (biome > static_cast<std::uint8_t>(Biome::salt_marsh)) return false;
-  result = static_cast<Biome>(biome);
+  if (biome > 20) return false;
+  // Keep the original broad IDs 0..3 stable for existing game content.
+  // Detailed generator biomes occupy the appended enum range 4..23.
+  result = static_cast<Biome>(biome == 0 ? 0 : biome + 3);
   return true;
 }
 

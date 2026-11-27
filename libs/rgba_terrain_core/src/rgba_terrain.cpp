@@ -98,7 +98,7 @@ void RgbaImage::validate() const {
 }
 
 void ChannelLayout::validate() const {
-    std::array<unsigned, 9> counts{};
+    std::array<unsigned, 10> counts{};
     for (const ChannelRole role : channels) {
         const auto index = static_cast<std::size_t>(role);
         if (index >= counts.size()) {

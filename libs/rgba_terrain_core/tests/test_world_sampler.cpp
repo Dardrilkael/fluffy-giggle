@@ -45,7 +45,7 @@ TEST_CASE("world sampler is deterministic at global coordinates") {
     CHECK(first.humidity <= 1.0);
     CHECK(first.precipitation >= 0.0);
     CHECK(first.precipitation <= 1.0);
-    CHECK(first.biome_id <= 7);
+    CHECK(first.biome_id <= 20);
     CHECK(first.ecosystem_id != 0);
 }
 
