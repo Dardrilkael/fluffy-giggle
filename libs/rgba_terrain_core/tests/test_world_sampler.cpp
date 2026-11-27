@@ -179,6 +179,40 @@ TEST_CASE("RGBA regions stitch exactly when generated as separate chunks") {
     CHECK(volume.height == settings.volume_height);
 }
 
+TEST_CASE("coarse hydrology remains identical across separately generated regions") {
+    auto plan = make_default_world_plan(128, 128, 0xD4A1A6Eu);
+    plan.hydrology.routing_cell_scale = 8.0;
+    plan.hydrology.river_accumulation_threshold = 2.0;
+    const WorldSampler sampler(std::move(plan));
+
+    TerrainSettings settings;
+    settings.min_height = 0.0f;
+    settings.max_height = 56.0f;
+    settings.volume_height = 64;
+    settings.sea_level = 12;
+
+    const auto combined = sampler.generate_rgba_region(16, 16, 32, 24, settings);
+    const auto left = sampler.generate_rgba_region(16, 16, 16, 24, settings);
+    const auto right = sampler.generate_rgba_region(32, 16, 16, 24, settings);
+    for (std::size_t z = 0; z < 24; ++z) {
+        for (std::size_t x = 0; x < 16; ++x) {
+            const auto& whole_left = combined.at(x, z);
+            const auto& split_left = left.at(x, z);
+            CHECK(whole_left.r == split_left.r);
+            CHECK(whole_left.g == split_left.g);
+            CHECK(whole_left.b == split_left.b);
+            CHECK(whole_left.a == split_left.a);
+
+            const auto& whole_right = combined.at(x + 16, z);
+            const auto& split_right = right.at(x, z);
+            CHECK(whole_right.r == split_right.r);
+            CHECK(whole_right.g == split_right.g);
+            CHECK(whole_right.b == split_right.b);
+            CHECK(whole_right.a == split_right.a);
+        }
+    }
+}
+
 TEST_CASE("sampler can generate a small region near the edge of a huge world") {
     const WorldSampler sampler(make_default_world_plan(
         4000000000ll, 2000000000ll, 0xFACE1234));
