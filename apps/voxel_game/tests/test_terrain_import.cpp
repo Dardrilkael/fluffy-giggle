@@ -31,7 +31,17 @@ TEST_CASE("terrain import: maps generic IDs and preserves X/Z and column metadat
   auto volume = make_empty_game_volume();
 
   // Exercise all supported game mappings, including positions on both sides
-  // of the x=16 chunk seam and a water cell above the ground.
+  // of the x=16 chunk seam and a water cell above the ground. Biome and
+  // feature metadata is repeated through each column, as the core generator
+  // writes it, and the game stores it once per X/Z column.
+  for (std::size_t y = 0; y < volume.height; ++y) {
+    volume.at(15, y, 20).biome_id = 1;
+    volume.at(15, y, 20).feature_flags = 0x08;
+    volume.at(16, y, 20).biome_id = 2;
+    volume.at(16, y, 20).feature_flags = 0x10;
+    volume.at(17, y, 20).biome_id = 3;
+    volume.at(17, y, 20).feature_flags = 0x20;
+  }
   volume.at(15, 4, 20) = {VoxelKind::Solid, 1, 1, 255, 0x08};
   volume.at(16, 4, 20) = {VoxelKind::Solid, 2, 2, 255, 0x10};
   volume.at(17, 4, 20) = {VoxelKind::Solid, 3, 3, 255, 0x20};
