@@ -10,19 +10,7 @@
 #include "text/default_font.h"
 #include "text/font.h"
 
-#if defined(_MSC_VER)
-#pragma warning(push, 0)
-#elif defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Weverything"
-#endif
-#include <stb_image.h>  // declarations; symbols are supplied by ws::image
-#if defined(_MSC_VER)
-#pragma warning(pop)
-#elif defined(__clang__)
-#pragma clang diagnostic pop
-#endif
-
+#include <ws/image/image.hpp>
 #include <ws/core/log.hpp>
 
 namespace ws::ui::r2d {
@@ -828,23 +816,20 @@ Texture Renderer2D::load_texture(const char* path) {
                        "GPU context is alive", path);
         return texture;
     }
-    int width = 0;
-    int height = 0;
-    // Force 4 B/px: the registry is R8G8B8A8_UNORM (matches the UNORM
-    // swapchain and the ImGui font atlas, so colors render as authored).
-    stbi_uc* pixels = stbi_load(path, &width, &height, nullptr, STBI_rgb_alpha);
-    if (pixels == nullptr) {
+    // Force 4 B/px for the R8G8B8A8_UNORM texture registry.
+    auto decoded = ws::image::load_file(
+        path, ws::image::LoadOptions{ws::image::Channels::rgba});
+    if (!decoded) {
         ws::core::warn("ui: r2d::load_texture('{}') failed - {} (using white)",
-                       path, stbi_failure_reason());
+                       path, decoded.error().message);
         return texture;
     }
-    if (!upload_texture(pixels, static_cast<uint32_t>(width),
-                       static_cast<uint32_t>(height), &texture)) {
+    if (!upload_texture(decoded->pixels.data(), decoded->width,
+                       decoded->height, &texture)) {
         ws::core::warn("ui: r2d::load_texture('{}') upload failed - using "
                        "white", path);
         texture = Texture{};
     }
-    stbi_image_free(pixels);
     return texture;
 }
 
@@ -867,26 +852,23 @@ Texture Renderer2D::load_texture_from_memory(const void* data,
                        size);
         return texture;
     }
-    int width = 0;
-    int height = 0;
-    // Force 4 B/px: the registry is R8G8B8A8_UNORM (matches the UNORM
-    // swapchain and the ImGui font atlas, so colors render as authored).
-    stbi_uc* pixels = stbi_load_from_memory(
-        static_cast<const stbi_uc*>(data), static_cast<int>(size), &width,
-        &height, nullptr, STBI_rgb_alpha);
-    if (pixels == nullptr) {
+    // Force 4 B/px for the R8G8B8A8_UNORM texture registry.
+    const auto* encoded = static_cast<const std::uint8_t*>(data);
+    auto decoded = ws::image::load_memory(
+        std::span<const std::uint8_t>(encoded, size),
+        ws::image::LoadOptions{ws::image::Channels::rgba});
+    if (!decoded) {
         ws::core::warn("ui: r2d::load_texture_from_memory() failed - {} "
                        "(using white)",
-                       stbi_failure_reason());
+                       decoded.error().message);
         return texture;
     }
-    if (!upload_texture(pixels, static_cast<uint32_t>(width),
-                        static_cast<uint32_t>(height), &texture)) {
+    if (!upload_texture(decoded->pixels.data(), decoded->width,
+                        decoded->height, &texture)) {
         ws::core::warn("ui: r2d::load_texture_from_memory() upload failed "
                        "- using white");
         texture = Texture{};
     }
-    stbi_image_free(pixels);
     return texture;
 }
 
