@@ -20,6 +20,7 @@ set(FETCHCONTENT_QUIET OFF)
 ws_wants(ws_wants_core core)
 ws_wants(ws_wants_math math)
 ws_wants(ws_wants_ui ui)
+ws_wants(ws_wants_image image)
 ws_wants(ws_wants_audio audio)
 ws_wants(ws_wants_net net)
 ws_wants(ws_wants_physics physics)
@@ -122,14 +123,25 @@ FetchContent_Declare(implot
 # tags and branches), so GIT_SHALLOW TRUE + a raw hash fails at checkout
 # with "unable to read tree". The stb repo is small (~20 MB), so a full
 # clone is cheap and always works.
-FetchContent_Declare(stb
-  GIT_REPOSITORY https://github.com/nothings/stb.git
-  GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20
-  SOURCE_SUBDIR _ws_no_cmake)
-foreach(dep vulkan_headers volk vma imgui implot stb)
+foreach(dep vulkan_headers volk vma imgui implot)
   FetchContent_MakeAvailable(${dep})
 endforeach()
 endif()  # ws_wants_ui declares
++
+# stb_image is shared by ws::image and ws::ui. Fetch it whenever either
+# library is part of the configured subset; the implementation itself is
+# owned by ws::image, while the UI keeps its separate stb_truetype TU.
+if(ws_wants_ui OR ws_wants_image)
+  FetchContent_Declare(stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20
+    SOURCE_SUBDIR _ws_no_cmake)
+  FetchContent_MakeAvailable(stb)
+  add_library(stb INTERFACE)
+  add_library(stb::stb ALIAS stb)
+  target_include_directories(stb SYSTEM INTERFACE "${stb_SOURCE_DIR}")
+endif()
+
 
 # Eigen (header-only; backing store for ws::math) - its own fetch, outside
 # the ui family: math builds without ui. SOURCE_SUBDIR _ws_no_cmake keeps
@@ -221,12 +233,6 @@ add_library(implot STATIC
 target_include_directories(implot SYSTEM PUBLIC "${implot_SOURCE_DIR}")
 target_link_libraries(implot PUBLIC imgui)
 
-# --- stb (header-only; stb_image decodes textures for libs/ui's 2D renderer) --
-# The STB_IMAGE_IMPLEMENTATION translation unit lives in libs/ui
-# (src/text/stb_impl.cpp) - the same one-TU rule as VMA's.
-add_library(stb INTERFACE)
-add_library(stb::stb ALIAS stb)
-target_include_directories(stb SYSTEM INTERFACE "${stb_SOURCE_DIR}")
 endif()  # ws_wants_ui targets
 
 # --- Eigen (header-only; backing store for ws::math) -------------------------
