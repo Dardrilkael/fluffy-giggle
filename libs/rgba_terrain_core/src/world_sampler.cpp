@@ -1330,6 +1330,8 @@ HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
         result.direction == DrainageDirection::Sink || cell_drop[target_index] < 1.0e-7;
     result.river = !result.lake && !local_sink &&
                    result.accumulation >= threshold;
+    result.stream_order = result.river ? 1u : 0u;
+    result.river_class = classify_river(result.stream_order);
     return result;
 }
 
@@ -1927,6 +1929,9 @@ WorldSample WorldSampler::sample_impl(std::int64_t world_x,
     result.drainage_direction = hydrology.direction;
     result.watershed_accumulation = hydrology.accumulation;
     result.river_strength = hydrology.river_strength;
+    result.watershed_id = hydrology.watershed_id;
+    result.stream_order = hydrology.stream_order;
+    result.river_class = hydrology.river_class;
     result.lake_depth_m = hydrology.lake_depth_m;
     result.lake_surface_elevation = hydrology.lake_surface_elevation;
     result.is_river = hydrology.river;
@@ -2335,18 +2340,21 @@ RgbaImage WorldSampler::generate_rgba_region(
                 hydrology_diagnostics->mountain_peak_distance.pixels[index] =
                     diagnostic_pixel(mountain_proximity);
 
-                const std::size_t routing_x = std::min(
-                    hydrology_grid.width - 1,
-                    static_cast<std::size_t>(
-                        (origin_x + static_cast<std::int64_t>(x)) /
-                        plan_.hydrology.routing_cell_scale));
-                const std::size_t routing_z = std::min(
-                    hydrology_grid.height - 1,
-                    static_cast<std::size_t>(
-                        (origin_z + static_cast<std::int64_t>(z)) /
-                        plan_.hydrology.routing_cell_scale));
-                const std::size_t routing_index =
-                    routing_z * hydrology_grid.width + routing_x;
+                std::size_t routing_index = 0;
+                if (hydrology_grid.valid) {
+                    const std::size_t routing_x = std::min(
+                        hydrology_grid.width - 1,
+                        static_cast<std::size_t>(
+                            (origin_x + static_cast<std::int64_t>(x)) /
+                            plan_.hydrology.routing_cell_scale));
+                    const std::size_t routing_z = std::min(
+                        hydrology_grid.height - 1,
+                        static_cast<std::size_t>(
+                            (origin_z + static_cast<std::int64_t>(z)) /
+                            plan_.hydrology.routing_cell_scale));
+                    routing_index =
+                        routing_z * hydrology_grid.width + routing_x;
+                }
                 const auto encode_delta = [](double delta, double maximum) {
                     const std::uint8_t channel = diagnostic_gray(
                         maximum > 0.0 ? std::abs(delta) / maximum : 0.0);
