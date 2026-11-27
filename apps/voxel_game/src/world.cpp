@@ -83,8 +83,10 @@ constexpr int kWorldFloor = 1;
 // faces and their atlas tile IDs; direction/plane sweeps then greedily merge
 // cached faces by tile. Equal face textures can merge across block IDs.
 //
-// Face existence preserves the neighbor rule: solid blocks hide solid
-// neighbors; water emits only its top against non-water/non-solid cells.
+// Face existence is material-aware: opaque blocks hide opaque neighbors,
+// but retain faces behind cut-out materials; cut-out blocks hide their own
+// interface against solid neighbors. Water emits only its top against
+// non-water/non-solid cells.
 // Geometry is RENDER space
 // (world.hpp's frame note), winding CCW by the right-hand (u x v) . n
 // test, normals per face direction - all unchanged.
