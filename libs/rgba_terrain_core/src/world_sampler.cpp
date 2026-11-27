@@ -1004,11 +1004,14 @@ HydrologyField evaluate_hydrology(const WorldPlan& plan, double x, double z,
 // Evolve a deterministic finite-world elevation field before final D8
 // routing. Each hydraulic iteration rebuilds the shared drainage graph from
 // the current elevation snapshot, so incision never follows stale channels.
+// Hydraulic erosion follows precipitation-fed stream power and carries
+// sediment only along the shared drainage graph. Routing is rebuilt after
+// every iteration because incision changes the surface.
 void erode_terrain(std::vector<double>& elevation,
                    const std::vector<double>& precipitation,
                    const std::vector<bool>& ocean,
                    std::size_t width, std::size_t height,
-                   double sea_level) {
+                   double sea_level, double stream_threshold) {
     const std::size_t count = elevation.size();
     if (count == 0 || width == 0 || height == 0 ||
         width > std::numeric_limits<std::size_t>::max() / height ||
@@ -1016,44 +1019,24 @@ void erode_terrain(std::vector<double>& elevation,
         precipitation.size() != count || ocean.size() != count) {
         return;
     }
-    const auto index = [width](std::size_t x, std::size_t z) {
-        return z * width + x;
-    };
     const double land_floor = std::min(
         1.0, sea_level + std::min(0.001, (1.0 - sea_level) * 0.25));
     std::vector<double> next_elevation(count);
-    std::vector<double> accumulation(count);
     std::vector<double> sediment(count);
-    std::vector<double> delta(count);
 
     constexpr int hydraulic_iterations = 4;
-    constexpr int thermal_iterations = 2;
-    constexpr double talus_threshold = 0.014;
-    constexpr double thermal_rate = 0.10;
     for (int iteration = 0; iteration < hydraulic_iterations; ++iteration) {
-        // Elevation changes after every hydraulic + thermal pass. Rebuild
-        // priority flood, D8 directions and topological order before routing
-        // the next pass.
         const DrainageRouting routing =
             build_drainage_routing(elevation, ocean, width, height);
+        const DrainageMetrics metrics = accumulate_drainage(
+            routing, precipitation, ocean, width, height, stream_threshold);
         if (routing.direction.size() != count ||
-            routing.upstream_order.size() != count) {
+            routing.upstream_order.size() != count ||
+            metrics.accumulation.size() != count) {
             return;
         }
 
-        std::fill(accumulation.begin(), accumulation.end(), 0.0);
         std::fill(sediment.begin(), sediment.end(), 0.0);
-        for (std::size_t i = 0; i < count; ++i) {
-            accumulation[i] = ocean[i] ? 0.0 : precipitation[i];
-        }
-        for (const std::size_t i : routing.upstream_order) {
-            const std::size_t downstream = drainage_downstream_index(
-                i, routing.direction[i], width, height);
-            if (downstream != count) {
-                accumulation[downstream] += accumulation[i];
-            }
-        }
-
         next_elevation = elevation;
         for (const std::size_t i : routing.upstream_order) {
             if (ocean[i]) {
@@ -1062,12 +1045,15 @@ void erode_terrain(std::vector<double>& elevation,
             const std::size_t downstream = drainage_downstream_index(
                 i, routing.direction[i], width, height);
             if (downstream == count) {
-                // A land outlet in an ocean-free finite world retains the
-                // sediment delivered to it. Ocean outlets are skipped above,
-                // so sediment reaching the sea is exported rather than
-                // deposited onto protected ocean cells.
+                // Land outlets only occur for ocean-free finite worlds.
+                // Retain delivered sediment there instead of losing mass.
                 next_elevation[i] = std::clamp(
                     elevation[i] + sediment[i], land_floor, 1.0);
+                continue;
+            }
+            if (ocean[downstream]) {
+                // Material carried to the ocean is exported. Ocean cells
+                // themselves are never incised or used as deposition sites.
                 continue;
             }
 
@@ -1078,13 +1064,14 @@ void erode_terrain(std::vector<double>& elevation,
             const double slope = std::max(
                 0.0, (elevation[i] - elevation[downstream]) / distance);
             const double stream_power =
-                std::pow(std::max(0.0, accumulation[i]), 0.55) *
+                std::pow(std::max(0.0, metrics.accumulation[i]), 0.55) *
                 std::pow(slope * 100.0, 0.65);
             const double incision = std::min(
                 0.0018, 0.000055 * stream_power);
             const double carried_sediment = sediment[i] + incision * 0.70;
 
-            // Transport sediment along the same acyclic route as runoff.
+            // Steeper reaches retain more transport capacity; flatter reaches
+            // deposit sediment, creating valley-floor and fan source material.
             const double deposition_fraction =
                 0.12 + 0.58 * (1.0 - smoothstep(0.006, 0.035, slope));
             const double deposited = carried_sediment * deposition_fraction;
@@ -1094,51 +1081,73 @@ void erode_terrain(std::vector<double>& elevation,
             sediment[downstream] += carried_sediment - deposited;
         }
         elevation.swap(next_elevation);
+    }
+}
 
-        // Thermal relaxation moves material only when a cardinal slope
-        // exceeds the talus threshold. Pairwise transfers are accumulated
-        // from the same snapshot to avoid directional scan-order artifacts.
-        for (int thermal = 0; thermal < thermal_iterations; ++thermal) {
-            std::fill(delta.begin(), delta.end(), 0.0);
-            for (std::size_t z = 0; z < height; ++z) {
-                for (std::size_t x = 0; x < width; ++x) {
-                    const std::size_t high = index(x, z);
-                    if (ocean[high]) continue;
-                    constexpr std::array<std::array<int, 2>, 2> edges{{
-                        {{1, 0}}, {{0, 1}}}};
-                    for (const auto& edge : edges) {
-                        const std::size_t nx = x + 1u == width && edge[0] != 0
-                            ? width : x + static_cast<std::size_t>(edge[0]);
-                        const std::size_t nz = z + 1u == height && edge[1] != 0
-                            ? height : z + static_cast<std::size_t>(edge[1]);
-                        if (nx >= width || nz >= height) continue;
-                        const std::size_t low = index(nx, nz);
-                        if (ocean[low]) continue;
-                        const double difference =
-                            elevation[high] - elevation[low];
-                        const double excess =
-                            std::abs(difference) - talus_threshold;
-                        if (excess <= 0.0) continue;
-                        const double transfer = excess * thermal_rate;
-                        if (difference > 0.0) {
-                            delta[high] -= transfer;
-                            delta[low] += transfer;
-                        } else {
-                            delta[high] += transfer;
-                            delta[low] -= transfer;
-                        }
+// Thermal erosion is an independent hillslope process. It does not use
+// discharge or drainage directions; symmetric pair transfers relax steep
+// slopes without changing the cause or routing of hydraulic erosion.
+void apply_thermal_erosion(std::vector<double>& elevation,
+                           const std::vector<bool>& ocean,
+                           std::size_t width, std::size_t height,
+                           double sea_level) {
+    const std::size_t count = elevation.size();
+    if (count == 0 || width == 0 || height == 0 ||
+        width > std::numeric_limits<std::size_t>::max() / height ||
+        count != width * height || ocean.size() != count) {
+        return;
+    }
+    const auto index = [width](std::size_t x, std::size_t z) {
+        return z * width + x;
+    };
+    const double land_floor = std::min(
+        1.0, sea_level + std::min(0.001, (1.0 - sea_level) * 0.25));
+    std::vector<double> next_elevation(count);
+    std::vector<double> delta(count);
+
+    constexpr int thermal_iterations = 8;
+    constexpr double talus_threshold = 0.014;
+    constexpr double thermal_rate = 0.10;
+    for (int iteration = 0; iteration < thermal_iterations; ++iteration) {
+        std::fill(delta.begin(), delta.end(), 0.0);
+        for (std::size_t z = 0; z < height; ++z) {
+            for (std::size_t x = 0; x < width; ++x) {
+                const std::size_t high = index(x, z);
+                if (ocean[high]) continue;
+                constexpr std::array<std::array<int, 2>, 2> edges{{
+                    {{1, 0}}, {{0, 1}}}};
+                for (const auto& edge : edges) {
+                    const std::size_t nx = x + 1u == width && edge[0] != 0
+                        ? width : x + static_cast<std::size_t>(edge[0]);
+                    const std::size_t nz = z + 1u == height && edge[1] != 0
+                        ? height : z + static_cast<std::size_t>(edge[1]);
+                    if (nx >= width || nz >= height) continue;
+                    const std::size_t low = index(nx, nz);
+                    if (ocean[low]) continue;
+                    const double difference =
+                        elevation[high] - elevation[low];
+                    const double excess =
+                        std::abs(difference) - talus_threshold;
+                    if (excess <= 0.0) continue;
+                    const double transfer = excess * thermal_rate;
+                    if (difference > 0.0) {
+                        delta[high] -= transfer;
+                        delta[low] += transfer;
+                    } else {
+                        delta[high] += transfer;
+                        delta[low] -= transfer;
                     }
                 }
             }
-            next_elevation = elevation;
-            for (std::size_t i = 0; i < count; ++i) {
-                if (!ocean[i]) {
-                    next_elevation[i] = std::clamp(
-                        elevation[i] + delta[i], land_floor, 1.0);
-                }
-            }
-            elevation.swap(next_elevation);
         }
+        next_elevation = elevation;
+        for (std::size_t i = 0; i < count; ++i) {
+            if (!ocean[i]) {
+                next_elevation[i] = std::clamp(
+                    elevation[i] + delta[i], land_floor, 1.0);
+            }
+        }
+        elevation.swap(next_elevation);
     }
 }
 
