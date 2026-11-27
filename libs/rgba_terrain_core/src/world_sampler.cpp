@@ -1083,7 +1083,8 @@ RgbaImage WorldSampler::generate_rgba_region(
     std::int64_t origin_x, std::int64_t origin_z,
     std::size_t width, std::size_t depth,
     const TerrainSettings& settings,
-    WorldClimateDiagnosticImages* climate_diagnostics) const {
+    WorldClimateDiagnosticImages* climate_diagnostics,
+    WorldHydrologyDiagnosticImages* hydrology_diagnostics) const {
     validate_terrain_settings(settings);
     if (origin_x < 0 || origin_z < 0 || width == 0 || depth == 0 ||
         width > std::numeric_limits<std::size_t>::max() / depth ||
