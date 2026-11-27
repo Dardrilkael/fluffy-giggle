@@ -174,7 +174,7 @@ int inspect_command(int argc, char** argv) {
     std::cout << "Terrain data-map inspection\n"
               << "  dimensions: " << analysis.width << "x" << analysis.depth
               << " (" << static_cast<std::uint64_t>(pixels) << " columns)\n"
-              << "  elevation: min=" << analysis.min_height
+              << "  encoded elevation (0..65535): min=" << analysis.min_height
               << " max=" << analysis.max_height
               << " distinct=" << analysis.distinct_heights
               << " mean=" << analysis.mean_height
