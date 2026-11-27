@@ -865,7 +865,8 @@ std::array<double, 3> river_radii(
     double threshold) {
     if (river.stream_order == 0u) return {0.0, 0.0, 0.0};
     const double runoff = runoff_factor(river.accumulation, threshold);
-    const double order = static_cast<double>(river.stream_order);
+    const double order = static_cast<double>(
+        std::min<std::uint8_t>(river.stream_order, 8u));
     const double channel = cell_scale *
         (0.22 + 0.15 * order + 0.12 * runoff);
     const double bank = channel * (1.9 + 0.22 * order);
@@ -1041,7 +1042,7 @@ void apply_fluvial_terrain_shaping(
                 (1.8 + 0.18 * static_cast<double>(river.stream_order));
             const double fan_d = fan_distance.distance[i];
             if (fan_d < fan_radius && fan_radius > 0.0) {
-                const std::size_t seed = fan_seeds[fan_source];
+                const std::size_t seed = fan_seed_cell;
                 const std::size_t seed_x = seed % width;
                 const std::size_t seed_z = seed / width;
                 const auto d = static_cast<std::uint8_t>(
