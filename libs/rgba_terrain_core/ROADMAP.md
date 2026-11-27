@@ -24,7 +24,7 @@ remain recorded for later reconsideration.
 - [x] Verify PNG dimensions and row-major X/Z coordinate preservation.
 - [x] Verify exact height decoding for supported channel layouts.
 - [x] Verify material, biome, water, density and feature metadata per column.
-- [ ] Verify voxel kind, material, biome and density for every voxel.
+- [x] Verify voxel kind, material, biome, density and feature flags for every voxel.
 - [x] Add versioned voxel-file read/write round-trip validation.
 - [x] Add a CLI validation command for PNG + metadata + voxel file.
 - [x] Add negative tests for malformed dimensions, truncated payloads, trailing data, invalid voxel kinds and field mismatches.
