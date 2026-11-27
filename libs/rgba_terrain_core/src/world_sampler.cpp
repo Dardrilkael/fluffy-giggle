@@ -1141,7 +1141,8 @@ WorldSample WorldSampler::sample(std::int64_t world_x,
 
 WorldSample WorldSampler::sample_impl(std::int64_t world_x,
                                       std::int64_t world_z,
-                                      bool include_local_hydrology) const {
+                                      bool include_local_hydrology,
+                                      double terrain_elevation_offset) const {
     if (world_x < 0 || world_x >= plan_.width ||
         world_z < 0 || world_z >= plan_.depth) {
         throw std::out_of_range("world sample coordinate is outside the finite world");
@@ -1154,8 +1155,10 @@ WorldSample WorldSampler::sample_impl(std::int64_t world_x,
     const double regional_elevation_bias = regions.weight_sum > 0.0
         ? (regions.elevation_sum / regions.weight_sum) * region_blend
         : 0.0;
-    const TerrainField terrain = evaluate_terrain(
+    TerrainField terrain = evaluate_terrain(
         plan_, x, z, regional_elevation_bias);
+    terrain.normalized_elevation = clamp01(
+        terrain.normalized_elevation + terrain_elevation_offset);
 
     const ClimateField climate = evaluate_climate(
         plan_, x, z, regions, terrain);
@@ -1378,10 +1381,16 @@ RgbaImage WorldSampler::generate_rgba_region(
 
     for (std::size_t z = 0; z < depth; ++z) {
         for (std::size_t x = 0; x < width; ++x) {
+            const auto world_x = origin_x + static_cast<std::int64_t>(x);
+            const auto world_z = origin_z + static_cast<std::int64_t>(z);
+            const double erosion_offset = hydrology_grid.valid
+                ? sample_elevation_offset(
+                    hydrology_grid.elevation_offsets,
+                    hydrology_grid.width, hydrology_grid.height,
+                    plan_.hydrology.routing_cell_scale, world_x, world_z)
+                : 0.0;
             WorldSample sample_at = sample_impl(
-                origin_x + static_cast<std::int64_t>(x),
-                origin_z + static_cast<std::int64_t>(z),
-                !hydrology_grid.valid);
+                world_x, world_z, !hydrology_grid.valid, erosion_offset);
             if (hydrology_grid.valid && !sample_at.is_ocean) {
                 const auto& hydro = hydrology_at(
                     hydrology_grid, plan_,
