@@ -1200,32 +1200,27 @@ std::vector<Sprite> Renderer2D::load_atlas(
         return sprites;
     }
 
-    // Load everything first (pure CPU), pack (which copies), then the stb
+    // Load everything first (pure CPU), pack (which copies), then the image
     // buffers can go. Each page uploads once, afterwards.
     std::vector<atlas::SourceImage> sources(count);
-    std::vector<stbi_uc*> stbi_pixels(count, nullptr);
+    std::vector<ws::image::Image> images;  // keep alive until packing done
+    images.reserve(count);
     std::size_t i = 0;
     for (const char* path : paths) {
-        int width = 0;
-        int height = 0;
-        stbi_pixels[i] =
-            stbi_load(path, &width, &height, nullptr, STBI_rgb_alpha);
-        if (stbi_pixels[i] != nullptr) {
-            sources[i] = {stbi_pixels[i], static_cast<std::uint32_t>(width),
-                          static_cast<std::uint32_t>(height)};
+        auto result = ws::image::load_rgba8_file(path);
+        if (result) {
+            images.push_back(std::move(*result));
+            sources[i] = {images.back().pixels.data(),
+                          images.back().width, images.back().height};
         } else {
             ws::core::warn("ui: r2d::load_atlas('{}') failed - {} (white "
                            "sprite)",
-                           path, stbi_failure_reason());
+                           path, result.error().message);
         }
         ++i;
     }
     atlas::Packing packed = atlas::pack(sources.data(), count);
-    for (stbi_uc* pixels : stbi_pixels) {
-        if (pixels != nullptr) {
-            stbi_image_free(pixels);
-        }
-    }
+    // images goes out of scope here, freeing the decoded pixels
 
     // A failed page upload degrades only its sprites, not the whole atlas.
     std::vector<std::uint32_t> page_ids(packed.pages.size(), 0);

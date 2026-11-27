@@ -27,7 +27,6 @@ enum class ErrorCode : std::int32_t {
     not_rgba = 5,
     unsupported_bit_depth = 6,
 };
-};
 
 // Tightly packed, interleaved, top-to-bottom pixels. channels is the decoded
 // output count; source_channels is what the file or memory encoded.
