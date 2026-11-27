@@ -29,10 +29,10 @@ remain recorded for later reconsideration.
 - [x] Add a CLI validation command for PNG + metadata + voxel file.
 - [x] Add negative tests for malformed dimensions, truncated payloads, trailing data, invalid voxel kinds and field mismatches.
 
-## 5. Voxel-game integration — PLANNED
-- [ ] Add an explicit adapter from generic material/biome IDs to game content.
-- [ ] Convert validated volumes into game chunk storage without renderer dependencies.
-- [ ] Compare with the existing procedural world and verify chunk-boundary continuity.
+## 5. Voxel-game integration — CURRENT
+- [x] Add an explicit adapter from generic material/biome IDs to game content.
+- [x] Convert validated volumes into game chunk storage without renderer dependencies.
+- [ ] Compare imported and procedural world behavior, verify chunk-boundary continuity and benchmark the larger 256x256 world.
 
 ## Design constraints
 - Deterministic for fixed inputs.
