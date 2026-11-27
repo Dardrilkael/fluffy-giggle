@@ -2189,10 +2189,9 @@ RgbaImage WorldSampler::generate_rgba_region(
                         ? hydro.lake_surface_elevation
                         : normalized_elevation;
 
-                    // Apply river channel cut (same as pixel packing code)
-                    const double channel_cut = hydro.river
-                        ? plan_.hydrology.river_channel_depth_fraction * hydro.river_strength
-                        : 0.0;
+                    // River channels are already carved into the baseline
+                    // fluvial elevation offset; do not apply a second cut.
+                    const double channel_cut = 0.0;
 
                     const double final_elevation = std::max(0.0, surface_elevation - channel_cut);
 
@@ -2433,7 +2432,14 @@ RgbaImage WorldSampler::generate_rgba_region(
         hydrology_diagnostics->drainage_direction.validate();
         hydrology_diagnostics->lake_depth.validate();
         hydrology_diagnostics->lake_basins.validate();
+        hydrology_diagnostics->stream_order.validate();
+        hydrology_diagnostics->watershed_basins.validate();
+        hydrology_diagnostics->river_influence.validate();
+        hydrology_diagnostics->mountain_peak_distance.validate();
         hydrology_diagnostics->erosion_delta.validate();
+        hydrology_diagnostics->hydraulic_erosion_delta.validate();
+        hydrology_diagnostics->thermal_erosion_delta.validate();
+        hydrology_diagnostics->fluvial_terrain_delta.validate();
     }
     return image;
 }
