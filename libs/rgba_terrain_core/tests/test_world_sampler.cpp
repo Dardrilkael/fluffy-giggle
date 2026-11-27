@@ -327,6 +327,25 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
     REQUIRE(erosion_diagnostics.drainage_direction.height == 96);
     std::size_t land_routing_cells = 0;
     std::size_t ocean_routing_cells = 0;
+    for (std::size_t z = 0; z < routing_height; ++z) {
+        for (std::size_t x = 0; x < routing_width; ++x) {
+            const std::size_t world_x =
+                x * routing_cell_scale + routing_cell_scale / 2;
+            const std::size_t world_z =
+                z * routing_cell_scale + routing_cell_scale / 2;
+            if (output_elevation(world_x, world_z) <=
+                eroded.plan().sea_level_fraction) {
+                ++ocean_routing_cells;
+            } else {
+                ++land_routing_cells;
+            }
+        }
+    }
+    CHECK(land_routing_cells > 0u);
+    const bool has_ocean_outlet = ocean_routing_cells > 0u;
+
+    std::size_t ocean_terminated_routes = 0;
+    std::size_t boundary_terminated_routes = 0;
     for (std::size_t start_z = 0; start_z < routing_height; ++start_z) {
         for (std::size_t start_x = 0; start_x < routing_width; ++start_x) {
             const std::size_t start_world_x =
@@ -335,10 +354,8 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
                 start_z * routing_cell_scale + routing_cell_scale / 2;
             if (output_elevation(start_world_x, start_world_z) <=
                 eroded.plan().sea_level_fraction) {
-                ++ocean_routing_cells;
                 continue;
             }
-            ++land_routing_cells;
 
             std::size_t current_x = start_x;
             std::size_t current_z = start_z;
@@ -356,7 +373,15 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
                     reached_ocean =
                         output_elevation(world_x, world_z) <=
                         eroded.plan().sea_level_fraction;
-                    route_valid = reached_ocean;
+                    const bool reached_boundary =
+                        current_x == 0 || current_z == 0 ||
+                        current_x + 1u == routing_width ||
+                        current_z + 1u == routing_height;
+                    route_valid = has_ocean_outlet
+                        ? reached_ocean : reached_boundary;
+                    ocean_terminated_routes += reached_ocean ? 1u : 0u;
+                    boundary_terminated_routes +=
+                        reached_boundary ? 1u : 0u;
                     break;
                 }
 
@@ -377,11 +402,14 @@ TEST_CASE("whole-world erosion changes terrain deterministically and preserves c
                 current_z = static_cast<std::size_t>(next_z);
             }
             CHECK(route_valid);
-            CHECK(reached_ocean);
+            CHECK(reached_ocean == has_ocean_outlet);
         }
     }
-    CHECK(land_routing_cells > 0u);
-    CHECK(ocean_routing_cells > 0u);
+    if (has_ocean_outlet) {
+        CHECK(ocean_terminated_routes == land_routing_cells);
+    } else {
+        CHECK(boundary_terminated_routes == land_routing_cells);
+    }
 
     std::size_t changed_heights = 0;
     for (std::size_t i = 0; i < terrain.pixels.size(); ++i) {
