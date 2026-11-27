@@ -9,6 +9,7 @@
 #include <limits>
 #include <new>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ws::rgba_terrain_core {
