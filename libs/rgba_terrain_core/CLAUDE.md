@@ -6,6 +6,7 @@ Reusable CPU-side terrain data-map and voxel reconstruction library.
 - Decode RGBA8 maps through ws::image.
 - Parse terrain metadata sidecars and preserve source pixel ordering.
 - Generate deterministic synthetic terrain data maps and inspect encoded fields.
+- Validate compact finite-world plans, sample ecological/climate fields at global coordinates, and export requested RGBA regions.
 - Decode pixels into X/Z terrain columns and expand them into dense voxel volumes.
 
 ## Boundaries
@@ -18,6 +19,8 @@ Reusable CPU-side terrain data-map and voxel reconstruction library.
 - Preserve image X/Z and row-major ordering.
 - Do not smooth, resample, gamma-correct or otherwise transform data-map channels.
 - Deterministic output for fixed seed, dimensions and settings.
+- World feature scales use absolute world units, independent of total world dimensions.
+- Chunk/region output samples global coordinates; independently generated neighboring regions must stitch exactly.
 - Avoid per-voxel heap allocations.
 
 ## Validation

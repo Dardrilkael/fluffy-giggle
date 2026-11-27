@@ -123,6 +123,26 @@ consumer. The PowerShell script configures the `rgba_terrain_core` subset
 and registered library tests, and does not compile or modify other applications.
 See HOW_TO_COMPILE.md for the manual CMake commands.
 
+## Plan-based finite-world sampling
+
+The reusable terrain core also exposes an early plan-based sampler API:
+`WorldPlan` describes finite world bounds, independent absolute scales for
+continents, provinces, major ecosystems, sub-biomes and local habitats, climate
+parameters, compact elliptical regional influences, and climate suitability
+rules for ecosystems and biomes.
+
+`WorldSampler` validates and owns a plan, then samples any global X/Z
+coordinate without allocating the full world. Its `generate_rgba_region`
+method emits only the requested rectangle, so a game can generate one chunk
+at a time. Adjacent regions use the same global coordinate fields and are
+covered by an exact pixel-stitching test.
+
+This is a deterministic procedural foundation, not an AI connection yet.
+A future planner can populate the same structures; world-plan serialization,
+AI integration, direct chunk voxel reconstruction and game streaming remain
+separate follow-up steps. The existing PNG channel layout and reconstruction
+functions are unchanged.
+
 ## Current limitations
 
 This is a controlled synthetic map generator, not the planned AI terrain
