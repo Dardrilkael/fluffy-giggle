@@ -101,9 +101,22 @@ voxel file.
 
 ## What to check
 
-The inspect report includes elevation variation and coverage for water,
-forest, mountains, rivers and lakes. validate should report an exact match
-between the saved voxel file and reconstruction from the PNG and metadata.
+The inspect report includes elevation/slope histograms, slope percentiles,
+coordinates for the largest neighbor steps and steepest sample, feature
+coverage, and 8-connected component sizes for water, biomes and features.
+`validate` should report an exact match between the saved voxel file and
+reconstruction from the PNG and metadata.
+
+To regenerate the nine map-layer previews from an existing PNG and metadata:
+
+~~~powershell
+rgba_terrain_poc diagnose terrain.png terrain.rgba-terrain terrain_diagnostics
+~~~
+
+The climate previews require the WorldSampler pass and are written
+automatically by `generate-world`; they cannot be reconstructed from the
+RGBA data map alone because temperature, moisture and atmospheric diagnostics
+are deliberately not packed into its four channels.
 
 The PNG is a data map, not a colorized preview: do not edit it in an image
 editor that may quantize, blend, or color-correct its RGBA values.
