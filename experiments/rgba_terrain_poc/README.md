@@ -1,6 +1,6 @@
 # RGBA Terrain Generator POC
 
-This standalone C++20 experiment generates deterministic RGBA terrain data maps,
+This C++20 experiment exercises the reusable `ws::rgba_terrain_core` library, which generates deterministic RGBA terrain data maps,
 writes them as lossless PNGs, reloads those PNGs, and expands the exact decoded
 pixels into a dense 3D voxel volume. It does not invoke or modify the game app.
 
@@ -87,14 +87,16 @@ For 16-bit height, pack the high and low bytes into separate RGBA channels.
 
 ## Build and tests
 
-The PowerShell script configures a subset build containing the core and
-shared image library, disables applications, builds this experiment, and runs
-the image and terrain tests. It does not compile or modify other applications.
+The implementation lives in `libs/rgba_terrain_core` and is registered as
+`ws::rgba_terrain_core`. The experiment executable is a thin `ws_add_app`
+consumer. The PowerShell script configures the `rgba_terrain_core` subset
+(which transitively includes `ws::core` and `ws::image`), builds the executable
+and registered library tests, and does not compile or modify other applications.
 See HOW_TO_COMPILE.md for the manual CMake commands.
 
 ## Current limitations
 
 This is a controlled synthetic map generator, not the planned AI terrain
 generator. Caves, ores, vegetation, erosion, drainage simulation, chunk
-conversion, and meshing are not implemented in this stage. The inspection command is the first validation step; visual debugging views
-and more rigorous spatial-frequency/feature-connectivity metrics remain future work.
+conversion, and meshing are not implemented in this stage. See `../../libs/rgba_terrain_core/ROADMAP.md` for the current milestone, skipped
+steps and planned voxel-game integration.
