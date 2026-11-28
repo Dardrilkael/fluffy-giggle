@@ -31,7 +31,7 @@ This branch now adds precipitation-derived runoff (rain plus temperature-depende
    ctest --test-dir build/debug -R "whole-world erosion changes terrain" --output-on-failure
    ```
 4. Run the full 256x256 terrain generation test. It should emit the terrain map plus 20 diagnostic PNGs under the test's `terrain_output` directory.
-5. Inspect these images:
+5. Inspect the core-test images below `terrain_output/`:
    - `terrain.png`
    - `drainage-direction.png`
    - `flow-accumulation.png`
@@ -45,7 +45,13 @@ This branch now adds precipitation-derived runoff (rain plus temperature-depende
    - `thermal-erosion-delta.png`
    - `fluvial-terrain-delta.png`
    - Also inspect existing precipitation, lake and river-strength layers.
-6. Confirm visually and numerically:
+6. Also build and launch `voxel_game`, generate/regenerate a world from the title screen, and verify that `worlds/generated-world/diagnostics/` contains all 20 expected PNGs:
+   - climate: `temperature.png`, `humidity.png`, `precipitation.png`, `orographic-lift.png`, `rain-shadow.png`, `ocean-moisture.png`;
+   - drainage/lakes: `flow-accumulation.png`, `drainage-direction.png`, `watershed-basins.png`, `lake-depth.png`, `lake-basins.png`;
+   - rivers: `river-strength.png`, `stream-order.png`, `river-class.png`, `river-influence.png`;
+   - geology/terrain change: `mountain-peak-distance.png`, `erosion-delta.png`, `hydraulic-erosion-delta.png`, `thermal-erosion-delta.png`, `fluvial-terrain-delta.png`.
+   Confirm that these images are written alongside the unchanged RGBA v2 terrain PNG and metadata. They are diagnostics only and must not become inputs to terrain loading.
+7. Confirm visually and numerically:
    - land routing cells have watershed IDs and routes terminate at valid outlets without cycles;
    - precipitation-derived flow accumulation is lower in dry catchments than comparable wet catchments; do not infer discharge from basin area alone;
    - Strahler order begins at 1, increases only when at least two tributaries of the same maximum order merge, and otherwise retains the highest incoming order;
@@ -55,13 +61,13 @@ This branch now adds precipitation-derived runoff (rain plus temperature-depende
    - thermal and hydraulic deltas are distinct, deterministic and non-zero where expected;
    - all ocean pixels remain unchanged by hydraulic, thermal and fluvial shaping;
    - all 14 hydrology diagnostic images stitch identically across split-region generation.
-7. Run voxel terrain import tests if core tests pass:
+8. Run voxel terrain import tests if core tests pass:
    ```powershell
    cmake --preset vs-debug
    cmake --build build/vs-debug --config Debug --target voxel_game test_voxel_terrain_import
    ctest --test-dir build/vs-debug -C Debug -R "^voxel_terrain_import$" --output-on-failure
    ```
-8. If Debug-only failures persist, repeat the core test binary in Release and distinguish known pre-existing failures from regressions introduced by this work.
+9. If Debug-only failures persist, repeat the core test binary in Release and distinguish known pre-existing failures from regressions introduced by this work.
 
 ## Constraints
 
