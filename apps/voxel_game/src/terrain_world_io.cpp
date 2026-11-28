@@ -120,6 +120,22 @@ void generate_png_map(const MapFiles& files, std::uint32_t seed) {
                          hydrology_diagnostics.lake_depth);
     write_diagnostic_png(files.diagnostics_directory / "lake-basins.png",
                          hydrology_diagnostics.lake_basins);
+    write_diagnostic_png(files.diagnostics_directory / "stream-order.png",
+                         hydrology_diagnostics.stream_order);
+    write_diagnostic_png(files.diagnostics_directory / "river-class.png",
+                         hydrology_diagnostics.river_class);
+    write_diagnostic_png(files.diagnostics_directory / "watershed-basins.png",
+                         hydrology_diagnostics.watershed_basins);
+    write_diagnostic_png(files.diagnostics_directory / "river-influence.png",
+                         hydrology_diagnostics.river_influence);
+    write_diagnostic_png(files.diagnostics_directory / "mountain-peak-distance.png",
+                         hydrology_diagnostics.mountain_peak_distance);
+    write_diagnostic_png(files.diagnostics_directory / "hydraulic-erosion-delta.png",
+                         hydrology_diagnostics.hydraulic_erosion_delta);
+    write_diagnostic_png(files.diagnostics_directory / "thermal-erosion-delta.png",
+                         hydrology_diagnostics.thermal_erosion_delta);
+    write_diagnostic_png(files.diagnostics_directory / "fluvial-terrain-delta.png",
+                         hydrology_diagnostics.fluvial_terrain_delta);
     write_diagnostic_png(files.diagnostics_directory / "erosion-delta.png",
                          hydrology_diagnostics.erosion_delta);
   }
